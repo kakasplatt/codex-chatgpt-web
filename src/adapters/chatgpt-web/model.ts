@@ -22,6 +22,13 @@ export interface ChatGptWebModelMode {
   localTools: boolean;
 }
 
+export function resolveChatGptSmokeTestMode(
+  capabilities: ChatGptWebCapabilities,
+): ChatGptWebModelMode {
+  const modelId = capabilities.solAvailable ? CHATGPT_WEB_MODEL_ID : CHATGPT_WEB_LUNA_MODEL_ID;
+  return resolveChatGptWebModelMode(modelId, "low", capabilities);
+}
+
 export function resolveChatGptWebModelMode(
   modelId: string,
   reasoning: string | undefined,
