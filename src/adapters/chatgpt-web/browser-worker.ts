@@ -27,6 +27,7 @@ import {
 import {
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
+  resolveChatGptSmokeTestMode,
   resolveChatGptWebModelMode,
   type ChatGptWebCapabilities,
   type ChatGptWebModelMode,
@@ -3945,9 +3946,8 @@ export class ChatGptBrowserWorker {
     // Core smoke runs before the optional MCP connector is configured, so it must remain a
     // browser-only transport check. Connector setup has its own explicit verification operation.
     const capabilities: ChatGptWebCapabilities = { ...account, localToolsEnabled: false };
-    const modelId = account.solAvailable ? CHATGPT_WEB_MODEL_ID : CHATGPT_WEB_LUNA_MODEL_ID;
-    const reasoning = account.solAvailable ? "high" : "low";
-    const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+    const mode = resolveChatGptSmokeTestMode(capabilities);
+    const { modelId, effort: reasoning } = mode;
     const traceId = `smoke_${randomUUID().replaceAll("-", "")}`;
     const response = await this.runBrowserTurn({
       traceId,
