@@ -1,5 +1,28 @@
 import { expect, test } from "bun:test";
-import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
+import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptSmokeTestMode, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
+
+test("browser smoke test uses Instant for Sol accounts and Luna for Luna-only accounts", () => {
+  expect(resolveChatGptSmokeTestMode({
+    localToolsEnabled: false,
+    solAvailable: true,
+    extraHighAvailable: true,
+    proAvailable: true,
+  })).toMatchObject({
+    modelId: CHATGPT_WEB_MODEL_ID,
+    effort: "low",
+    displayLabel: "Instant",
+  });
+  expect(resolveChatGptSmokeTestMode({
+    localToolsEnabled: false,
+    solAvailable: false,
+    extraHighAvailable: false,
+    proAvailable: false,
+  })).toMatchObject({
+    modelId: CHATGPT_WEB_LUNA_MODEL_ID,
+    effort: "low",
+    displayLabel: "Luna",
+  });
+});
 
 test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
   const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
