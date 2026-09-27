@@ -226,7 +226,7 @@ test("active compaction delivers the current result and converts every later MCP
     broker.completeTool(token, request!.callId, {
       content: [{ type: "text", text: "current result" }],
     });
-    await expect(current).resolves.toMatchObject({
+    expect(await current).toMatchObject({
       content: [{ type: "text", text: "current result" }],
     });
     await expect(callTurnBroker(broker.socketPath, {
@@ -275,7 +275,7 @@ test("active compaction drains an MCP call already queued without an outer Codex
       isError: true,
     });
     expect(interrupted).toBe(1);
-    await expect(invocation).resolves.toMatchObject({
+    expect(await invocation).toMatchObject({
       content: [{ type: "text", text: "compact instead" }],
       isError: true,
     });
@@ -954,7 +954,7 @@ test("active compaction interrupts a queued MCP call that Codex never started wa
       cancel() {},
     });
 
-    await expect(settleActiveCompactionSource(request(true), source, broker)).resolves.toEqual({
+    expect(await settleActiveCompactionSource(request(true), source, broker)).toEqual({
       answer: "Stopped for the retained compaction handoff",
       compactionInstructionDelivered: true,
     });
