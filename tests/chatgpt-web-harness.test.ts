@@ -2207,10 +2207,12 @@ describe("ChatGPT outer-native harness v4", () => {
       wireName: "exec_command",
       freeform: false,
       arguments: { cmd: "sleep 30" },
-    }, 10_000);
+    }, 10_000).catch(error => error);
     await broker.nextToolBatch(token);
     broker.revoke(token);
-    await expect(invocation).rejects.toThrow("revoked");
+    const outcome = await invocation;
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toContain("revoked");
     await expect(callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId }))
       .rejects.toThrow("has already finished");
     await broker.close();
