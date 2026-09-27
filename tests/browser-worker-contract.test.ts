@@ -3407,6 +3407,32 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
   expect(fixture.pressed).toEqual([]);
 });
 
+test("user prompt or assistant message text mentioning Something went wrong does not trigger terminal error alert", async () => {
+  const messageText = "I found the bug: Something went wrong. If this issue persists please contact us through our help center at help.openai.com.";
+  const turnScope = {
+    locator: (_selector: string) => ({
+      filter: () => ({
+        last: () => ({ isVisible: async () => false }),
+        isVisible: async () => false,
+      }),
+      last: () => ({ isVisible: async () => false }),
+      isVisible: async () => false,
+    }),
+    getByText: (pattern: string | RegExp) => ({
+      last: () => ({
+        isVisible: async () => typeof pattern === "string" ? messageText.includes(pattern) : pattern.test(messageText),
+      }),
+      isVisible: async () => typeof pattern === "string" ? messageText.includes(pattern) : pattern.test(messageText),
+    }),
+    getByTestId: (_testId: string) => ({
+      last: () => ({ isVisible: async () => false }),
+      isVisible: async () => false,
+    }),
+  };
+
+  await throwIfChatGptTerminalErrorAlert(turnScope as any);
+});
+
 function toolConfirmationPage(options: {
   disappearAfterReads?: number;
   surface?: "dialog" | "card";
@@ -4368,7 +4394,7 @@ test("the daemon prefers the browser helper that shipped beside its own entrypoi
 test("multipart observation surfaces Stopped thinking on its first observation even with live MCP work", async () => {
   const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
   const page = { isClosed: () => false, locator: () => absent };
-  const binding = { locator: { getByText: () => absent, getByTestId: () => absent } };
+  const binding = { locator: { locator: () => absent, getByText: () => absent, getByTestId: () => absent } };
   const snapshot = { responsePresent: true, stoppedThinkingVisible: true, visibleText: "", completionActionVisible: false };
   let observations = 0;
   let acknowledged = false;
