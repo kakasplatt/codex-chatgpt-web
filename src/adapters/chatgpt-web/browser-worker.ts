@@ -1076,6 +1076,15 @@ export function assertChatGptWebMultipartInputWithinLimits(
 }
 
 /** Select the cheapest account-visible mode at the requested floor that can carry every inert multipart stage. */
+function chatGptWebMultipartStagingEfforts(
+  capabilities: ChatGptWebCapabilities,
+  requestedEffort: ChatGptWebModelMode["effort"],
+): readonly ChatGptWebModelMode["effort"][] {
+  return requestedEffort === "low"
+    ? capabilities.proAvailable ? ["low", "medium", "max"] : ["low", "medium"]
+    : capabilities.proAvailable ? ["medium", "max"] : ["medium"];
+}
+
 export function resolveChatGptWebMultipartStagingMode(
   modelId: string,
   capabilities: ChatGptWebCapabilities,
@@ -1092,9 +1101,7 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
-  const efforts: readonly ChatGptWebModelMode["effort"][] = requestedEffort === "low"
-    ? capabilities.proAvailable ? ["low", "medium", "max"] : ["low", "medium"]
-    : capabilities.proAvailable ? ["medium", "max"] : ["medium"];
+  const efforts = chatGptWebMultipartStagingEfforts(capabilities, requestedEffort);
   for (const effort of efforts) {
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
     const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
@@ -4939,6 +4946,7 @@ export class ChatGptBrowserWorker {
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
+      const stagingEfforts = chatGptWebMultipartStagingEfforts(browserCapabilities, requestedMode.effort);
       let stagingEffort = stagingMode.effort;
       const selectStagingMode = () => (
         this.selectModelAndEffort(
@@ -5082,16 +5090,23 @@ export class ChatGptBrowserWorker {
               if (stageRejection) throw stageRejection;
               break;
             } catch (error) {
-              const stageRejection = sendActivated ? await submissionRejection.failure() : undefined;
+              const preserveCancellation = (error instanceof DOMException && error.name === "AbortError")
+                || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled");
+              const stageRejection = !preserveCancellation && sendActivated
+                ? await submissionRejection.failure()
+                : undefined;
               const failure = stageRejection ?? error;
-              if (attempt === 0 && stagingEffort === "low"
+              const stagingEffortIndex = stagingEfforts.indexOf(stagingEffort);
+              const nextStagingEffort = stagingEffortIndex >= 0 ? stagingEfforts[stagingEffortIndex + 1] : undefined;
+              if (nextStagingEffort
                 && failure instanceof ChatGptWebAdapterError
                 && failure.code === "chatgpt_message_length_exceeds_limit") {
-                stagingEffort = "medium";
+                const rejectedEffort = stagingEffort;
+                stagingEffort = nextStagingEffort;
                 submissionRejection.reset();
                 console.warn(
                   `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length}`
-                  + " was rejected by ChatGPT in low effort; retrying this part once in medium",
+                  + ` was rejected by ChatGPT in ${rejectedEffort} effort; retrying this part in ${nextStagingEffort}`,
                 );
                 continue;
               }

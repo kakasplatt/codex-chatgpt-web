@@ -1667,6 +1667,27 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(contextWindow.error.message).toContain("/compact");
   });
 
+  test("normalizes the private ChatGPT message-length sentinel at the Responses boundary", () => {
+    const response = buildResponseJSON([{
+      type: "error",
+      message: "ChatGPT rejected this message because it exceeds the selected mode's input-size limit.",
+      status: 400,
+      errorType: "invalid_request_error",
+      code: "chatgpt_message_length_exceeds_limit",
+      retryable: false,
+    }], CHATGPT_WEB_MODEL_ID) as {
+      status: string;
+      error: { type: string; code: string };
+      last_error: { type: string; code: string };
+    };
+
+    expect(response).toMatchObject({
+      status: "failed",
+      error: { type: "invalid_request_error", code: "context_length_exceeded" },
+      last_error: { type: "invalid_request_error", code: "context_length_exceeded" },
+    });
+  });
+
   test("returns one native compaction item with preserved estimated usage", () => {
     const request = parsed();
     const summary = "Completed the tool loop; continue with the deployment check.";
