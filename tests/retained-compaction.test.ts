@@ -889,7 +889,7 @@ test("active compaction interrupts a queued MCP call that Codex never started wa
       cancel() {},
     });
 
-    await expect(settleActiveCompactionSource(request(true), source, broker)).resolves.toEqual({
+    expect(await settleActiveCompactionSource(request(true), source, broker)).toEqual({
       answer: "Stopped for the retained compaction handoff",
       compactionInstructionDelivered: true,
     });

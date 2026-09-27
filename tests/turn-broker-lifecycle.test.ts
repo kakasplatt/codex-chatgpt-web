@@ -349,7 +349,7 @@ test("bounded broker calls preserve server-owned closure before advancing the li
     await Bun.sleep(25);
     expect(settled).toBeFalse();
     peer.end();
-    await expect(call).resolves.toEqual({ ready: true });
+    expect(await call).toEqual({ ready: true });
   } finally {
     peer?.destroy();
     await broker.close();
