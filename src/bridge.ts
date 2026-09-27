@@ -51,7 +51,11 @@ function adapterFailureFromEvent(event: Extract<AdapterEvent, { type: "error" }>
   const httpStatus = event.status ?? fallback.httpStatus;
   const error = classifyError(httpStatus, event.errorType ?? fallback.error.type, event.message);
   if (event.errorType !== undefined) error.type = event.errorType;
-  if (event.code !== undefined) error.code = event.code;
+  if (event.code !== undefined) {
+    error.code = event.code === "chatgpt_message_length_exceeds_limit"
+      ? "context_length_exceeded"
+      : event.code;
+  }
   return { httpStatus, error };
 }
 

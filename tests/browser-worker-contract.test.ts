@@ -7,7 +7,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { chatGptBrowserTabClosedError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -1011,6 +1011,136 @@ test("Bigger Context propagates a second size rejection after the one medium ret
     }, undefined, page)).rejects.toMatchObject({ code: "chatgpt_message_length_exceeds_limit" });
     expect(sends).toBe(2);
     expect(selections).toEqual(["low", "medium"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Bigger Context promotes a rejected medium staging part to max when Pro is available", async () => {
+  const root = mkdtempSync(join(tmpdir(), "adaptive-multipart-pro-promotion-"));
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const prepared = {
+    text: "unused multipart source", images: [], release() {},
+    multipart: {
+      parts: [
+        JSON.stringify({ version: 1, part_index: 1, total_parts: 2, records: [] }),
+        JSON.stringify({ version: 1, part_index: 2, total_parts: 2, records: [] }),
+      ] as [string, string],
+      commit: "Return exactly OK.",
+    },
+  };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web", baseUrl: `browser://${root}`, chatgptWeb: { browserDiagnosticsPath: root },
+  });
+  const frame = {};
+  const page = Object.assign(new EventEmitter(), {
+    url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
+    evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+  });
+  const selections: string[] = [];
+  let sends = 0;
+  let rejectedAttempt = false;
+  const finished = new Error("final send reached after Pro staging promotion");
+  const rejectCurrentSubmission = () => {
+    const request = {
+      method: () => "POST", url: () => "https://chatgpt.com/backend-api/f/conversation", frame: () => frame,
+    };
+    page.emit("request", request);
+    page.emit("response", {
+      request: () => request, status: () => 413, headers: () => ({ "content-type": "application/json" }),
+      json: async () => ({ detail: { code: "message_length_exceeds_limit" } }),
+    });
+    rejectedAttempt = true;
+  };
+  Object.assign(worker, {
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async (_page: unknown, _modelId: string, effort: string) => {
+      selections.push(effort);
+      return { modelId: CHATGPT_WEB_MODEL_ID, effort, localTools: false, thinkEnabled: false };
+    },
+    captureSubmissionBaseline: async () => ({}), attachPrompt: async () => {},
+    attachPromptWithCompactionRetry: async () => {}, attachFiles: async () => {},
+    waitForNewAssistantTurn: async () => {
+      if (rejectedAttempt) {
+        rejectedAttempt = false;
+        throw new Error("no acknowledgement after rejected submission");
+      }
+      return {};
+    },
+    waitForMultipartAcknowledgement: async () => {},
+    sendAttachedPrompt: async (_page: unknown, _baseline: unknown, _capture: unknown, _signal: unknown,
+      _progress: unknown, lifecycle: { onSendActivated(): Promise<void> }) => {
+      await lifecycle.onSendActivated();
+      sends += 1;
+      if (sends === 1) rejectCurrentSubmission();
+      if (sends === 3) throw finished;
+      return "user_turn";
+    },
+  });
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "adaptive_multipart_pro_promotion", modelId: CHATGPT_WEB_MODEL_ID, modelFamily: "5.6",
+      reasoning: "max", capabilities, prepare: async () => prepared, onTextDelta() {}, onReasoningSummary() {},
+    }, undefined, page)).rejects.toBe(finished);
+    expect(sends).toBe(3);
+    expect(selections).toEqual(["medium", "max"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Bigger Context does not retry a size rejection after the browser turn is cancelled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "adaptive-multipart-cancelled-"));
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+  const prepared = {
+    text: "unused multipart source", images: [], release() {},
+    multipart: {
+      parts: [
+        JSON.stringify({ version: 1, part_index: 1, total_parts: 2, records: [] }),
+        JSON.stringify({ version: 1, part_index: 2, total_parts: 2, records: [] }),
+      ] as [string, string],
+      commit: "Return exactly OK.",
+    },
+  };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web", baseUrl: `browser://${root}`, chatgptWeb: { browserDiagnosticsPath: root },
+  });
+  const frame = {};
+  const page = Object.assign(new EventEmitter(), {
+    url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
+    evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+  });
+  const selections: string[] = [];
+  let sends = 0;
+  Object.assign(worker, {
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async (_page: unknown, _modelId: string, effort: string) => {
+      selections.push(effort);
+      return { modelId: CHATGPT_WEB_MODEL_ID, effort, localTools: false, thinkEnabled: false };
+    },
+    captureSubmissionBaseline: async () => ({}), attachPrompt: async () => {},
+    waitForNewAssistantTurn: async () => { throw chatGptBrowserTabClosedError(); },
+    waitForMultipartAcknowledgement: async () => {},
+    sendAttachedPrompt: async (_page: unknown, _baseline: unknown, _capture: unknown, _signal: unknown,
+      _progress: unknown, lifecycle: { onSendActivated(): Promise<void> }) => {
+      await lifecycle.onSendActivated();
+      sends += 1;
+      if (sends === 1) {
+        const request = {
+          method: () => "POST", url: () => "https://chatgpt.com/backend-api/f/conversation", frame: () => frame,
+        };
+        page.emit("request", request);
+        page.emit("response", {
+          request: () => request, status: () => 413, headers: () => ({ "content-type": "application/json" }),
+          json: async () => ({ detail: { code: "message_length_exceeds_limit" } }),
+        });
+      }
+      return "user_turn";
+    },
+  });
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "adaptive_multipart_cancelled", modelId: CHATGPT_WEB_MODEL_ID, reasoning: "low", capabilities,
+      prepare: async () => prepared, onTextDelta() {}, onReasoningSummary() {},
+    }, undefined, page)).rejects.toMatchObject({ code: "client_cancelled" });
+    expect(sends).toBe(1);
+    expect(selections).toEqual(["low"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
