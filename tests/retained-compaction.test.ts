@@ -754,6 +754,71 @@ test("active compaction distinguishes a later intercepted tool from an ordinary 
   });
 });
 
+test("active compaction settles when a post-compaction MCP call is intercepted even if the browser never finishes", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compaction-boundary-"));
+  const broker = TurnBroker.forSocket(defaultBrokerEndpoint(root));
+  const controller = new AbortController();
+  let settlePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { settlePhysical = resolve; });
+  let cancellationReason: Error | undefined;
+  const deadline = setTimeout(
+    () => controller.abort(new Error("regression deadline expired before compaction boundary settled")),
+    250,
+  );
+  try {
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [{
+        name: "exec_command",
+        description: "Run one command",
+        parameters: { type: "object" },
+      }],
+    }, 10_000, "trace_compaction_boundary");
+    const claimed = await callTurnBroker<{ bindingId: string }>(broker.socketPath, {
+      method: "claim",
+      token,
+    });
+    const browser = new Promise<string>(() => {});
+    const source = new ChatGptTurnSession({
+      mode: "tools",
+      token: Promise.resolve(token),
+      externalProgress: { recordToolResult() {} } as never,
+      browser,
+      physicalSettlement,
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: reason => {
+        cancellationReason = reason;
+        settlePhysical();
+      },
+    });
+
+    const settlement = settleActiveCompactionSource(request(true), source, broker, controller.signal);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const intercepted = await callTurnBroker<BrokerToolResult>(broker.socketPath, {
+      method: "invoke",
+      bindingId: claimed.bindingId,
+      wireName: "exec_command",
+      freeform: false,
+      arguments: { cmd: "must-not-run" },
+    });
+
+    expect(JSON.stringify(intercepted.content)).toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);
+    await expect(settlement).resolves.toEqual({
+      answer: "",
+      compactionInstructionDelivered: true,
+    });
+    expect(cancellationReason).toBeInstanceOf(ChatGptCompactionHandoffAccepted);
+  } finally {
+    clearTimeout(deadline);
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("active compaction waits for an ordinary response with no available tool boundary", async () => {
   const browser = Promise.resolve("The ordinary response reached its terminal boundary.");
   let requested = 0;

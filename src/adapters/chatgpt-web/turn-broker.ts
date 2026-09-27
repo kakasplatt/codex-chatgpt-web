@@ -73,6 +73,7 @@ interface TurnChannel {
   compactionRequested: boolean;
   compactionResult?: BrokerToolResult;
   compactionDeliveryCount: number;
+  compactionDeliveryWaiters: Set<SafeWaiter<void>>;
   safe?: SafeTurnControl;
   /** Every MCP request owns a lease from token claim until its handler has settled. */
   activities: Set<string>;
@@ -303,6 +304,7 @@ export class TurnBroker implements TurnBrokerOwner {
       waiters: new Set(),
       compactionRequested: false,
       compactionDeliveryCount: 0,
+      compactionDeliveryWaiters: new Set(),
       activities: new Set(),
       completedActivities: new Set(),
       activityRevision: 0,
@@ -494,7 +496,7 @@ export class TurnBroker implements TurnBrokerOwner {
       const invocation = channel.invocations.get(callId);
       if (!invocation) continue;
       channel.invocations.delete(callId);
-      channel.compactionDeliveryCount += 1;
+      this.recordCompactionDelivery(channel);
       invocation.resolve(structuredClone(queuedResult));
     }
     if (queued.length > 0) {
@@ -509,6 +511,18 @@ export class TurnBroker implements TurnBrokerOwner {
     const channel = this.channels.get(token);
     if (!channel) throw new Error("Cannot read compaction delivery after the turn capability retired");
     return channel.compactionDeliveryCount;
+  }
+
+  waitForCompactionDelivery(token: string, signal?: AbortSignal): Promise<void> {
+    this.prune();
+    const channel = this.channels.get(token);
+    if (!channel) return Promise.reject(new Error("turn token is invalid or expired"));
+    if (channel.compactionDeliveryCount > 0) return Promise.resolve();
+    return this.waitForSafeState(
+      channel.compactionDeliveryWaiters,
+      signal,
+      "compaction delivery wait aborted",
+    );
   }
 
   startSafeTurn(requestId: string): { started: true; duplicate: boolean } {
@@ -1130,7 +1144,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;
       if (!result) throw new Error("Codex context compaction control result is unavailable");
-      binding.channel.compactionDeliveryCount += 1;
+      this.recordCompactionDelivery(binding.channel);
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} intercepted a post-compaction MCP call`,
       );
@@ -1162,6 +1176,11 @@ export class TurnBroker implements TurnBrokerOwner {
       if (channel.invocations.has(id)) channel.deliveredCallIds.add(id);
     }
     return ids.map(id => channel.invocations.get(id)?.request).filter((request): request is BrokerToolRequest => Boolean(request));
+  }
+
+  private recordCompactionDelivery(channel: TurnChannel): void {
+    channel.compactionDeliveryCount += 1;
+    this.resolveSafeWaiters(channel.compactionDeliveryWaiters, undefined);
   }
 
   private logToolDelivery(channel: TurnChannel, batch: BrokerToolRequest[], path: "immediate" | "waiter" | "replay"): void {
@@ -1206,6 +1225,7 @@ export class TurnBroker implements TurnBrokerOwner {
       waiter.reject(error);
     }
     channel.waiters.clear();
+    this.rejectSafeWaiters(channel.compactionDeliveryWaiters, error);
     for (const invocation of channel.invocations.values()) invocation.reject(error);
     channel.invocations.clear();
     channel.queuedCallIds = [];
