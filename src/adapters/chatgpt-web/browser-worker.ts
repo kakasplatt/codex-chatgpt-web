@@ -789,7 +789,7 @@ export async function dismissChatGptTemporaryChatOnboarding(page: Page): Promise
   return true;
 }
 
-type ChatGptTextScope = Pick<Locator, "getByText" | "getByTestId">;
+type ChatGptTextScope = Pick<Locator, "getByText" | "getByTestId"> & Partial<Pick<Locator, "locator">>;
 
 const chatGptSubscriptionFailureAlert = (page: Page): Locator => page
   .locator('[role="alert"]')
@@ -815,9 +815,17 @@ export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<voi
   );
 }
 
-const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
-  .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
-  .last();
+const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => {
+  if (typeof scope.locator === "function") {
+    return scope
+      .locator('[role="alert"], [role="dialog"]')
+      .filter({ hasText: /Something went wrong[\s\S]*help\.openai\.com/i })
+      .last();
+  }
+  return scope
+    .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
+    .last();
+};
 
 // The current UI renders message_length_exceeds_limit as an ordinary response error.
 // Observe only browser-issued submissions from this owned page after Send is activated;
