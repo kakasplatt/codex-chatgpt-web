@@ -4378,6 +4378,35 @@ test("a send timeout is retryable when the original prompt is still intact and n
   });
 });
 
+test("a send timeout after activation stays ambiguous even when no submission evidence exists", async () => {
+  const classifySendFailure = (ChatGptBrowserWorker.prototype as unknown as {
+    classifySendFailure(
+      error: unknown,
+      page: Page,
+      baseline: { submittedText?: string },
+      externalProgress?: { snapshot(): { revision: number } },
+      initialExternalProgressRevision?: number,
+      sendActivated?: boolean,
+    ): Promise<Error>;
+  }).classifySendFailure;
+  const page = { isClosed: () => false } as unknown as Page;
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+  }) as ChatGptBrowserWorker;
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+
+  expect(await classifySendFailure.call(
+    worker,
+    timeout,
+    page,
+    { submittedText: "original prompt" },
+    undefined,
+    undefined,
+    true,
+  )).toBe(timeout);
+});
+
 test("a send timeout stays ambiguous when the composer or submission state changed", async () => {
   const classifySendFailure = (ChatGptBrowserWorker.prototype as unknown as {
     classifySendFailure(

@@ -3697,9 +3697,11 @@ export class ChatGptBrowserWorker {
     baseline: ChatGptSubmissionBaseline,
     externalProgress?: ChatGptTurnProgressReader,
     initialExternalProgressRevision?: number,
+    sendActivated = false,
   ): Promise<Error> {
     const normalized = error instanceof Error ? error : new Error(String(error));
     if (normalized.message !== "ChatGPT browser stage timed out: send") return normalized;
+    if (sendActivated) return normalized;
     if (page.isClosed() || baseline.submittedText === undefined) return normalized;
     if (externalProgress && initialExternalProgressRevision === undefined) return normalized;
 
@@ -5216,6 +5218,7 @@ export class ChatGptBrowserWorker {
       const completionTracker = new ChatGptCompletionTracker();
       const recordFinalUsage = await usageSubmission();
       const initialSendProgressRevision = turn.externalProgress?.snapshot().revision;
+      let sendActivated = false;
       let finalSubmissionEvidence: ChatGptSubmissionEvidence;
       try {
         finalSubmissionEvidence = await this.runStage(
@@ -5237,6 +5240,7 @@ export class ChatGptBrowserWorker {
               await this.assertSelectedEffort(page, mode);
               submissionRejection.begin(page);
               await turn.onSendActivated?.();
+              sendActivated = true;
             } },
             completionTracker,
             launcherObservationRecovery
@@ -5255,6 +5259,7 @@ export class ChatGptBrowserWorker {
           submissionBaseline,
           turn.externalProgress,
           initialSendProgressRevision,
+          sendActivated,
         );
       }
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
