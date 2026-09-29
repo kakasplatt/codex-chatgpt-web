@@ -12,8 +12,17 @@ import { defaultConfig, saveConfig } from "../src/config";
 import { installCodexIntegration } from "../src/codex-integration";
 import { startServer } from "../src/server";
 
-const codex = resolve(process.argv[2] ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
-if (!existsSync(codex)) throw new Error(`Codex executable is missing: ${codex}`);
+const requestedCodex = process.argv[2];
+const codex = requestedCodex
+  ? resolve(requestedCodex)
+  : process.platform === "darwin"
+    ? "/Applications/ChatGPT.app/Contents/Resources/codex"
+    : process.platform === "win32"
+      ? "codex.exe"
+      : "codex";
+if ((requestedCodex || process.platform === "darwin") && !existsSync(codex)) {
+  throw new Error(`Codex executable is missing: ${codex}`);
+}
 
 const bundled = spawnSync(codex, ["debug", "models", "--bundled"], {
   encoding: "utf8",
