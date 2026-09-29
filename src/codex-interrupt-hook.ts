@@ -47,14 +47,29 @@ function powershellLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
+function windowsPowerShellExecutable(): string {
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
 function windowsInterruptHookCommand(args: string[]): string {
-  const script = `& ${args.map(powershellLiteral).join(" ")}\nexit $LASTEXITCODE\n`;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "try {",
+    `  & ${args.map(powershellLiteral).join(" ")}`,
+    "  if ($null -eq $LASTEXITCODE) { exit 1 }",
+    "  exit $LASTEXITCODE",
+    "} catch {",
+    "  exit 1",
+    "}",
+    "",
+  ].join("\n");
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   // Codex 0.158 and earlier hand command hooks to cmd.exe /C through the Windows argv encoder.
   // A command containing embedded quotes can therefore be re-escaped before cmd.exe parses it.
   // Keep the outer hook command quote-free and move all path quoting into an encoded PowerShell
   // payload. This also preserves paths with spaces and shell metacharacters.
-  return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
+  return `${windowsPowerShellExecutable()} -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
 }
 
 export function codexInterruptHookCommand(
