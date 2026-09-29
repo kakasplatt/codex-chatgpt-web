@@ -27,6 +27,7 @@ import {
 import {
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
+  resolveChatGptSmokeTestMode,
   resolveChatGptWebModelMode,
   type ChatGptWebCapabilities,
   type ChatGptWebModelMode,
@@ -1597,10 +1598,10 @@ export class ChatGptTurnDomHealthTracker {
     externalProgressLive?: boolean;
   }, now = Date.now()): string | undefined {
     if (state.responsePresent) this.sawResponse = true;
-    if (state.externalProgressLive) {
+    if (state.externalProgressLive || state.running) {
       // Every conclusion below asserts that ChatGPT stopped producing this turn. A tool call that
-      // is still completing disproves all of them, whatever the renderer is currently exposing, so
-      // no window may accrue while the model is provably working.
+      // is still completing or a visible Stop control disproves that, whatever response content
+      // the renderer currently exposes. Start a fresh grace period once generation stops.
       this.missingResponseSince = undefined;
       this.emptyCompletionSince = undefined;
       this.missingCompletionAction = undefined;
@@ -1986,12 +1987,17 @@ class ChatGptBrowserDiagnostics {
             effortItems: rows(effortItemSelector, 20),
             effortSliders: [...document.querySelectorAll(effortSliderContainerSelector)]
               .filter(rendered).slice(-10)
-              .flatMap(container => [...container.querySelectorAll('[role="slider"]')])
-              .map(element => ({
+              .flatMap(container => [...container.querySelectorAll('[role="slider"]')].map(element => ({
                 min: integerAttribute(element, "aria-valuemin"),
                 max: integerAttribute(element, "aria-valuemax"),
                 value: integerAttribute(element, "aria-valuenow"),
-              })),
+                power: container.hasAttribute("data-model-picker-power-slider"),
+                enabled: Boolean(container.querySelector('[data-orientation="horizontal"][aria-disabled="false"]')),
+                ticks: [...container.querySelectorAll("[data-selected]")].slice(0, 10).map(tick => ({
+                  locked: tick.getAttribute("data-locked") === "true" ? true
+                    : tick.getAttribute("data-locked") === "false" ? false : null,
+                })),
+              }))),
             menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
             connectorRows: exactConnectorRows.slice(-20).map(element => {
               const rect = element.getBoundingClientRect();
@@ -2539,7 +2545,7 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptRateLimitDialog(page);
     let activation = await activateChatGptEffortMenu(page, currentEffort);
     if (modelFamily) activation = await selectChatGptModelFamily(
-      page, activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
+      activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
     );
     if (activation.method === "pointerdown") {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
@@ -3171,10 +3177,9 @@ export class ChatGptBrowserWorker {
           // observed message-content target represents the submitted prompt.
           return contents.length === 1 && normalize(contents[0]!.innerText) === normalize(submitted);
         }, baseline.submittedText!), signal));
-        if (matches) {
-          const response = await this.responseDomSnapshot(locator, {});
-          matches = response.responsePresent && response.completionActionVisible;
-        }
+        // The accepted user identity (or exact submitted text) establishes ownership.
+        // Activity can replace its temporary group while still generating; requiring
+        // a completed answer here mistakes that same unfinished turn for a foreign one.
       }
       if (!matches) throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
     }
@@ -3404,8 +3409,16 @@ export class ChatGptBrowserWorker {
     try {
       composer = await this.activeComposer(page, 30_000, abortSignal);
       if (await this.connectorIsSelected(composer, abortSignal)) {
-        await capture("connector-already-selected");
-        return composer;
+        if ((await this.attachedPromptText(page, abortSignal)).length === 0) {
+          await capture("connector-already-selected");
+          return composer;
+        }
+        // A restored draft can include both the connector and an earlier request. Selecting
+        // that pill proves the connector, not an empty composer. Reset the owned draft before
+        // attaching this request so it cannot be appended to the previous one.
+        await this.clearChatGptComposerState(page);
+        throwIfPromptAttachmentAborted(abortSignal);
+        composer = await this.activeComposer(page, 30_000, abortSignal);
       }
       await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
 
@@ -3957,9 +3970,8 @@ export class ChatGptBrowserWorker {
     // Core smoke runs before the optional MCP connector is configured, so it must remain a
     // browser-only transport check. Connector setup has its own explicit verification operation.
     const capabilities: ChatGptWebCapabilities = { ...account, localToolsEnabled: false };
-    const modelId = account.solAvailable ? CHATGPT_WEB_MODEL_ID : CHATGPT_WEB_LUNA_MODEL_ID;
-    const reasoning = account.solAvailable ? "high" : "low";
-    const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+    const mode = resolveChatGptSmokeTestMode(capabilities);
+    const { modelId, effort: reasoning } = mode;
     const traceId = `smoke_${randomUUID().replaceAll("-", "")}`;
     const response = await this.runBrowserTurn({
       traceId,
@@ -4157,6 +4169,19 @@ export class ChatGptBrowserWorker {
       // CHATGPT_MARKDOWN_CONTENT_BEGIN
       const chatGptMarkdownContent = (markdownRoot: HTMLElement): HTMLElement => {
         const content = markdownRoot.cloneNode(true) as HTMLElement;
+        // Writing cards expose a copy-content boundary separate from their title,
+        // format picker and other changing controls. Keep only that owned content.
+        const writingCard = '[data-markdown-copy="rich-block"]';
+        const cards = [...(content.matches(writingCard) ? [content] : []),
+          ...Array.from(content.querySelectorAll<HTMLElement>(writingCard))];
+        for (const card of cards.reverse()) {
+          const bodies = Array.from(card.querySelectorAll('[data-markdown-copy-content="true"]'))
+            .filter(body => body.closest(writingCard) === card);
+          if (bodies.length !== 1) continue;
+          const children = Array.from(bodies[0]!.childNodes);
+          card.textContent = "";
+          for (const child of children) card.appendChild(child);
+        }
         // These are embedded renderers, not Markdown answer text. Their loading labels, controls
         // and plot axes change independently of generation (including after a later paragraph).
         // Keep their UI out of both the emitted HTML and the text consistency fingerprint.
