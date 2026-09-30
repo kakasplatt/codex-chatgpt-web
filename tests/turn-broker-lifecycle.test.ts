@@ -318,8 +318,14 @@ test("an unbounded broker call fails when the broker closes without answering", 
   const broker = unansweredBrokerEndpoint("cgw-broker-closed-", socket => socket.on("data", () => socket.end()));
   await broker.listen();
   try {
-    await expect(callTurnBroker(broker.socketPath, { method: "claim", token: "turn_closed" }, null))
-      .rejects.toThrow("closed the connection");
+    let failure: unknown;
+    try {
+      await callTurnBroker(broker.socketPath, { method: "claim", token: "turn_closed" }, null);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("ChatGPT web turn broker closed the connection");
   } finally {
     await broker.close();
   }
@@ -349,10 +355,59 @@ test("bounded broker calls preserve server-owned closure before advancing the li
     await Bun.sleep(25);
     expect(settled).toBeFalse();
     peer.end();
-    await expect(call).resolves.toEqual({ ready: true });
+    expect(await call).toEqual({ ready: true });
   } finally {
     peer?.destroy();
     await broker.close();
+  }
+});
+
+test("broker shutdown succeeds immediately after a bounded rejected claim", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-rejected-close-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    }, 10_000, "trace_rejected_close");
+    expect(broker.beginCompletionFence(token)).toBe(0);
+    const first = await callTurnBroker<{ bindingId: string; activityId: string }>(socketPath, {
+      method: "claim",
+      token,
+    });
+    expect(broker.beginCompletionFence(token)).toBeUndefined();
+    expect(broker.commitCompletionFence(token, 0)).toBeFalse();
+    await callTurnBroker(socketPath, {
+      method: "activity_complete",
+      token,
+      activityId: first.activityId,
+    });
+
+    const revision = broker.beginCompletionFence(token);
+    expect(revision).toBe(2);
+    const crossing = await callTurnBroker<{ bindingId: string; activityId: string }>(socketPath, {
+      method: "claim",
+      token,
+    });
+    await callTurnBroker(socketPath, {
+      method: "activity_complete",
+      token,
+      activityId: crossing.activityId,
+    });
+    expect(broker.commitCompletionFence(token, revision!)).toBeFalse();
+    const finalRevision = broker.beginCompletionFence(token);
+    expect(finalRevision).toBe(4);
+    expect(broker.commitCompletionFence(token, finalRevision!)).toBeTrue();
+
+    await expect(callTurnBroker(socketPath, { method: "claim", token }))
+      .rejects.toThrow("has already finished");
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

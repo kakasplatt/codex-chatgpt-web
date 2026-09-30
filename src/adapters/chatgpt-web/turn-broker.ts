@@ -1234,7 +1234,7 @@ export class TurnBrokerTimeoutError extends Error {
   }
 }
 
-export async function callTurnBroker<T>(
+export function callTurnBroker<T>(
   socketPath: string,
   request: Omit<BrokerRequest, "id">,
   timeoutMs: number | null = 5_000,
@@ -1272,6 +1272,7 @@ export async function callTurnBroker<T>(
       settled = true;
       clearTimeout(timer);
       cleanup();
+      socket.destroy();
       if (response.error) rejectCall(new Error(response.error));
       else resolveCall(response.result as T);
     };
@@ -1285,9 +1286,13 @@ export async function callTurnBroker<T>(
     }
     socket.setEncoding("utf8");
     socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
-    // The server owns response termination. Bounded calls wait for the pipe/socket to close
-    // before their callers can advance the lifecycle while Bun drains named-pipe writes.
+    // Resolving inside "end" can crash Bun 1.4 on Windows named pipes. Keep "close" as
+    // another settlement path and defer "end" handling so half-closed pipes still settle.
     socket.once("close", finishResponse);
+    socket.once("end", () => {
+      if (!socket.destroyed && !socket.writableEnded) socket.end();
+      setImmediate(finishResponse);
+    });
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...wireRequest })}\n`));
     socket.on("data", chunk => {
       if (settled || response) return;
