@@ -97,9 +97,9 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
     );
     expect(actions).toEqual([
       ...(multipart ? [
-        "effort:low",
+        "effort:medium",
         ...Array.from({ length: 5 }, (_, index) => [
-          ...(index > 0 ? ["effort:low"] : []), "attach:plain", "send", "observe", "ack",
+          ...(index > 0 ? ["effort:medium"] : []), "attach:plain", "send", "observe", "ack",
         ]).flat(),
       ] : []),
       `effort:${effort}`,
