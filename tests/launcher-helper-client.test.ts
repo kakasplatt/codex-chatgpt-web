@@ -139,6 +139,113 @@ test("daemon streams browser lifecycle through the real helper process", async (
   }
 });
 
+test("a delayed helper Send activation acknowledgement cannot make the timeout retryable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-activation-"));
+  roots.push(root);
+  const helper = join(root, "helper.ts");
+  const activationMarker = join(root, "activation-received");
+  writeFileSync(helper, `
+    import { EventEmitter } from "node:events";
+    import { existsSync } from "node:fs";
+    import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
+    const runBrowserTurn = ChatGptBrowserWorker.prototype.runBrowserTurn;
+    ChatGptBrowserWorker.prototype.run = async function(turn) {
+      await turn.onPreparedSelected?.(false);
+      const page = Object.assign(new EventEmitter(), {
+        url: () => "https://chatgpt.com/",
+        isClosed: () => false,
+        evaluate: async () => { throw new Error("No real browser in the helper fixture"); },
+      });
+      Object.assign(this, {
+        prepareChatSurface: async () => {},
+        selectModelAndEffort: async () => ({ effort: "medium", localTools: false, thinkEnabled: false }),
+        assertSelectedEffort: async () => {},
+        captureSubmissionBaseline: async () => ({ submittedText: "original prompt" }),
+        attachPromptWithCompactionRetry: async () => {},
+        attachFiles: async () => {},
+        currentSubmissionEvidence: async () => undefined,
+        attachedPromptText: async () => "original prompt",
+        runStage: async (_traceId, stage, _timeoutMs, action) => {
+          const controller = new AbortController();
+          if (stage !== "send") return action(controller.signal);
+          const pendingAction = action(controller.signal);
+          while (!existsSync(${JSON.stringify(activationMarker)})) await Bun.sleep(1);
+          controller.abort();
+          void pendingAction.catch(() => {});
+          throw new Error("ChatGPT browser stage timed out: send");
+        },
+        sendAttachedPrompt: async (_page, _baseline, _capture, _signal, _progress, lifecycle) => {
+          await lifecycle.onSendActivated();
+          throw new Error("Send must stay blocked until the activation acknowledgement returns");
+        },
+      });
+      return runBrowserTurn.call(this, turn, undefined, page);
+    };
+    await import(${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url).href)});
+  `, { mode: 0o700 });
+  const descriptorHelper = join(root, "descriptor-helper.cjs");
+  writeFileSync(descriptorHelper, "process.exit(99);\n", { mode: 0o700 });
+  const descriptorPath = join(root, "launcher.json");
+  writeFileSync(descriptorPath, `${JSON.stringify({
+    version: 3,
+    kind: LAUNCHER_BROWSER_HOST_KIND,
+    profile: "production",
+    pid: process.pid,
+    endpoint: "http://127.0.0.1:39001",
+    control: {
+      endpoint: "http://127.0.0.1:39002",
+      token: "launcher-control-token-0123456789abcdefghijklmnop",
+    },
+    helper: { executable: process.execPath, script: descriptorHelper },
+    partition: "persist:codex-web-gpt-chatgpt",
+    idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+    surfaceId: "launcher_surface_id_0123456789AB",
+    surfaceTargets: { ["launcher_surface_id_0123456789AB"]: "native-owned-target" },
+    createdAt: new Date().toISOString(),
+  })}\n`, { mode: 0o600 });
+  const client = new LauncherBrowserHelperClient({
+    appName: "Codex Native2",
+    browserHost: "launcher",
+    browserHostDescriptorPath: descriptorPath,
+    browserHelperScriptPath: helper,
+    browserDiagnosticsPath: join(root, "diagnostics"),
+    storageStatePath: join(root, "unused-state.json"),
+    chromeExecutablePath: join(root, "unused-chrome"),
+    turnTimeoutMs: 60_000,
+    headed: true,
+    autoApproveToolCalls: false,
+    useSavedChats: true,
+  });
+  let releaseActivationAck: () => void = () => {};
+  const activationAck = new Promise<void>(resolve => { releaseActivationAck = resolve; });
+  let parentActivated = false;
+
+  try {
+    const error = await client.run({
+      traceId: "delayed_activation_ack",
+      modelId: "gpt-5.6-sol",
+      reasoning: "medium",
+      modelFamily: "5.6",
+      capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      prepare: async () => ({ text: "original prompt", images: [], release() {} }),
+      onSendActivated: () => {
+        parentActivated = true;
+        writeFileSync(activationMarker, "received");
+        return activationAck;
+      },
+      onTextDelta() {},
+    }).then(() => undefined, failure => failure);
+
+    expect(parentActivated).toBeTrue();
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ChatGptWebAdapterError);
+    expect((error as Error).message).toBe("ChatGPT browser stage timed out: send");
+  } finally {
+    releaseActivationAck();
+    await client.close();
+  }
+});
+
 test("accepted compaction retires through the helper as completed without hiding cancellations or errors", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-helper-compaction-end-"));
   roots.push(root);

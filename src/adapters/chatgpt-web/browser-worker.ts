@@ -5325,8 +5325,8 @@ export class ChatGptBrowserWorker {
             }, onSendActivated: async () => {
               await this.assertSelectedEffort(page, mode);
               submissionRejection.begin(page);
-              await turn.onSendActivated?.();
               sendActivated = true;
+              await turn.onSendActivated?.();
             } },
             completionTracker,
             launcherObservationRecovery

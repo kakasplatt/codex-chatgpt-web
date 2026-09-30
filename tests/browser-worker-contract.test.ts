@@ -4894,6 +4894,91 @@ test("runBrowserTurn keeps a send timeout ambiguous after the real activation bo
   }
 });
 
+test("runBrowserTurn stays ambiguous while the send activation acknowledgement is pending", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pending-activation-ack-timeout-"));
+  const capabilities = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    extraHighAvailable: true,
+    proAvailable: true,
+  };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web",
+    baseUrl: `browser://pending-activation-ack-timeout-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { browserDiagnosticsPath: root },
+  });
+  const page = Object.assign(new EventEmitter(), {
+    url: () => "https://chatgpt.com/",
+    isClosed: () => false,
+    evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+  });
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+  let parentActivated = false;
+  let released = false;
+  let releaseActivationAck: () => void = () => {};
+  const activationAck = new Promise<void>(resolve => { releaseActivationAck = resolve; });
+
+  Object.assign(worker, {
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async () => ({ effort: "medium", localTools: false, thinkEnabled: false }),
+    assertSelectedEffort: async () => {},
+    captureSubmissionBaseline: async () => ({ submittedText: "original prompt" }),
+    attachPromptWithCompactionRetry: async () => {},
+    attachFiles: async () => {},
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+    runStage: async (
+      _traceId: string,
+      stage: string,
+      _timeoutMs: number,
+      action: (signal: AbortSignal) => Promise<unknown>,
+    ) => {
+      const controller = new AbortController();
+      if (stage !== "send") return action(controller.signal);
+      const pendingAction = action(controller.signal);
+      while (!parentActivated) await Bun.sleep(1);
+      controller.abort();
+      void pendingAction.catch(() => {});
+      throw timeout;
+    },
+    sendAttachedPrompt: async (
+      _page: unknown,
+      _baseline: unknown,
+      _capture: unknown,
+      _signal: unknown,
+      _progress: unknown,
+      lifecycle: { onSendActivated(): Promise<void> },
+    ) => {
+      await lifecycle.onSendActivated();
+      throw new Error("Send must stay blocked until the activation acknowledgement returns");
+    },
+  });
+
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "pending_activation_ack_timeout",
+      modelId: CHATGPT_WEB_MODEL_ID,
+      reasoning: "medium",
+      capabilities,
+      prepare: async () => ({
+        text: "original prompt",
+        images: [],
+        release: () => { released = true; },
+      }),
+      onSendActivated: () => {
+        parentActivated = true;
+        return activationAck;
+      },
+      onTextDelta() {},
+    }, undefined, page)).rejects.toBe(timeout);
+    expect(parentActivated).toBeTrue();
+    expect(released).toBeTrue();
+  } finally {
+    releaseActivationAck();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a send timeout is retryable when the original prompt is still intact and no submission evidence exists", async () => {
   const classifySendFailure = (ChatGptBrowserWorker.prototype as unknown as {
     classifySendFailure(
