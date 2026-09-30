@@ -5021,6 +5021,13 @@ export class ChatGptBrowserWorker {
           const stage = multipartStages[index]!;
           for (let attempt = 0; ; attempt += 1) {
             let sendActivated = false;
+            let stageSubmitted = false;
+            let recordStageUsage: (() => void) | undefined;
+            const commitStageUsage = () => {
+              if (!stageSubmitted) return;
+              recordStageUsage?.();
+              stageSubmitted = false;
+            };
             try {
               // Each acknowledgement can replace the picker controls. A promoted retry also starts
               // from a fresh effort proof before recapturing the baseline and reattaching the part.
@@ -5044,7 +5051,7 @@ export class ChatGptBrowserWorker {
                 true,
               );
               await diagnostics.capture(page, `multipart-stage-${index + 1}-attachment-complete`);
-              const recordStageUsage = await usageSubmission();
+              recordStageUsage = await usageSubmission();
               const evidence = await this.runStage(
                 turn.traceId,
                 `multipart_stage_${index + 1}_send`,
@@ -5055,7 +5062,7 @@ export class ChatGptBrowserWorker {
                   checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
                   turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
                   undefined,
-                  { onSubmitted: recordStageUsage, onSendActivated: async () => {
+                  { onSubmitted: recordStageUsage ? () => { stageSubmitted = true; } : undefined, onSendActivated: async () => {
                     await this.assertSelectedEffort(page, mode);
                     submissionRejection.begin(page);
                     sendActivated = true;
@@ -5113,6 +5120,7 @@ export class ChatGptBrowserWorker {
               );
               const stageRejection = await submissionRejection.failure();
               if (stageRejection) throw stageRejection;
+              commitStageUsage();
               break;
             } catch (error) {
               const preserveCancellation = (error instanceof DOMException && error.name === "AbortError")
@@ -5123,9 +5131,9 @@ export class ChatGptBrowserWorker {
               const failure = stageRejection ?? error;
               const stagingEffortIndex = stagingEfforts.indexOf(stagingEffort);
               const nextStagingEffort = stagingEffortIndex >= 0 ? stagingEfforts[stagingEffortIndex + 1] : undefined;
-              if (nextStagingEffort
-                && failure instanceof ChatGptWebAdapterError
-                && failure.code === "chatgpt_message_length_exceeds_limit") {
+              const sizeRejected = failure instanceof ChatGptWebAdapterError
+                && failure.code === "chatgpt_message_length_exceeds_limit";
+              if (nextStagingEffort && sizeRejected) {
                 const rejectedEffort = stagingEffort;
                 stagingEffort = nextStagingEffort;
                 submissionRejection.reset();
@@ -5135,6 +5143,7 @@ export class ChatGptBrowserWorker {
                 );
                 continue;
               }
+              if (!sizeRejected) commitStageUsage();
               throw failure;
             }
           }
