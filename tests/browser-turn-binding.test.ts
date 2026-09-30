@@ -1,7 +1,41 @@
 import { expect, test } from "bun:test";
 import { chromium, type Locator, type Page } from "playwright-core";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { readFileSync } from "node:fs";
+import { chatGptAssistantTurnSelector } from "../src/chatgpt-session";
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("terminal error detection distinguishes ordinary shared-turn text from alert and dialog surfaces", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    const terminalText = "Something went wrong. If this issue persists please contact us through our help center at help.openai.com.";
+    await page.setContent(`<main><section data-turn-key="shared">
+      <div data-user-message-bubble>${terminalText}</div>
+      <div data-content-search-unit-key="shared:assistant"><div data-conversation-role="assistant"></div>
+        <div data-markdown-text-style="assistant-message"><p>${terminalText}</p></div>
+      </div>
+    </section></main>`);
+    const turn = page.locator(chatGptAssistantTurnSelector("group:assistant:shared"));
+    expect(await turn.count()).toBe(1);
+    await throwIfChatGptTerminalErrorAlert(turn);
+
+    for (const role of ["alert", "dialog"] as const) {
+      await turn.evaluate((node, value) => {
+        const surface = document.createElement("div");
+        surface.setAttribute("role", value.role);
+        surface.textContent = value.text;
+        node.appendChild(surface);
+      }, { role, text: terminalText });
+      await expect(throwIfChatGptTerminalErrorAlert(turn)).rejects.toMatchObject({
+        status: 502,
+        errorType: "server_error",
+        code: "upstream_server_error",
+        retryable: true,
+      });
+      await turn.locator(`[role="${role}"]`).last().evaluate(node => node.remove());
+    }
+  } finally { await browser.close(); }
+}, 15_000);
 
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("activity tone and collapsed content invalidate the response cache", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
@@ -39,7 +73,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("preserves the accepted user 
     // during Activity, then returns with the same ID and a rich-text user bubble.
     const user = '<div data-user-message-bubble><div data-search-result-target><p><span data-prompt-link-href="app://test">Codex Native</span> Read first.txt.<br>Return its contents.</p></div></div>';
     const answer = '<div data-content-search-unit-key="fallback-turn-0:2:assistant"><div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message"><p>FIRST fixture-marker</p></div></div><div class="turn-action-controls"><button>Copy</button></div>';
-    for (const scenario of ["same-user", "different-user", "competing-turn", "old-group-remains", "unfinished"] as const) {
+    for (const scenario of ["same-user", "different-user", "competing-turn", "old-group-remains", "unfinished", "streaming"] as const) {
       const page = await browser.newPage();
       await page.setContent('<main></main>');
       const baseline = await worker.captureSubmissionBaseline(page, prompt);
@@ -52,12 +86,14 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("preserves the accepted user 
       const renderedUser = scenario === "different-user"
         ? `<div data-user-message-bubble><div data-search-result-target style="white-space:pre-wrap">${prompt}</div></div>`
         : user;
-      let replacement = `<div data-turn-key="${key}">${renderedUser}${scenario === "unfinished" ? '<span hidden data-chatgpt-agent-turn-start></span>' : answer}</div>`;
+      const response = scenario === "unfinished" ? '<span hidden data-chatgpt-agent-turn-start></span>'
+        : scenario === "streaming" ? answer.replace('<div class="turn-action-controls"><button>Copy</button></div>', "") : answer;
+      let replacement = `<div data-turn-key="${key}">${renderedUser}${response}</div>`;
       if (scenario === "competing-turn") replacement += `<div data-turn-key="other">${user}</div>`;
       if (scenario === "old-group-remains") replacement += '<div data-turn-key="fallback-turn-0"></div>';
       await page.locator("main").evaluate((node, html) => { node.innerHTML = html; }, replacement);
       const result = worker.reconcileAssistantTurnBinding(page, baseline, binding);
-      if (scenario === "same-user") {
+      if (["same-user", "unfinished", "streaming"].includes(scenario)) {
         expect((await result).identity).toBe("group:assistant:submitted");
       } else {
         await expect(result).rejects.toThrow("another user turn");
@@ -69,7 +105,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("preserves the accepted user 
 
 // Execute the real observation/rebinding code against the reported renderer transition.
 // No account, network requests, or model submissions are used.
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("completed exchange rekeys only with the exact submitted prompt and no competing turn", async () => {
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("an exchange rekeys only with the exact submitted prompt and no competing turn", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
     const worker = Object.create(ChatGptBrowserWorker.prototype) as {
@@ -101,7 +137,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("completed exchange rekeys on
       if (scenario === "old-group-remains") html += '<div data-turn-key="optimistic"><div data-user-message-bubble>Earlier</div></div>';
       await page.locator("main").evaluate((node, next) => { node.innerHTML = next; }, html);
       const result = worker.reconcileAssistantTurnBinding(page, baseline, binding);
-      if (scenario === "matching" || scenario === "history" || scenario === "same-key") {
+      if (scenario === "matching" || scenario === "history" || scenario === "same-key" || scenario === "unfinished") {
         const rebound = await result;
         expect(rebound.identity).toBe(`group:assistant:${scenario === "same-key" ? "optimistic" : "persisted"}`);
         expect(await rebound.locator.count()).toBe(1);

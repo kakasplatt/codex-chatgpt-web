@@ -972,7 +972,7 @@ describe("trusted Codex task environment continuity", () => {
       content: [{ type: "input_text", text: `<environment_context>
   <current_date>2026-09-19</current_date>
   <timezone>Asia/Shanghai</timezone>
-  <filesystem>${dangerFullAccessProfileXml}</filesystem>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
 </environment_context>` }],
     };
     body.input.push(
@@ -1001,6 +1001,22 @@ describe("trusted Codex task environment continuity", () => {
       internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
       content: [{ type: "input_text", text: environmentXml }] });
     expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+  });
+
+  test("a same-turn midnight delta accepts rollout-authenticated roots for a projectless task", () => {
+    const { codexHome, body } = midnightRolloutFixture();
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    metadata.workspaces = {};
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    const request = parseRequest({ ...body, model: "chatgpt-web/pro" });
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
   });
 
   test("midnight recovery never borrows cached authority without exact current rollout proof", () => {
@@ -1039,6 +1055,7 @@ describe("trusted Codex task environment continuity", () => {
         internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
         content: [{ type: "input_text", text: environmentXml }] });
       for (const invalid of [
+        original.replace(`<root>${root}</root>`, `<root>${resolve(root, "..", "untrusted-calendar-root")}</root>`),
         original.replace(dangerFullAccessProfileXml, dangerFullAccessProfileXml + externalProfileXml),
         original.replace(dangerFullAccessProfileXml, externalProfileXml),
         original.replace(dangerFullAccessProfileXml, readOnlyProfileXml),
