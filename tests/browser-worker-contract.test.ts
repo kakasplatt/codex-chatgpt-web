@@ -3103,6 +3103,30 @@ function dialogPage(text: string, buttonText = "Got it", errorActionVisible = fa
   };
 }
 
+function terminalErrorTurnScope(html: string): any {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(html);
+  const root = document.getElementById("turn");
+  if (!root) throw new Error("terminal-error fixture requires #turn");
+  const matchesText = (text: string, pattern: string | RegExp) => (
+    typeof pattern === "string" ? text.includes(pattern) : pattern.test(text)
+  );
+  const locatorFor = (elements: Element[]) => ({
+    filter: ({ hasText }: { hasText: string | RegExp }) => locatorFor(
+      elements.filter(element => matchesText(element.textContent ?? "", hasText)),
+    ),
+    last: () => locatorFor(elements.length === 0 ? [] : [elements[elements.length - 1]!]),
+    isVisible: async () => elements.some(element => !(element as HTMLElement).hidden),
+  });
+  return {
+    locator: (selector: string) => locatorFor(Array.from(root.querySelectorAll(selector))),
+    getByText: (pattern: string | RegExp) => locatorFor(
+      matchesText(root.textContent ?? "", pattern) ? [root] : [],
+    ),
+    getByTestId: (testId: string) => locatorFor(Array.from(root.querySelectorAll(`[data-testid="${testId}"]`))),
+  };
+}
+
 test.each([
   ["Too many requests. You're making requests too quickly.", "Got it"],
   ["요청을 너무 빠르게 보내고 있습니다. 잠시 후 다시 시도해 주세요.", "알겠습니다"],
@@ -3201,19 +3225,20 @@ test("unrelated ChatGPT dialogs are left untouched", async () => {
   expect(fixture.pressed).toEqual([]);
 });
 
-test("the known terminal ChatGPT error alert returns a structured retryable failure", async () => {
-  const fixture = dialogPage(
-    "Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
-  );
+test.each(["alert", "dialog"])("the known terminal ChatGPT error %s returns a structured retryable failure", async role => {
+  const scope = terminalErrorTurnScope(`<section id="turn" data-turn-key="current">
+    <div data-content-search-unit-key="current:assistant"><div data-conversation-role="assistant"></div>
+      <div role="${role}">Something went wrong. If this issue persists please contact us through our help center at help.openai.com.</div>
+    </div>
+  </section>`);
 
-  await expect(throwIfChatGptTerminalErrorAlert(fixture.page)).rejects.toMatchObject({
+  await expect(throwIfChatGptTerminalErrorAlert(scope)).rejects.toMatchObject({
     name: "ChatGptWebAdapterError",
     status: 502,
     errorType: "server_error",
     code: "upstream_server_error",
     retryable: true,
   });
-  expect(fixture.pressed).toEqual([]);
 });
 
 test("only a size rejection of the current owned browser submission is non-retryable", async () => {
@@ -3515,30 +3540,18 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
   expect(fixture.pressed).toEqual([]);
 });
 
-test("user prompt or assistant message text mentioning Something went wrong does not trigger terminal error alert", async () => {
+test.each(["user", "assistant"])("ordinary %s turn text mentioning Something went wrong is not a terminal error alert", async source => {
   const messageText = "I found the bug: Something went wrong. If this issue persists please contact us through our help center at help.openai.com.";
-  const turnScope = {
-    locator: (_selector: string) => ({
-      filter: () => ({
-        last: () => ({ isVisible: async () => false }),
-        isVisible: async () => false,
-      }),
-      last: () => ({ isVisible: async () => false }),
-      isVisible: async () => false,
-    }),
-    getByText: (pattern: string | RegExp) => ({
-      last: () => ({
-        isVisible: async () => typeof pattern === "string" ? messageText.includes(pattern) : pattern.test(messageText),
-      }),
-      isVisible: async () => typeof pattern === "string" ? messageText.includes(pattern) : pattern.test(messageText),
-    }),
-    getByTestId: (_testId: string) => ({
-      last: () => ({ isVisible: async () => false }),
-      isVisible: async () => false,
-    }),
-  };
+  const userText = source === "user" ? messageText : "Please inspect the reported failure.";
+  const assistantText = source === "assistant" ? messageText : "The response completed normally.";
+  const scope = terminalErrorTurnScope(`<section id="turn" data-turn-key="current">
+    <div data-user-message-bubble>${userText}</div>
+    <div data-content-search-unit-key="current:assistant"><div data-conversation-role="assistant"></div>
+      <div data-markdown-text-style="assistant-message"><p>${assistantText}</p></div>
+    </div>
+  </section>`);
 
-  await throwIfChatGptTerminalErrorAlert(turnScope as any);
+  await throwIfChatGptTerminalErrorAlert(scope);
 });
 
 function toolConfirmationPage(options: {

@@ -1,7 +1,41 @@
 import { expect, test } from "bun:test";
 import { chromium, type Locator, type Page } from "playwright-core";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { readFileSync } from "node:fs";
+import { chatGptAssistantTurnSelector } from "../src/chatgpt-session";
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("terminal error detection distinguishes ordinary shared-turn text from alert and dialog surfaces", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    const terminalText = "Something went wrong. If this issue persists please contact us through our help center at help.openai.com.";
+    await page.setContent(`<main><section data-turn-key="shared">
+      <div data-user-message-bubble>${terminalText}</div>
+      <div data-content-search-unit-key="shared:assistant"><div data-conversation-role="assistant"></div>
+        <div data-markdown-text-style="assistant-message"><p>${terminalText}</p></div>
+      </div>
+    </section></main>`);
+    const turn = page.locator(chatGptAssistantTurnSelector("group:assistant:shared"));
+    expect(await turn.count()).toBe(1);
+    await throwIfChatGptTerminalErrorAlert(turn);
+
+    for (const role of ["alert", "dialog"] as const) {
+      await turn.evaluate((node, value) => {
+        const surface = document.createElement("div");
+        surface.setAttribute("role", value.role);
+        surface.textContent = value.text;
+        node.appendChild(surface);
+      }, { role, text: terminalText });
+      await expect(throwIfChatGptTerminalErrorAlert(turn)).rejects.toMatchObject({
+        status: 502,
+        errorType: "server_error",
+        code: "upstream_server_error",
+        retryable: true,
+      });
+      await turn.locator(`[role="${role}"]`).last().evaluate(node => node.remove());
+    }
+  } finally { await browser.close(); }
+}, 15_000);
 
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("activity tone and collapsed content invalidate the response cache", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
