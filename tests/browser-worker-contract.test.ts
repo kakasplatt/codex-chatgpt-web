@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, chatGptSendStageTimeout, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptBrowserTabClosedError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -4822,6 +4822,267 @@ test("the bundled helper is adopted only for the packaged runtime layout", () =>
   expect(heartbeat).toBeGreaterThan(0);
   expect(tryStart).toBeGreaterThan(0);
   expect(heartbeat).toBeLessThan(tryStart);
+});
+
+test("an ordinary send keeps enough time to confirm a delayed ChatGPT submission", () => {
+  expect(chatGptSendStageTimeout(false)).toBeGreaterThanOrEqual(CHATGPT_RESPONSE_DOM_GRACE_MS);
+  expect(chatGptSendStageTimeout(true)).toBe(browserStageTimeouts.multipartStageSend);
+});
+
+test("runBrowserTurn keeps a send timeout ambiguous after the real activation boundary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "activated-send-timeout-"));
+  const capabilities = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    extraHighAvailable: true,
+    proAvailable: true,
+  };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web",
+    baseUrl: `browser://activated-send-timeout-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { browserDiagnosticsPath: root },
+  });
+  const page = Object.assign(new EventEmitter(), {
+    url: () => "https://chatgpt.com/",
+    isClosed: () => false,
+    evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+  });
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+  let activated = 0;
+  let released = false;
+
+  Object.assign(worker, {
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async () => ({ effort: "medium", localTools: false, thinkEnabled: false }),
+    assertSelectedEffort: async () => {},
+    captureSubmissionBaseline: async () => ({ submittedText: "original prompt" }),
+    attachPromptWithCompactionRetry: async () => {},
+    attachFiles: async () => {},
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+    sendAttachedPrompt: async (
+      _page: unknown,
+      _baseline: unknown,
+      _capture: unknown,
+      _signal: unknown,
+      _progress: unknown,
+      lifecycle: { onSendActivated(): Promise<void> },
+    ) => {
+      await lifecycle.onSendActivated();
+      throw timeout;
+    },
+  });
+
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "activated_send_timeout",
+      modelId: CHATGPT_WEB_MODEL_ID,
+      reasoning: "medium",
+      capabilities,
+      prepare: async () => ({
+        text: "original prompt",
+        images: [],
+        release: () => { released = true; },
+      }),
+      onSendActivated: () => { activated += 1; },
+      onTextDelta() {},
+    }, undefined, page)).rejects.toBe(timeout);
+    expect(activated).toBe(1);
+    expect(released).toBeTrue();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runBrowserTurn stays ambiguous while the send activation acknowledgement is pending", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pending-activation-ack-timeout-"));
+  const capabilities = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    extraHighAvailable: true,
+    proAvailable: true,
+  };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web",
+    baseUrl: `browser://pending-activation-ack-timeout-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { browserDiagnosticsPath: root },
+  });
+  const page = Object.assign(new EventEmitter(), {
+    url: () => "https://chatgpt.com/",
+    isClosed: () => false,
+    evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+  });
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+  let parentActivated = false;
+  let released = false;
+  let releaseActivationAck: () => void = () => {};
+  const activationAck = new Promise<void>(resolve => { releaseActivationAck = resolve; });
+
+  Object.assign(worker, {
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async () => ({ effort: "medium", localTools: false, thinkEnabled: false }),
+    assertSelectedEffort: async () => {},
+    captureSubmissionBaseline: async () => ({ submittedText: "original prompt" }),
+    attachPromptWithCompactionRetry: async () => {},
+    attachFiles: async () => {},
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+    runStage: async (
+      _traceId: string,
+      stage: string,
+      _timeoutMs: number,
+      action: (signal: AbortSignal) => Promise<unknown>,
+    ) => {
+      const controller = new AbortController();
+      if (stage !== "send") return action(controller.signal);
+      const pendingAction = action(controller.signal);
+      while (!parentActivated) await Bun.sleep(1);
+      controller.abort();
+      void pendingAction.catch(() => {});
+      throw timeout;
+    },
+    sendAttachedPrompt: async (
+      _page: unknown,
+      _baseline: unknown,
+      _capture: unknown,
+      _signal: unknown,
+      _progress: unknown,
+      lifecycle: { onSendActivated(): Promise<void> },
+    ) => {
+      await lifecycle.onSendActivated();
+      throw new Error("Send must stay blocked until the activation acknowledgement returns");
+    },
+  });
+
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "pending_activation_ack_timeout",
+      modelId: CHATGPT_WEB_MODEL_ID,
+      reasoning: "medium",
+      capabilities,
+      prepare: async () => ({
+        text: "original prompt",
+        images: [],
+        release: () => { released = true; },
+      }),
+      onSendActivated: () => {
+        parentActivated = true;
+        return activationAck;
+      },
+      onTextDelta() {},
+    }, undefined, page)).rejects.toBe(timeout);
+    expect(parentActivated).toBeTrue();
+    expect(released).toBeTrue();
+  } finally {
+    releaseActivationAck();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a send timeout is retryable when the original prompt is still intact and no submission evidence exists", async () => {
+  const classifySendFailure = (ChatGptBrowserWorker.prototype as unknown as {
+    classifySendFailure(
+      error: unknown,
+      page: Page,
+      baseline: { submittedText?: string },
+      externalProgress?: { snapshot(): { revision: number } },
+      initialExternalProgressRevision?: number,
+    ): Promise<Error>;
+  }).classifySendFailure;
+  const page = { isClosed: () => false } as unknown as Page;
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+  }) as ChatGptBrowserWorker;
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+
+  const classified = await classifySendFailure.call(
+    worker,
+    timeout,
+    page,
+    { submittedText: "original prompt" },
+    { snapshot: () => ({ revision: 7 }) },
+    7,
+  );
+
+  expect(classified).toMatchObject({
+    code: "chatgpt_submission_not_sent",
+    retryable: true,
+    cause: timeout,
+  });
+});
+
+test("a send timeout after activation stays ambiguous even when no submission evidence exists", async () => {
+  const classifySendFailure = (ChatGptBrowserWorker.prototype as unknown as {
+    classifySendFailure(
+      error: unknown,
+      page: Page,
+      baseline: { submittedText?: string },
+      externalProgress?: { snapshot(): { revision: number } },
+      initialExternalProgressRevision?: number,
+      sendActivated?: boolean,
+    ): Promise<Error>;
+  }).classifySendFailure;
+  const page = { isClosed: () => false } as unknown as Page;
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+  }) as ChatGptBrowserWorker;
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+
+  expect(await classifySendFailure.call(
+    worker,
+    timeout,
+    page,
+    { submittedText: "original prompt" },
+    undefined,
+    undefined,
+    true,
+  )).toBe(timeout);
+});
+
+test("a send timeout stays ambiguous when the composer or submission state changed", async () => {
+  const classifySendFailure = (ChatGptBrowserWorker.prototype as unknown as {
+    classifySendFailure(
+      error: unknown,
+      page: Page,
+      baseline: { submittedText?: string },
+      externalProgress?: { snapshot(): { revision: number } },
+      initialExternalProgressRevision?: number,
+    ): Promise<Error>;
+  }).classifySendFailure;
+  const page = { isClosed: () => false } as unknown as Page;
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+  const baseline = { submittedText: "original prompt" };
+
+  const changedComposer = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "",
+  }) as ChatGptBrowserWorker;
+  expect(await classifySendFailure.call(changedComposer, timeout, page, baseline)).toBe(timeout);
+
+  let submissionChecks = 0;
+  const acceptedTurn = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    currentSubmissionEvidence: async () => (++submissionChecks === 1 ? undefined : "user_turn"),
+    attachedPromptText: async () => "original prompt",
+  }) as ChatGptBrowserWorker;
+  expect(await classifySendFailure.call(acceptedTurn, timeout, page, baseline)).toBe(timeout);
+  expect(submissionChecks).toBe(2);
+
+  let progressChecks = 0;
+  const mcpAdvanced = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+  }) as ChatGptBrowserWorker;
+  expect(await classifySendFailure.call(
+    mcpAdvanced,
+    timeout,
+    page,
+    baseline,
+    { snapshot: () => ({ revision: ++progressChecks === 1 ? 7 : 8 }) },
+    7,
+  )).toBe(timeout);
+  expect(progressChecks).toBe(2);
 });
 
 test("a staged Bigger Context part gets an acknowledgement window sized to its payload", () => {
