@@ -391,6 +391,11 @@ export function hasChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): 
   const metadata = clientTurnMetadata(parsed);
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!metadata || !turnId) return false;
+  const metadataWorkspaces = record(metadata.workspaces);
+  // Projectless native turns legitimately carry an empty workspaces map. In that shape the
+  // calendar delta is only a recovery signal; ChatGptThreadEnvironmentStore still requires the
+  // exact current rollout before it returns any filesystem authority.
+  const requireMetadataBoundRoots = Boolean(metadataWorkspaces && Object.keys(metadataWorkspaces).length > 0);
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
   const activeIndex = input.findLastIndex(value => isNativeInstruction(record(value), metadata));
@@ -408,7 +413,7 @@ export function hasChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): 
     // profile, a malformed cwd, or any additional permission declaration must fail closed.
     const calendarDeltaPattern = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>\s*(?:<root>[^<>]+<\/root>\s*)+<\/workspace_roots>\s*)?<permission_profile type="disabled">\s*<file_system type="unrestricted"\s*\/>\s*<\/permission_profile>\s*<\/filesystem>\s*<\/environment_context>$/;
     if (!calendarDeltaPattern.test(text)
-      || (/<workspace_roots>/i.test(text) && !environmentMatchesCanonicalMetadata(text, metadata, true))
+      || (/<workspace_roots>/i.test(text) && !environmentMatchesCanonicalMetadata(text, metadata, requireMetadataBoundRoots))
       || !sandboxMetadataMatchesEnvironment(canonicalSandboxMetadata(metadata), text)
       || [metadata.sandbox_mode, metadata.sandbox].some(value => (
         value !== undefined && !sandboxMetadataMatchesEnvironment(value, text)

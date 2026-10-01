@@ -1003,6 +1003,22 @@ describe("trusted Codex task environment continuity", () => {
     expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
   });
 
+  test("a same-turn midnight delta accepts rollout-authenticated roots for a projectless task", () => {
+    const { codexHome, body } = midnightRolloutFixture();
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    metadata.workspaces = {};
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    const request = parseRequest({ ...body, model: "chatgpt-web/pro" });
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
   test("midnight recovery never borrows cached authority without exact current rollout proof", () => {
     const { codexHome, request, rolloutPath, delta } = midnightRolloutFixture();
     const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);

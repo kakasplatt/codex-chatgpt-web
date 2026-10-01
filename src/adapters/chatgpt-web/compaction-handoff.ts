@@ -194,31 +194,7 @@ export async function settleActiveCompactionSource(
         source.runtime.externalProgress.recordToolResult();
         source.markResultDelivered(request.callId);
       }
-      const compactionDelivery = typeof broker.waitForCompactionDelivery === "function"
-        ? broker.waitForCompactionDelivery(token, signal)
-        : new Promise<void>(() => {});
-      const boundary = await Promise.race([
-        withCompactionAbort(source.browserOutcome, signal).then(
-          browserOutcome => ({ type: "browser" as const, browserOutcome }),
-        ),
-        compactionDelivery.then(
-          () => ({ type: "compaction_delivery" as const }),
-        ),
-      ]);
-      if (boundary.type === "compaction_delivery") {
-        source.cancel(new ChatGptCompactionHandoffAccepted());
-        await withCompactionAbort(source.physicalSettlement, signal);
-        // Physical settlement may share the browser promise and resolve one microtask before the
-        // session journals its final outcome. Preserve that already-available answer without ever
-        // waiting again on a browser outcome that can remain pending after the compaction boundary.
-        await Promise.resolve();
-        const settledOutcome = source.settledOutcome();
-        return {
-          answer: settledOutcome?.type === "final" ? settledOutcome.answer : "",
-          compactionInstructionDelivered: true,
-        };
-      }
-      const browserOutcome = boundary.browserOutcome;
+      const browserOutcome = await withCompactionAbort(source.browserOutcome, signal);
       if (browserOutcome.type === "error") throw browserOutcome.error;
       const compactionInstructionDelivered = broker.compactionDeliveryCount(token) > 0;
       // The one structured checkpoint message reuses this exact retained tab. It must not race the

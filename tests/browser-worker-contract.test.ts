@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit, formatChatGpt
 import { estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { estimateTokens } from "../src/lib/token-estimate";
 import { chatGptHtmlToMarkdown } from "../src/adapters/chatgpt-web/markdown";
+import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
 
 function personalizedTemporaryChatRole(
   _role: string,
@@ -946,6 +947,112 @@ test("Bigger Context retries one rejected low stage in medium and keeps later st
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Bigger Context does not count a rejected staging Send when adaptive retry succeeds", async () => {
+  const root = mkdtempSync(join(tmpdir(), "adaptive-multipart-usage-"));
+  const usageActivities: Array<{ phase?: string }> = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const activity = await request.json() as { phase?: string };
+      if (activity.phase === "usage") usageActivities.push(activity);
+      return Response.json({ ok: true });
+    },
+  });
+  const descriptorPath = join(root, "launcher-browser.json");
+  const controlEndpoint = "http://127.0.0.1:" + server.port;
+  writeFileSync(descriptorPath, JSON.stringify({
+    version: 3,
+    kind: LAUNCHER_BROWSER_HOST_KIND,
+    profile: "production",
+    pid: process.pid,
+    endpoint: controlEndpoint,
+    control: {
+      endpoint: controlEndpoint,
+      token: "launcher-control-token-0123456789abcdefghijklmnop",
+    },
+    helper: { executable: process.execPath, script: import.meta.path },
+    partition: "persist:codex-web-gpt-chatgpt",
+    idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+    surfaceId: "launcher_surface_id_0123456789AB",
+    surfaceTargets: { launcher_surface_id_0123456789AB: "native-owned-target" },
+    createdAt: new Date().toISOString(),
+  }) + "\n", { mode: 0o600 });
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+  const prepared = {
+    text: "unused multipart source",
+    images: [],
+    multipart: {
+      parts: [
+        JSON.stringify({ version: 1, part_index: 1, total_parts: 2, records: [] }),
+        JSON.stringify({ version: 1, part_index: 2, total_parts: 2, records: [] }),
+      ] as [string, string],
+      commit: "Return exactly OK.",
+    },
+    release() {},
+  };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web",
+    baseUrl: "browser://" + root,
+    chatgptWeb: { browserDiagnosticsPath: root, browserHostDescriptorPath: descriptorPath },
+  });
+  const frame = {};
+  const page = Object.assign(new EventEmitter(), {
+    url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
+    evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+  });
+  let sends = 0;
+  let rejectedAttempt = false;
+  const finished = new Error("final send reached after adaptive staging usage");
+  const rejectCurrentSubmission = () => {
+    const request = {
+      method: () => "POST", url: () => "https://chatgpt.com/backend-api/f/conversation", frame: () => frame,
+    };
+    page.emit("request", request);
+    page.emit("response", {
+      request: () => request, status: () => 413, headers: () => ({ "content-type": "application/json" }),
+      json: async () => ({ detail: { code: "message_length_exceeds_limit" } }),
+    });
+    rejectedAttempt = true;
+  };
+  Object.assign(worker, {
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async (_page: unknown, _modelId: string, effort: string) => (
+      { modelId: CHATGPT_WEB_MODEL_ID, effort, localTools: false, thinkEnabled: false }
+    ),
+    captureSubmissionBaseline: async () => ({}),
+    attachPrompt: async () => {}, attachPromptWithCompactionRetry: async () => {}, attachFiles: async () => {},
+    waitForNewAssistantTurn: async () => {
+      if (rejectedAttempt) {
+        rejectedAttempt = false;
+        throw new Error("no acknowledgement after rejected submission");
+      }
+      return {};
+    },
+    waitForMultipartAcknowledgement: async () => {},
+    sendAttachedPrompt: async (_page: unknown, _baseline: unknown, _capture: unknown, _signal: unknown,
+      _progress: unknown, lifecycle: { onSubmitted?: () => void; onSendActivated(): Promise<void> }) => {
+      await lifecycle.onSendActivated();
+      sends += 1;
+      if (sends === 3) throw finished;
+      lifecycle.onSubmitted?.();
+      if (sends === 1) rejectCurrentSubmission();
+      return "user_turn";
+    },
+  });
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "adaptive_multipart_usage", modelId: CHATGPT_WEB_MODEL_ID, reasoning: "low", capabilities,
+      prepare: async () => prepared, onTextDelta() {}, onReasoningSummary() {},
+    }, undefined, page, false, true)).rejects.toBe(finished);
+    expect(sends).toBe(3);
+    expect(usageActivities).toHaveLength(1);
+  } finally {
+    server.stop(true);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Bigger Context propagates a second size rejection after the one medium retry", async () => {
   const root = mkdtempSync(join(tmpdir(), "adaptive-multipart-second-rejection-"));
   const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
@@ -1854,6 +1961,7 @@ test("repeated connector verification reuses its selected pill before clearing t
     config: { appName: "Codex Native2 DEV" },
     activeComposer: async () => selectedComposer,
     connectorIsSelected: async () => true,
+    attachedPromptText: async () => "",
   }, page, async checkpoint => { checkpoints.push(checkpoint); })).resolves.toBe(selectedComposer);
 
   expect(fillCalls).toBe(0);
@@ -2995,6 +3103,30 @@ function dialogPage(text: string, buttonText = "Got it", errorActionVisible = fa
   };
 }
 
+function terminalErrorTurnScope(html: string): any {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(html);
+  const root = document.getElementById("turn");
+  if (!root) throw new Error("terminal-error fixture requires #turn");
+  const matchesText = (text: string, pattern: string | RegExp) => (
+    typeof pattern === "string" ? text.includes(pattern) : pattern.test(text)
+  );
+  const locatorFor = (elements: Element[]) => ({
+    filter: ({ hasText }: { hasText: string | RegExp }) => locatorFor(
+      elements.filter(element => matchesText(element.textContent ?? "", hasText)),
+    ),
+    last: () => locatorFor(elements.length === 0 ? [] : [elements[elements.length - 1]!]),
+    isVisible: async () => elements.some(element => !(element as HTMLElement).hidden),
+  });
+  return {
+    locator: (selector: string) => locatorFor(Array.from(root.querySelectorAll(selector))),
+    getByText: (pattern: string | RegExp) => locatorFor(
+      matchesText(root.textContent ?? "", pattern) ? [root] : [],
+    ),
+    getByTestId: (testId: string) => locatorFor(Array.from(root.querySelectorAll(`[data-testid="${testId}"]`))),
+  };
+}
+
 test.each([
   ["Too many requests. You're making requests too quickly.", "Got it"],
   ["요청을 너무 빠르게 보내고 있습니다. 잠시 후 다시 시도해 주세요.", "알겠습니다"],
@@ -3093,19 +3225,20 @@ test("unrelated ChatGPT dialogs are left untouched", async () => {
   expect(fixture.pressed).toEqual([]);
 });
 
-test("the known terminal ChatGPT error alert returns a structured retryable failure", async () => {
-  const fixture = dialogPage(
-    "Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
-  );
+test.each(["alert", "dialog"])("the known terminal ChatGPT error %s returns a structured retryable failure", async role => {
+  const scope = terminalErrorTurnScope(`<section id="turn" data-turn-key="current">
+    <div data-content-search-unit-key="current:assistant"><div data-conversation-role="assistant"></div>
+      <div role="${role}">Something went wrong. If this issue persists please contact us through our help center at help.openai.com.</div>
+    </div>
+  </section>`);
 
-  await expect(throwIfChatGptTerminalErrorAlert(fixture.page)).rejects.toMatchObject({
+  await expect(throwIfChatGptTerminalErrorAlert(scope)).rejects.toMatchObject({
     name: "ChatGptWebAdapterError",
     status: 502,
     errorType: "server_error",
     code: "upstream_server_error",
     retryable: true,
   });
-  expect(fixture.pressed).toEqual([]);
 });
 
 test("only a size rejection of the current owned browser submission is non-retryable", async () => {
@@ -3407,30 +3540,18 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
   expect(fixture.pressed).toEqual([]);
 });
 
-test("user prompt or assistant message text mentioning Something went wrong does not trigger terminal error alert", async () => {
+test.each(["user", "assistant"])("ordinary %s turn text mentioning Something went wrong is not a terminal error alert", async source => {
   const messageText = "I found the bug: Something went wrong. If this issue persists please contact us through our help center at help.openai.com.";
-  const turnScope = {
-    locator: (_selector: string) => ({
-      filter: () => ({
-        last: () => ({ isVisible: async () => false }),
-        isVisible: async () => false,
-      }),
-      last: () => ({ isVisible: async () => false }),
-      isVisible: async () => false,
-    }),
-    getByText: (pattern: string | RegExp) => ({
-      last: () => ({
-        isVisible: async () => typeof pattern === "string" ? messageText.includes(pattern) : pattern.test(messageText),
-      }),
-      isVisible: async () => typeof pattern === "string" ? messageText.includes(pattern) : pattern.test(messageText),
-    }),
-    getByTestId: (_testId: string) => ({
-      last: () => ({ isVisible: async () => false }),
-      isVisible: async () => false,
-    }),
-  };
+  const userText = source === "user" ? messageText : "Please inspect the reported failure.";
+  const assistantText = source === "assistant" ? messageText : "The response completed normally.";
+  const scope = terminalErrorTurnScope(`<section id="turn" data-turn-key="current">
+    <div data-user-message-bubble>${userText}</div>
+    <div data-content-search-unit-key="current:assistant"><div data-conversation-role="assistant"></div>
+      <div data-markdown-text-style="assistant-message"><p>${assistantText}</p></div>
+    </div>
+  </section>`);
 
-  await throwIfChatGptTerminalErrorAlert(turnScope as any);
+  await throwIfChatGptTerminalErrorAlert(scope);
 });
 
 function toolConfirmationPage(options: {
@@ -4128,7 +4249,7 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -4154,6 +4275,17 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(missingCompletionAction.update(completedWithoutMarker, 1_000)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_749)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
+});
+
+test("visible generation suspends DOM health and restarts its grace when Stop disappears", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const absent = { responsePresent: false, running: false, currentText: "", completionActionVisible: false };
+  expect(tracker.update(absent, 0)).toBeUndefined();
+  expect(tracker.update({ ...absent, running: true }, 500)).toBeUndefined();
+  expect(tracker.update({ ...absent, running: true }, 60_000)).toBeUndefined();
+  expect(tracker.update(absent, 61_000)).toBeUndefined();
+  expect(tracker.update(absent, 61_999)).toBeUndefined();
+  expect(tracker.update(absent, 62_000)).toContain("did not create a response DOM");
 });
 
 test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
@@ -4200,7 +4332,7 @@ test("suspending DOM health for proven MCP progress restarts the missing-respons
   const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -4225,7 +4357,7 @@ test("clearing the missing-response window preserves whether a response was ever
     currentText: "partial",
     completionActionVisible: false,
   };
-  const absent = { ...present, responsePresent: false, currentText: "" };
+  const absent = { ...present, responsePresent: false, running: false, currentText: "" };
 
   expect(tracker.update(present, 1_000)).toBeUndefined();
   expect(tracker.update(absent, 1_500)).toBeUndefined();
@@ -4296,7 +4428,7 @@ test("live external progress still records that a response DOM was observed", ()
   const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -4758,6 +4890,91 @@ test("runBrowserTurn keeps a send timeout ambiguous after the real activation bo
     expect(activated).toBe(1);
     expect(released).toBeTrue();
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runBrowserTurn stays ambiguous while the send activation acknowledgement is pending", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pending-activation-ack-timeout-"));
+  const capabilities = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    extraHighAvailable: true,
+    proAvailable: true,
+  };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web",
+    baseUrl: `browser://pending-activation-ack-timeout-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { browserDiagnosticsPath: root },
+  });
+  const page = Object.assign(new EventEmitter(), {
+    url: () => "https://chatgpt.com/",
+    isClosed: () => false,
+    evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+  });
+  const timeout = new Error("ChatGPT browser stage timed out: send");
+  let parentActivated = false;
+  let released = false;
+  let releaseActivationAck: () => void = () => {};
+  const activationAck = new Promise<void>(resolve => { releaseActivationAck = resolve; });
+
+  Object.assign(worker, {
+    prepareChatSurface: async () => {},
+    selectModelAndEffort: async () => ({ effort: "medium", localTools: false, thinkEnabled: false }),
+    assertSelectedEffort: async () => {},
+    captureSubmissionBaseline: async () => ({ submittedText: "original prompt" }),
+    attachPromptWithCompactionRetry: async () => {},
+    attachFiles: async () => {},
+    currentSubmissionEvidence: async () => undefined,
+    attachedPromptText: async () => "original prompt",
+    runStage: async (
+      _traceId: string,
+      stage: string,
+      _timeoutMs: number,
+      action: (signal: AbortSignal) => Promise<unknown>,
+    ) => {
+      const controller = new AbortController();
+      if (stage !== "send") return action(controller.signal);
+      const pendingAction = action(controller.signal);
+      while (!parentActivated) await Bun.sleep(1);
+      controller.abort();
+      void pendingAction.catch(() => {});
+      throw timeout;
+    },
+    sendAttachedPrompt: async (
+      _page: unknown,
+      _baseline: unknown,
+      _capture: unknown,
+      _signal: unknown,
+      _progress: unknown,
+      lifecycle: { onSendActivated(): Promise<void> },
+    ) => {
+      await lifecycle.onSendActivated();
+      throw new Error("Send must stay blocked until the activation acknowledgement returns");
+    },
+  });
+
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "pending_activation_ack_timeout",
+      modelId: CHATGPT_WEB_MODEL_ID,
+      reasoning: "medium",
+      capabilities,
+      prepare: async () => ({
+        text: "original prompt",
+        images: [],
+        release: () => { released = true; },
+      }),
+      onSendActivated: () => {
+        parentActivated = true;
+        return activationAck;
+      },
+      onTextDelta() {},
+    }, undefined, page)).rejects.toBe(timeout);
+    expect(parentActivated).toBeTrue();
+    expect(released).toBeTrue();
+  } finally {
+    releaseActivationAck();
     rmSync(root, { recursive: true, force: true });
   }
 });
