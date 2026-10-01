@@ -2740,6 +2740,7 @@ class BrowserHost {
       if (this.authView) this.closeAuthView(this.authView, true, false);
       const contents = this.view.webContents;
       await contents.session.clearStorageData();
+      await contents.session.clearCache();
       this.setState({
         authenticated: false,
         loading: true,

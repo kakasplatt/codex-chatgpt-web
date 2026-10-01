@@ -27,6 +27,7 @@ import {
 import {
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
+  resolveChatGptSmokeTestMode,
   resolveChatGptWebModelMode,
   type ChatGptWebCapabilities,
   type ChatGptWebModelMode,
@@ -789,7 +790,7 @@ export async function dismissChatGptTemporaryChatOnboarding(page: Page): Promise
   return true;
 }
 
-type ChatGptTextScope = Pick<Locator, "getByText" | "getByTestId">;
+type ChatGptTextScope = Pick<Locator, "getByText" | "getByTestId"> & Partial<Pick<Locator, "locator">>;
 
 const chatGptSubscriptionFailureAlert = (page: Page): Locator => page
   .locator('[role="alert"]')
@@ -815,9 +816,17 @@ export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<voi
   );
 }
 
-const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
-  .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
-  .last();
+const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => {
+  if (typeof scope.locator === "function") {
+    return scope
+      .locator('[role="alert"], [role="dialog"]')
+      .filter({ hasText: /Something went wrong[\s\S]*help\.openai\.com/i })
+      .last();
+  }
+  return scope
+    .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
+    .last();
+};
 
 // The current UI renders message_length_exceeds_limit as an ordinary response error.
 // Observe only browser-issued submissions from this owned page after Send is activated;
@@ -841,7 +850,7 @@ export class ChatGptSubmissionRejectionObserver {
       .then(body => body?.detail?.code === "message_length_exceeds_limit"
         ? new ChatGptWebAdapterError(
           "ChatGPT rejected this message because it exceeds the selected mode's input-size limit. Compact the task before retrying.",
-          { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+          { status: 400, errorType: "invalid_request_error", code: "chatgpt_message_length_exceeds_limit", retryable: false },
         ) : undefined)
       // Unreadable or unfamiliar responses do not establish a size rejection. The normal
       // bound-response DOM error remains authoritative in that case.
@@ -849,11 +858,15 @@ export class ChatGptSubmissionRejectionObserver {
   };
 
   begin(page: Page): void {
-    this.dispose();
-    this.checks = [];
+    this.reset();
     this.page = page;
     page.on("request", this.onRequest);
     page.on("response", this.onResponse);
+  }
+
+  reset(): void {
+    this.dispose();
+    this.checks = [];
   }
 
   async failure(): Promise<ChatGptWebAdapterError | undefined> {
@@ -1071,12 +1084,22 @@ export function assertChatGptWebMultipartInputWithinLimits(
   );
 }
 
-/** Select the cheapest account-visible mode that can carry every inert multipart stage. */
+/** Select the cheapest account-visible mode at the requested floor that can carry every inert multipart stage. */
+function chatGptWebMultipartStagingEfforts(
+  capabilities: ChatGptWebCapabilities,
+  requestedEffort: ChatGptWebModelMode["effort"],
+): readonly ChatGptWebModelMode["effort"][] {
+  return requestedEffort === "low"
+    ? capabilities.proAvailable ? ["low", "medium", "max"] : ["low", "medium"]
+    : capabilities.proAvailable ? ["medium", "max"] : ["medium"];
+}
+
 export function resolveChatGptWebMultipartStagingMode(
   modelId: string,
   capabilities: ChatGptWebCapabilities,
   maxStageMessageTokens: number,
   maxStageChars: number,
+  requestedEffort: ChatGptWebModelMode["effort"] = "low",
 ): ChatGptWebModelMode {
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
     throw new ChatGptWebAdapterError(
@@ -1087,9 +1110,7 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
-  const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
-    ? ["low", "medium", "max"]
-    : ["low", "medium"];
+  const efforts = chatGptWebMultipartStagingEfforts(capabilities, requestedEffort);
   for (const effort of efforts) {
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
     const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
@@ -1111,13 +1132,19 @@ export const browserStageTimeouts = {
   effortSelection: 120_000,
   promptAttachment: 60_000,
   fileAttachment: 120_000,
-  send: 20_000,
+  // Submission evidence can arrive after a slow DOM probe/rebind; the old 20-second budget
+  // expired within 652 ms of a successful inline send observed in diagnostics.
+  send: CHATGPT_RESPONSE_DOM_GRACE_MS,
   // A Bigger Context stage posts a much larger payload onto a conversation that already holds the
   // earlier parts. This budget covers ChatGPT accepting the submission, not just the click.
   multipartStageSend: 180_000,
   // Staging asks for one transaction-bound acknowledgement, not an open-ended model answer.
   multipartStageAcknowledgement: CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
 } as const;
+
+export function chatGptSendStageTimeout(multipart: boolean): number {
+  return multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send;
+}
 
 /**
  * Detects that this process was suspended (system sleep) by watching for gaps in a steady tick.
@@ -3697,6 +3724,55 @@ export class ChatGptBrowserWorker {
     return evidence;
   }
 
+  private async classifySendFailure(
+    error: unknown,
+    page: Page,
+    baseline: ChatGptSubmissionBaseline,
+    externalProgress?: ChatGptTurnProgressReader,
+    initialExternalProgressRevision?: number,
+    sendActivated = false,
+  ): Promise<Error> {
+    const normalized = error instanceof Error ? error : new Error(String(error));
+    if (normalized.message !== "ChatGPT browser stage timed out: send") return normalized;
+    if (sendActivated) return normalized;
+    if (page.isClosed() || baseline.submittedText === undefined) return normalized;
+    if (externalProgress && initialExternalProgressRevision === undefined) return normalized;
+
+    const unchangedExternalProgress = () => !externalProgress
+      || externalProgress.snapshot().revision === initialExternalProgressRevision;
+    const promptStillAttached = async () => this.promptTextEquivalent(
+      baseline.submittedText!,
+      await this.attachedPromptText(page),
+    );
+
+    try {
+      if (!unchangedExternalProgress()) return normalized;
+      if (await this.currentSubmissionEvidence(page, baseline)) return normalized;
+      if (!(await promptStillAttached())) return normalized;
+
+      // A Send can clear the composer shortly before its turn identity appears. Require the same
+      // no-submission state after one UI settlement so a late accepted send cannot become a retry.
+      await settleChatGptUi();
+      if (!unchangedExternalProgress()) return normalized;
+      if (await this.currentSubmissionEvidence(page, baseline)) return normalized;
+      if (!(await promptStillAttached())) return normalized;
+
+      return new ChatGptWebAdapterError(
+        "ChatGPT did not submit the prompt before the send deadline. Retry the turn.",
+        {
+          status: 502,
+          errorType: "server_error",
+          code: "chatgpt_submission_not_sent",
+          retryable: true,
+          cause: normalized,
+        },
+      );
+    } catch {
+      // If the post-timeout proof itself is unavailable, preserve the existing ambiguous outcome.
+      return normalized;
+    }
+  }
+
   private async waitForMultipartAcknowledgement(
     page: Page,
     initialResponseTurn: ChatGptAssistantTurnBinding,
@@ -3957,9 +4033,8 @@ export class ChatGptBrowserWorker {
     // Core smoke runs before the optional MCP connector is configured, so it must remain a
     // browser-only transport check. Connector setup has its own explicit verification operation.
     const capabilities: ChatGptWebCapabilities = { ...account, localToolsEnabled: false };
-    const modelId = account.solAvailable ? CHATGPT_WEB_MODEL_ID : CHATGPT_WEB_LUNA_MODEL_ID;
-    const reasoning = account.solAvailable ? "high" : "low";
-    const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+    const mode = resolveChatGptSmokeTestMode(capabilities);
+    const { modelId, effort: reasoning } = mode;
     const traceId = `smoke_${randomUUID().replaceAll("-", "")}`;
     const response = await this.runBrowserTurn({
       traceId,
@@ -4769,6 +4844,7 @@ export class ChatGptBrowserWorker {
           browserCapabilities,
           maxStageMessageTokens!,
           maxStageChars!,
+          requestedMode.effort,
         )
         : requestedMode;
       if (prepared.multipart) {
@@ -4958,11 +5034,13 @@ export class ChatGptBrowserWorker {
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
+      const stagingEfforts = chatGptWebMultipartStagingEfforts(browserCapabilities, requestedMode.effort);
+      let stagingEffort = stagingMode.effort;
       const selectStagingMode = () => (
         this.selectModelAndEffort(
           page,
           turn.modelId,
-          stagingMode.effort,
+          stagingEffort,
           browserCapabilities,
           checkpoint => diagnostics.capture(page, checkpoint),
           trackUsage,
@@ -5004,96 +5082,134 @@ export class ChatGptBrowserWorker {
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
         for (let index = 0; index < multipartStages.length; index += 1) {
           const stage = multipartStages[index]!;
-          // Each acknowledgement can replace the picker controls. Establish a fresh model/effort
-          // proof for the next physical submission, retaining family selection and usage evidence.
-          if (index > 0) mode = await this.runStage(
-            turn.traceId, `multipart_stage_${index + 1}_effort_selection`,
-            browserStageTimeouts.effortSelection, selectStagingMode,
-          );
-          let stageBaseline = await this.captureSubmissionBaseline(page, stage.text);
-          await this.runStage(
-            turn.traceId,
-            `multipart_stage_${index + 1}_attachment`,
-            browserStageTimeouts.promptAttachment,
-            (stageSignal) => this.attachPrompt(
-              page,
-              stage.text,
-              false,
-              checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
-              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-            ),
-            chatGptSuspensionClock,
-            true,
-          );
-          await diagnostics.capture(page, `multipart-stage-${index + 1}-attachment-complete`);
-          const recordStageUsage = await usageSubmission();
-          const evidence = await this.runStage(
-            turn.traceId,
-            `multipart_stage_${index + 1}_send`,
-            browserStageTimeouts.multipartStageSend,
-            (stageSignal) => this.sendAttachedPrompt(
-              page,
-              stageBaseline,
-              checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
-              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-              undefined,
-              { onSubmitted: recordStageUsage, onSendActivated: async () => {
-                await this.assertSelectedEffort(page, mode);
-                submissionRejection.begin(page);
-              } },
-              undefined,
-              launcherObservationRecovery
-                ? async (...args) => {
-                  const recovered = await recoverSubmissionObservation(...args);
-                  stageBaseline = recovered.baseline;
-                  return recovered;
-                }
-                : undefined,
-            ),
-          );
-          console.info(
-            `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}`,
-          );
-          await this.runStage(
-            turn.traceId,
-            `multipart_stage_${index + 1}_acknowledgement`,
-            browserStageTimeouts.multipartStageAcknowledgement,
-            async (stageSignal) => {
-              const acknowledgementSignal = turn.abortSignal
-                ? AbortSignal.any([stageSignal, turn.abortSignal])
-                : stageSignal;
-              const responseTurn = await this.waitForNewAssistantTurn(
-                page,
-                stageBaseline,
-                deadline,
-                acknowledgementSignal,
-                // A part still being ingested has produced no MCP activity, so there is no progress
-                // to consult here; the dedicated acknowledgement stage owns this wait.
-                undefined,
-                CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
-                undefined,
-                launcherObservationRecovery
-                  ? async (...args) => {
-                    const recovered = await recoverAssistantObservation(...args);
-                    stageBaseline = recovered.baseline;
-                    return recovered;
-                  }
-                  : undefined,
+          for (let attempt = 0; ; attempt += 1) {
+            let sendActivated = false;
+            let stageSubmitted = false;
+            let recordStageUsage: (() => void) | undefined;
+            const commitStageUsage = () => {
+              if (!stageSubmitted) return;
+              recordStageUsage?.();
+              stageSubmitted = false;
+            };
+            try {
+              // Each acknowledgement can replace the picker controls. A promoted retry also starts
+              // from a fresh effort proof before recapturing the baseline and reattaching the part.
+              if (index > 0 || attempt > 0) mode = await this.runStage(
+                turn.traceId, `multipart_stage_${index + 1}_effort_selection`,
+                browserStageTimeouts.effortSelection, selectStagingMode,
               );
-              await this.waitForMultipartAcknowledgement(
-                page,
-                responseTurn,
-                stageBaseline,
-                stage,
-                deadline,
-                acknowledgementSignal,
-                turn.externalProgress,
+              let stageBaseline = await this.captureSubmissionBaseline(page, stage.text);
+              await this.runStage(
+                turn.traceId,
+                `multipart_stage_${index + 1}_attachment`,
+                browserStageTimeouts.promptAttachment,
+                (stageSignal) => this.attachPrompt(
+                  page,
+                  stage.text,
+                  false,
+                  checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
+                  turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+                ),
+                chatGptSuspensionClock,
+                true,
               );
-            },
-            chatGptSuspensionClock,
-          );
-          const stageRejection = await submissionRejection.failure();
-          if (stageRejection) throw stageRejection;
+              await diagnostics.capture(page, `multipart-stage-${index + 1}-attachment-complete`);
+              recordStageUsage = await usageSubmission();
+              const evidence = await this.runStage(
+                turn.traceId,
+                `multipart_stage_${index + 1}_send`,
+                browserStageTimeouts.multipartStageSend,
+                (stageSignal) => this.sendAttachedPrompt(
+                  page,
+                  stageBaseline,
+                  checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
+                  turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+                  undefined,
+                  { onSubmitted: recordStageUsage ? () => { stageSubmitted = true; } : undefined, onSendActivated: async () => {
+                    await this.assertSelectedEffort(page, mode);
+                    submissionRejection.begin(page);
+                    sendActivated = true;
+                  } },
+                  undefined,
+                  launcherObservationRecovery
+                    ? async (...args) => {
+                      const recovered = await recoverSubmissionObservation(...args);
+                      stageBaseline = recovered.baseline;
+                      return recovered;
+                    }
+                    : undefined,
+                ),
+              );
+              console.info(
+                `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length} submission accepted evidence=${evidence}`,
+              );
+              await this.runStage(
+                turn.traceId,
+                `multipart_stage_${index + 1}_acknowledgement`,
+                browserStageTimeouts.multipartStageAcknowledgement,
+                async (stageSignal) => {
+                  const acknowledgementSignal = turn.abortSignal
+                    ? AbortSignal.any([stageSignal, turn.abortSignal])
+                    : stageSignal;
+                  const responseTurn = await this.waitForNewAssistantTurn(
+                    page,
+                    stageBaseline,
+                    deadline,
+                    acknowledgementSignal,
+                    // A part still being ingested has produced no MCP activity, so there is no progress
+                    // to consult here; the dedicated acknowledgement stage owns this wait.
+                    undefined,
+                    CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
+                    undefined,
+                    launcherObservationRecovery
+                      ? async (...args) => {
+                        const recovered = await recoverAssistantObservation(...args);
+                        stageBaseline = recovered.baseline;
+                        return recovered;
+                      }
+                      : undefined,
+                  );
+                  await this.waitForMultipartAcknowledgement(
+                    page,
+                    responseTurn,
+                    stageBaseline,
+                    stage,
+                    deadline,
+                    acknowledgementSignal,
+                    turn.externalProgress,
+                  );
+                },
+                chatGptSuspensionClock,
+              );
+              const stageRejection = await submissionRejection.failure();
+              if (stageRejection) throw stageRejection;
+              commitStageUsage();
+              break;
+            } catch (error) {
+              const preserveCancellation = (error instanceof DOMException && error.name === "AbortError")
+                || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled");
+              const stageRejection = !preserveCancellation && sendActivated
+                ? await submissionRejection.failure()
+                : undefined;
+              const failure = stageRejection ?? error;
+              const stagingEffortIndex = stagingEfforts.indexOf(stagingEffort);
+              const nextStagingEffort = stagingEffortIndex >= 0 ? stagingEfforts[stagingEffortIndex + 1] : undefined;
+              const sizeRejected = failure instanceof ChatGptWebAdapterError
+                && failure.code === "chatgpt_message_length_exceeds_limit";
+              if (nextStagingEffort && sizeRejected) {
+                const rejectedEffort = stagingEffort;
+                stagingEffort = nextStagingEffort;
+                submissionRejection.reset();
+                console.warn(
+                  `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length}`
+                  + ` was rejected by ChatGPT in ${rejectedEffort} effort; retrying this part in ${nextStagingEffort}`,
+                );
+                continue;
+              }
+              if (!sizeRejected) commitStageUsage();
+              throw failure;
+            }
+          }
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
           await turn.onMultipartStageAcknowledged?.(index + 1);
         }
@@ -5187,36 +5303,51 @@ export class ChatGptBrowserWorker {
       await diagnostics.capture(page, "file-attachment-complete");
       const completionTracker = new ChatGptCompletionTracker();
       const recordFinalUsage = await usageSubmission();
-      const finalSubmissionEvidence = await this.runStage(
-        turn.traceId,
-        "send",
-        // A multipart commit lands on a conversation already carrying every staged part, so it
-        // needs the same acceptance headroom the stages themselves get.
-        prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
-        (stageSignal) => this.sendAttachedPrompt(
+      const initialSendProgressRevision = turn.externalProgress?.snapshot().revision;
+      let sendActivated = false;
+      let finalSubmissionEvidence: ChatGptSubmissionEvidence;
+      try {
+        finalSubmissionEvidence = await this.runStage(
+          turn.traceId,
+          "send",
+          // A multipart commit lands on a conversation already carrying every staged part, so it
+          // needs the same acceptance headroom the stages themselves get.
+          chatGptSendStageTimeout(Boolean(prepared.multipart)),
+          (stageSignal) => this.sendAttachedPrompt(
+            page,
+            submissionBaseline,
+            checkpoint => diagnostics.capture(page, checkpoint),
+            turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+            turn.externalProgress,
+            { ...turn, onSubmitted: () => {
+              recordFinalUsage?.();
+              return turn.onSubmitted?.();
+            }, onSendActivated: async () => {
+              await this.assertSelectedEffort(page, mode);
+              submissionRejection.begin(page);
+              sendActivated = true;
+              await turn.onSendActivated?.();
+            } },
+            completionTracker,
+            launcherObservationRecovery
+              ? async (...args) => {
+                const recovered = await recoverSubmissionObservation(...args);
+                submissionBaseline = recovered.baseline;
+                return recovered;
+              }
+              : undefined,
+          ),
+        );
+      } catch (error) {
+        throw await this.classifySendFailure(
+          error,
           page,
           submissionBaseline,
-          checkpoint => diagnostics.capture(page, checkpoint),
-          turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
           turn.externalProgress,
-          { ...turn, onSubmitted: () => {
-            recordFinalUsage?.();
-            return turn.onSubmitted?.();
-          }, onSendActivated: async () => {
-            await this.assertSelectedEffort(page, mode);
-            submissionRejection.begin(page);
-            await turn.onSendActivated?.();
-          } },
-          completionTracker,
-          launcherObservationRecovery
-            ? async (...args) => {
-              const recovered = await recoverSubmissionObservation(...args);
-              submissionBaseline = recovered.baseline;
-              return recovered;
-            }
-            : undefined,
-        ),
-      );
+          initialSendProgressRevision,
+          sendActivated,
+        );
+      }
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
       let responseTurn = await this.waitForNewAssistantTurn(
         page,
