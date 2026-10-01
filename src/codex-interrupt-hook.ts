@@ -40,13 +40,36 @@ function posixShellArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function cmdShellArgument(value: string): string {
-  if (value.includes('"') || /[\r\n]/.test(value)) {
+function powershellLiteral(value: string): string {
+  if (value.includes("\0")) {
     throw new Error("Codex interrupt hook command contains an invalid Windows path character");
   }
-  // Codex executes command hooks through cmd.exe /C on Windows. Quoting every argument preserves
-  // spaces and shell metacharacters in the installed runtime path.
-  return `"${value}"`;
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function windowsPowerShellExecutable(): string {
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+function windowsInterruptHookCommand(args: string[]): string {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "try {",
+    `  & ${args.map(powershellLiteral).join(" ")}`,
+    "  if ($null -eq $LASTEXITCODE) { exit 1 }",
+    "  exit $LASTEXITCODE",
+    "} catch {",
+    "  exit 1",
+    "}",
+    "",
+  ].join("\n");
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  // Codex 0.158 and earlier hand command hooks to cmd.exe /C through the Windows argv encoder.
+  // A command containing embedded quotes can therefore be re-escaped before cmd.exe parses it.
+  // Keep the outer hook command quote-free and move all path quoting into an encoded PowerShell
+  // payload. This also preserves paths with spaces and shell metacharacters.
+  return `${windowsPowerShellExecutable()} -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
 }
 
 export function codexInterruptHookCommand(
@@ -56,7 +79,9 @@ export function codexInterruptHookCommand(
 ): string {
   const absoluteHome = platform === "win32" ? win32.resolve(home) : posix.resolve(home);
   const args = [...config.runtimeCommand, "--home", absoluteHome, "hook", "interrupt"];
-  return args.map(platform === "win32" ? cmdShellArgument : posixShellArgument).join(" ");
+  return platform === "win32"
+    ? windowsInterruptHookCommand(args)
+    : args.map(posixShellArgument).join(" ");
 }
 
 function lineEnding(text: string): "\n" | "\r\n" | "\r" {

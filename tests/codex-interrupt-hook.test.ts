@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import {
   MANAGED_INTERRUPT_HOOK_END,
   codexInterruptHookCommand,
@@ -89,7 +90,7 @@ test("trusts the canonical Codex config path before a new config file exists", (
   }
 });
 
-test("Interrupt hook command is absolute, quoted, and bound to the exact application home", () => {
+test("Interrupt hook command is shell-safe and bound to the exact application home", () => {
   expect(codexInterruptHookCommand(
     { runtimeCommand: ["/Applications/Codex Web GPT.app/runtime/bun", "/Applications/Codex Web GPT.app/app/cli.js"] },
     "/Users/test/Application Support/Codex Web GPT",
@@ -98,14 +99,67 @@ test("Interrupt hook command is absolute, quoted, and bound to the exact applica
     "'/Applications/Codex Web GPT.app/runtime/bun' '/Applications/Codex Web GPT.app/app/cli.js'"
       + " '--home' '/Users/test/Application Support/Codex Web GPT' 'hook' 'interrupt'",
   );
-  expect(codexInterruptHookCommand(
+  const windowsCommand = codexInterruptHookCommand(
     { runtimeCommand: ["C:\\Program Files\\Codex Web GPT\\bun.exe", "C:\\Program Files\\Codex Web GPT\\cli.js"] },
     "C:\\Users\\test\\Codex Web GPT",
     "win32",
-  )).toBe(
-    '"C:\\Program Files\\Codex Web GPT\\bun.exe" "C:\\Program Files\\Codex Web GPT\\cli.js"'
-      + ' "--home" "C:\\Users\\test\\Codex Web GPT" "hook" "interrupt"',
   );
+  const windowsParts = windowsCommand.split(" ");
+  const expectedPowerShell = win32.join(
+    process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+  expect(windowsParts[0]).toBe(expectedPowerShell);
+  expect(win32.isAbsolute(windowsParts[0]!)).toBe(true);
+  expect(windowsParts.slice(0, -1)).toEqual([
+    expectedPowerShell,
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-EncodedCommand",
+  ]);
+  expect(windowsCommand).not.toContain('"');
+  expect(Buffer.from(windowsParts.at(-1)!, "base64").toString("utf16le")).toBe(
+    "$ErrorActionPreference = 'Stop'\n"
+      + "try {\n"
+      + "  & 'C:\\Program Files\\Codex Web GPT\\bun.exe' 'C:\\Program Files\\Codex Web GPT\\cli.js'"
+      + " '--home' 'C:\\Users\\test\\Codex Web GPT' 'hook' 'interrupt'\n"
+      + "  if ($null -eq $LASTEXITCODE) { exit 1 }\n"
+      + "  exit $LASTEXITCODE\n"
+      + "} catch {\n"
+      + "  exit 1\n"
+      + "}\n",
+  );
+});
+
+test("Windows Interrupt hook encoding preserves PowerShell-sensitive path characters", () => {
+  const command = codexInterruptHookCommand(
+    { runtimeCommand: ["C:\\Users\\O'Brien & Sons\\bun.exe", "C:\\app\\cli.js"] },
+    "C:\\Users\\O'Brien & Sons\\Codex Web GPT",
+    "win32",
+  );
+  const encoded = command.split(" ").at(-1)!;
+  expect(command).not.toContain("O'Brien");
+  expect(Buffer.from(encoded, "base64").toString("utf16le")).toContain(
+    "& 'C:\\Users\\O''Brien & Sons\\bun.exe' 'C:\\app\\cli.js'"
+      + " '--home' 'C:\\Users\\O''Brien & Sons\\Codex Web GPT' 'hook' 'interrupt'",
+  );
+});
+
+test.skipIf(process.platform !== "win32")("Windows Interrupt hook fails when its runtime cannot be started", () => {
+  const command = codexInterruptHookCommand(
+    { runtimeCommand: ["C:\\definitely-missing-codex-web-gpt\\runtime.exe"] },
+    "C:\\Users\\test\\Codex Web GPT",
+    "win32",
+  );
+  const result = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", command], {
+    encoding: "utf8",
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.status).not.toBe(0);
 });
 
 test("Interrupt hook trust hash is deterministic and changes with its exact command", () => {
