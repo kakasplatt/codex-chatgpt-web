@@ -597,6 +597,74 @@ test("fresh-conversation control is translated, disabled in Zero Risk, and invok
   }
 });
 
+test("Settings places logout-and-cache-clear below Language and invokes the shared logout flow", async () => {
+  const ts = require("typescript");
+  const vm = require("node:vm");
+  const settings = appSource.slice(appSource.indexOf("function SettingsSurface("), appSource.indexOf("function ContentSurface("));
+  const transpile = (source, fileName) => ts.transpileModule(source, {
+    fileName, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS,
+      jsx: ts.JsxEmit.React, jsxFactory: "element" },
+  }).outputText;
+  const translated = { exports: {} };
+  vm.runInNewContext(transpile(fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8"), "i18n.ts"), translated);
+  let render, logoutCalls = 0;
+  const sandbox = {
+    element: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: value => [value, () => {}],
+    useEffect() {},
+    api: {}, messageOf: String, platformLabel: String,
+  };
+  for (const name of ["ContentSurface", "SectionHeading", "SettingRow", "PrimaryButton", "SecondaryButton", "Switch", "InteractionModePicker", "LanguageMenu", "NoticeRow", "Icon", "DoctorSummary", "BrandMark"]) sandbox[name] = name;
+  vm.runInNewContext(transpile(settings, "settings.tsx") + "\nrender = SettingsSurface;", Object.assign(sandbox, { render }));
+  render = sandbox.render;
+
+  for (const language of Object.keys(require("../electron/languages.json"))) {
+    const copy = translated.exports.copyFor(language);
+    assert.equal(typeof copy.logoutAndClearCache, "string");
+    assert.ok(copy.logoutAndClearCache.length > 3);
+    assert.equal(typeof copy.logoutAndClearCacheBody, "string");
+    assert.ok(copy.logoutAndClearCacheBody.length > 10);
+    assert.equal(typeof copy.manualLogoutAndClearCacheUnavailable, "string");
+    assert.ok(copy.manualLogoutAndClearCacheUnavailable.length > 10);
+
+    const tree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
+      snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: "automatic", coreSetupComplete: true } },
+      updateState() {}, onLogout: async () => { logoutCalls++; },
+    });
+    const visit = node => Array.isArray(node) ? node.flatMap(visit) : node && typeof node === "object"
+      ? [node, ...visit(node.children ?? [])] : [];
+    const nodes = visit(tree);
+    const settingsList = nodes.find(node => node.type === "div" && node.props.className === "settings-list");
+    assert.ok(settingsList);
+    const rows = settingsList.children.filter(node => node?.type === "SettingRow");
+    const languageIndex = rows.findIndex(row => row.props.label === copy.language);
+    const logoutIndex = rows.findIndex(row => row.props.label === copy.logOut);
+    assert.equal(logoutIndex, languageIndex + 1);
+    assert.equal(rows[logoutIndex].props.body, copy.logoutAndClearCacheBody);
+    const button = visit(rows[logoutIndex]).find(node => node.type === "SecondaryButton" && node.children[0] === copy.logoutAndClearCache);
+    assert.ok(button);
+    assert.equal(button.props.disabled, false);
+    button.props.onClick();
+    await new Promise(resolve => setImmediate(resolve));
+
+    const manualTree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
+      snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: "manual", coreSetupComplete: true } },
+      updateState() {}, onLogout: async () => { logoutCalls++; },
+    });
+    const manualNodes = visit(manualTree);
+    const manualSettingsList = manualNodes.find(node => node.type === "div" && node.props.className === "settings-list");
+    const manualRows = manualSettingsList.children.filter(node => node?.type === "SettingRow");
+    const manualLogoutRow = manualRows.find(row => row.props.label === copy.logOut);
+    assert.ok(manualLogoutRow);
+    assert.equal(manualLogoutRow.props.body, copy.manualLogoutAndClearCacheUnavailable);
+    const manualButton = visit(manualLogoutRow).find(node => node.type === "SecondaryButton" && node.children[0] === copy.logoutAndClearCache);
+    assert.ok(manualButton);
+    assert.equal(manualButton.props.disabled, true);
+  }
+
+  assert.equal(logoutCalls, Object.keys(require("../electron/languages.json")).length);
+});
+
 test("plugin rename invalidates verification only after success and rejects active browser work", async () => {
   const vm = require("node:vm");
   const handlers = new Map();

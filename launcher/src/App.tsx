@@ -728,6 +728,7 @@ function LauncherShell({
                 copy={copy}
                 devProfile={devProfile}
                 language={language}
+                onLogout={logoutChatGpt}
                 setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
@@ -1604,6 +1605,7 @@ function SettingsSurface({
   copy,
   devProfile,
   language,
+  onLogout,
   setError,
   snapshot,
   updateState,
@@ -1612,6 +1614,7 @@ function SettingsSurface({
   copy: Copy;
   devProfile: boolean;
   language: Language;
+  onLogout: () => Promise<void>;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
@@ -1647,6 +1650,15 @@ function SettingsSurface({
       updateState(await api!.setLanguage(next));
     } catch (cause) {
       setError(messageOf(cause));
+    }
+  };
+  const logoutAndClearCache = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onLogout();
+    } finally {
+      setBusy(false);
     }
   };
   const runDoctor = async () => {
@@ -1843,6 +1855,13 @@ function SettingsSurface({
         </SettingRow>
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />
+        </SettingRow>
+        <SettingRow body={snapshot.state.browserInteractionMode === "manual"
+          ? copy.manualLogoutAndClearCacheUnavailable : copy.logoutAndClearCacheBody} label={copy.logOut}>
+          <SecondaryButton
+            disabled={busy || snapshot.state.browserInteractionMode === "manual"}
+            onClick={() => void logoutAndClearCache()}
+          >{copy.logoutAndClearCache}</SecondaryButton>
         </SettingRow>
       </div>
 
