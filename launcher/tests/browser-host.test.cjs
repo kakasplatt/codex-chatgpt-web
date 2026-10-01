@@ -3586,6 +3586,10 @@ test("Zero Risk fails closed at every primary-surface inspection boundary", asyn
       executeJavaScript: async () => { domOperations += 1; },
       insertCSS: async () => { domOperations += 1; return "css-key"; },
       removeInsertedCSS: async () => { domOperations += 1; },
+      session: {
+        clearStorageData: async () => { domOperations += 1; },
+        clearCache: async () => { domOperations += 1; },
+      },
     } },
     viewportCssKey: null,
     surfaceId: "manual-surface",
@@ -3596,6 +3600,7 @@ test("Zero Risk fails closed at every primary-surface inspection boundary", asyn
   await assert.rejects(fixture.probeAuthentication(), /disabled in Zero Risk mode/);
   await assert.rejects(fixture.inspectSession(true), /disabled in Zero Risk mode/);
   await assert.rejects(fixture.inspectLimitsPlan(), /disabled in Zero Risk mode/);
+  await assert.rejects(fixture.logout(), /disabled in Zero Risk mode/);
   assert.equal(domOperations, 0);
 });
 

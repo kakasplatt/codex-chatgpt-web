@@ -1856,8 +1856,12 @@ function SettingsSurface({
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>
-        <SettingRow body={copy.logoutAndClearCacheBody} label={copy.logOut}>
-          <SecondaryButton disabled={busy} onClick={() => void logoutAndClearCache()}>{copy.logoutAndClearCache}</SecondaryButton>
+        <SettingRow body={snapshot.state.browserInteractionMode === "manual"
+          ? copy.manualLogoutAndClearCacheUnavailable : copy.logoutAndClearCacheBody} label={copy.logOut}>
+          <SecondaryButton
+            disabled={busy || snapshot.state.browserInteractionMode === "manual"}
+            onClick={() => void logoutAndClearCache()}
+          >{copy.logoutAndClearCache}</SecondaryButton>
         </SettingRow>
       </div>
 

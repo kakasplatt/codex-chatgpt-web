@@ -624,6 +624,8 @@ test("Settings places logout-and-cache-clear below Language and invokes the shar
     assert.ok(copy.logoutAndClearCache.length > 3);
     assert.equal(typeof copy.logoutAndClearCacheBody, "string");
     assert.ok(copy.logoutAndClearCacheBody.length > 10);
+    assert.equal(typeof copy.manualLogoutAndClearCacheUnavailable, "string");
+    assert.ok(copy.manualLogoutAndClearCacheUnavailable.length > 10);
 
     const tree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
       snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: "automatic", coreSetupComplete: true } },
@@ -641,8 +643,23 @@ test("Settings places logout-and-cache-clear below Language and invokes the shar
     assert.equal(rows[logoutIndex].props.body, copy.logoutAndClearCacheBody);
     const button = visit(rows[logoutIndex]).find(node => node.type === "SecondaryButton" && node.children[0] === copy.logoutAndClearCache);
     assert.ok(button);
+    assert.equal(button.props.disabled, false);
     button.props.onClick();
     await new Promise(resolve => setImmediate(resolve));
+
+    const manualTree = render({ copy, devProfile: false, language, configureInteractionMode() {}, setError() {},
+      snapshot: { connectorNames: { automatic: "Codex Native2", manual: "Codex Zero Risk" }, state: { browserInteractionMode: "manual", coreSetupComplete: true } },
+      updateState() {}, onLogout: async () => { logoutCalls++; },
+    });
+    const manualNodes = visit(manualTree);
+    const manualSettingsList = manualNodes.find(node => node.type === "div" && node.props.className === "settings-list");
+    const manualRows = manualSettingsList.children.filter(node => node?.type === "SettingRow");
+    const manualLogoutRow = manualRows.find(row => row.props.label === copy.logOut);
+    assert.ok(manualLogoutRow);
+    assert.equal(manualLogoutRow.props.body, copy.manualLogoutAndClearCacheUnavailable);
+    const manualButton = visit(manualLogoutRow).find(node => node.type === "SecondaryButton" && node.children[0] === copy.logoutAndClearCache);
+    assert.ok(manualButton);
+    assert.equal(manualButton.props.disabled, true);
   }
 
   assert.equal(logoutCalls, Object.keys(require("../electron/languages.json")).length);
