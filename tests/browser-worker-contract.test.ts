@@ -284,6 +284,23 @@ test("response caching rechecks CSS visibility without requiring a DOM mutation"
   }
 });
 
+test("response DOM snapshot marks caught evaluation failures as unsuccessful observations", async () => {
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as {
+    responseDomSnapshot(
+      locator: { evaluate: () => Promise<unknown>; page: () => { isClosed: () => boolean } },
+      cache: { lastObservationSucceeded?: boolean },
+    ): Promise<{ responsePresent: boolean }>;
+  };
+  const cache: { lastObservationSucceeded?: boolean } = {};
+  const locator = {
+    evaluate: async () => { throw new Error("simulated Playwright evaluate failure"); },
+    page: () => ({ isClosed: () => false }),
+  };
+
+  await expect(worker.responseDomSnapshot(locator, cache)).resolves.toMatchObject({ responsePresent: false });
+  expect(cache.lastObservationSucceeded).toBeFalse();
+});
+
 test("browser turns run concurrently up to the five-tab limit", async () => {
   expect(MAX_CHATGPT_BROWSER_TABS).toBe(5);
   const releases = new Map<string, () => void>();
@@ -4648,7 +4665,12 @@ test("multipart DOM success recovers browser UI health after an observation time
   const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
 
   await expect(observe.call(
-    { responseDomSnapshot: async () => snapshot },
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: { lastObservationSucceeded?: boolean }) => {
+        cache.lastObservationSucceeded = true;
+        return snapshot;
+      },
+    },
     page,
     binding,
     {},
@@ -4660,6 +4682,41 @@ test("multipart DOM success recovers browser UI health after an observation time
     browserUiHealth,
   )).resolves.toBeUndefined();
   expect(browserUiHealth.current()).toBe("responsive");
+});
+
+test("multipart DOM observation failure does not recover degraded browser UI health", async () => {
+  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { locator: { locator: () => absent, getByText: () => absent, getByTestId: () => absent } };
+  const snapshot = {
+    responsePresent: true,
+    stoppedThinkingVisible: true,
+    visibleText: "",
+    fullHtml: "",
+    completionActionVisible: false,
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  browserUiHealth.record("dom-observation-timeout", 1_000);
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: { lastObservationSucceeded?: boolean }) => {
+        cache.lastObservationSucceeded = false;
+        return snapshot;
+      },
+    },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toThrow();
+  expect(browserUiHealth.current()).toBe("degraded");
 });
 
 test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {

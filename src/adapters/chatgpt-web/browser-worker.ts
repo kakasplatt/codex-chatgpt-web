@@ -1797,6 +1797,7 @@ interface ChatGptResponseDomCache {
   snapshot?: ChatGptResponseDomSnapshot;
   fullScans?: number;
   cacheHits?: number;
+  lastObservationSucceeded?: boolean;
 }
 
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
@@ -3877,7 +3878,7 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-      browserUiHealth.record("dom-observation-ok");
+      if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
           page,
@@ -3890,7 +3891,7 @@ export class ChatGptBrowserWorker {
           responseDomCache.key = undefined;
           responseDomCache.snapshot = undefined;
           snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-          browserUiHealth.record("dom-observation-ok");
+          if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
         }
       }
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
@@ -4161,6 +4162,7 @@ export class ChatGptBrowserWorker {
     responseTurn: Locator,
     cache?: ChatGptResponseDomCache,
   ): Promise<ChatGptResponseDomSnapshot> {
+    if (cache) cache.lastObservationSucceeded = false;
     const observed = await responseTurn.evaluate((element, options) => {
       const root = element as HTMLElement;
       type ObserverState = {
@@ -4699,6 +4701,7 @@ export class ChatGptBrowserWorker {
       }
       return absentResponseDomSnapshot();
     }
+    if (cache) cache.lastObservationSucceeded = true;
     const snapshot = observed.snapshot ?? cache?.snapshot ?? absentResponseDomSnapshot();
     if (observed.snapshot && cache) {
       cache.key = observed.key;
@@ -5595,7 +5598,7 @@ export class ChatGptBrowserWorker {
         }
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-        browserUiHealth.record("dom-observation-ok");
+        if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
         if (!snapshot.responsePresent) {
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
@@ -5611,7 +5614,7 @@ export class ChatGptBrowserWorker {
               responseDomCache.key = undefined;
               responseDomCache.snapshot = undefined;
               snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-              browserUiHealth.record("dom-observation-ok");
+              if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
             }
           } catch (error) {
             if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
