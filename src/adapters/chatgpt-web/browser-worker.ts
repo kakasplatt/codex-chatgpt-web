@@ -3880,12 +3880,20 @@ export class ChatGptBrowserWorker {
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
-        const rebound = await this.reconcileAssistantTurnBinding(
-          page,
-          submissionBaseline,
-          responseTurn,
-          abortSignal,
-        );
+        let rebound: ChatGptAssistantTurnBinding;
+        try {
+          rebound = await this.reconcileAssistantTurnBinding(
+            page,
+            submissionBaseline,
+            responseTurn,
+            abortSignal,
+          );
+        } catch (error) {
+          if (error instanceof ChatGptBrowserObservationTimeoutError) {
+            browserUiHealth.record("dom-observation-timeout");
+          }
+          throw error;
+        }
         if (rebound.identity !== responseTurn.identity) {
           responseTurn = rebound;
           responseDomCache.key = undefined;

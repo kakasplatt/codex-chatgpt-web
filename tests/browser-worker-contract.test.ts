@@ -4719,6 +4719,50 @@ test("multipart DOM observation failure does not recover degraded browser UI hea
   expect(browserUiHealth.current()).toBe("degraded");
 });
 
+test("multipart reconciliation timeout degrades browser UI health", async () => {
+  const absent = {
+    last() { return this; },
+    filter() { return this; },
+    locator() { return this; },
+    getByText() { return this; },
+    getByTestId() { return this; },
+    count: async () => 0,
+    isVisible: async () => false,
+  };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { identity: "assistant:initial", locator: absent };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: { lastObservationSucceeded?: boolean }) => {
+        cache.lastObservationSucceeded = false;
+        return {
+          responsePresent: false,
+          stoppedThinkingVisible: false,
+          visibleText: "",
+          fullHtml: "",
+          completionActionVisible: false,
+        };
+      },
+      reconcileAssistantTurnBinding: async () => {
+        throw new ChatGptBrowserObservationTimeoutError(5);
+      },
+    },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toBeInstanceOf(ChatGptBrowserObservationTimeoutError);
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
 test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {
   // The classifier runs inside page.evaluate, so it cannot be imported. Extract and execute the
   // exact shipped source so the test covers the code that actually runs.
