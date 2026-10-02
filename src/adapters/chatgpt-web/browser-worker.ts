@@ -3853,6 +3853,7 @@ export class ChatGptBrowserWorker {
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
     completionTracker = new ChatGptCompletionTracker(),
+    browserUiHealth = new ChatGptBrowserUiHealthTracker(),
   ): Promise<void> {
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
     // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
@@ -3876,6 +3877,7 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+      browserUiHealth.record("dom-observation-ok");
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
           page,
@@ -3888,6 +3890,7 @@ export class ChatGptBrowserWorker {
           responseDomCache.key = undefined;
           responseDomCache.snapshot = undefined;
           snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+          browserUiHealth.record("dom-observation-ok");
         }
       }
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
@@ -5315,6 +5318,8 @@ export class ChatGptBrowserWorker {
                     deadline,
                     acknowledgementSignal,
                     turn.externalProgress,
+                    undefined,
+                    browserUiHealth,
                   );
                 },
                 chatGptSuspensionClock,

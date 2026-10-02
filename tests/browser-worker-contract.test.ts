@@ -4631,6 +4631,37 @@ test("multipart observation surfaces Stopped thinking on its first observation e
   expect(acknowledged).toBeFalse();
 });
 
+test("multipart DOM success recovers browser UI health after an observation timeout", async () => {
+  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { locator: { locator: () => absent, getByText: () => absent, getByTestId: () => absent } };
+  const snapshot = {
+    responsePresent: true,
+    stoppedThinkingVisible: false,
+    visibleText: "ACK",
+    fullHtml: "ACK",
+    completionActionVisible: true,
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  browserUiHealth.record("dom-observation-timeout", 1_000);
+  const completionTracker = { update: () => true };
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    { responseDomSnapshot: async () => snapshot },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    completionTracker,
+    browserUiHealth,
+  )).resolves.toBeUndefined();
+  expect(browserUiHealth.current()).toBe("responsive");
+});
+
 test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {
   // The classifier runs inside page.evaluate, so it cannot be imported. Extract and execute the
   // exact shipped source so the test covers the code that actually runs.
