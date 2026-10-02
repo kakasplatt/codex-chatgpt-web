@@ -1684,6 +1684,53 @@ export class ChatGptTurnDomHealthTracker {
   }
 }
 
+export type ChatGptBrowserUiHealth = "responsive" | "degraded" | "unresponsive";
+export type ChatGptBrowserUiHealthReason =
+  | "dom-observation-timeout"
+  | "dom-observation-ok"
+  | "renderer-unresponsive"
+  | "renderer-responsive";
+
+export interface ChatGptBrowserUiHealthTransition {
+  previous: ChatGptBrowserUiHealth;
+  current: ChatGptBrowserUiHealth;
+  reason: ChatGptBrowserUiHealthReason;
+  at: number;
+}
+
+export class ChatGptBrowserUiHealthTracker {
+  private health: ChatGptBrowserUiHealth = "responsive";
+
+  current(): ChatGptBrowserUiHealth {
+    return this.health;
+  }
+
+  record(
+    reason: ChatGptBrowserUiHealthReason,
+    at = Date.now(),
+  ): ChatGptBrowserUiHealthTransition | undefined {
+    let next = this.health;
+    switch (reason) {
+      case "dom-observation-timeout":
+        if (this.health === "responsive") next = "degraded";
+        break;
+      case "dom-observation-ok":
+        if (this.health === "degraded") next = "responsive";
+        break;
+      case "renderer-unresponsive":
+        next = "unresponsive";
+        break;
+      case "renderer-responsive":
+        if (this.health === "unresponsive") next = "responsive";
+        break;
+    }
+    if (next === this.health) return undefined;
+    const previous = this.health;
+    this.health = next;
+    return { previous, current: next, reason, at };
+  }
+}
+
 /**
  * Consecutive internal observation faults tolerated before a turn is abandoned.
  *
@@ -4741,6 +4788,16 @@ export class ChatGptBrowserWorker {
     let activityFinished = false;
     let lastHeartbeatFailureAt = 0;
     let activityStage: "preparing" | "sending" | "chatgpt" = "preparing";
+    const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+    const recordRendererHealth = (renderer: {
+      rendererHealth: "responsive" | "unresponsive";
+      rendererStateChangedAt: number | null;
+    }) => {
+      browserUiHealth.record(
+        renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
+        renderer.rendererStateChangedAt ?? undefined,
+      );
+    };
     const sendHeartbeat = () => {
       if (activityFinished) return;
       if (heartbeatInFlight) { heartbeatPending = true; return; }
@@ -4750,7 +4807,9 @@ export class ChatGptBrowserWorker {
         traceId: turn.traceId,
         helperPid: process.pid,
         progress: { stage: activityStage, activeToolCalls: turn.externalProgress?.snapshot().activeToolCalls ?? 0 },
-      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).catch(error => {
+      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).then(renderer => {
+        if (renderer) recordRendererHealth(renderer);
+      }).catch(error => {
         if (activityFinished) return;
         const now = Date.now();
         if (now - lastHeartbeatFailureAt < 30_000) return;
@@ -4787,7 +4846,7 @@ export class ChatGptBrowserWorker {
           sendHeartbeat();
           await turn.onSubmitted?.();
         },
-      }, surfaceId, undefined, reused, lease.trackUsage === true);
+      }, surfaceId, undefined, reused, lease.trackUsage === true, browserUiHealth);
     } catch (error) {
       originalError = error;
       terminal = error instanceof ChatGptCompactionHandoffAccepted
@@ -4839,6 +4898,7 @@ export class ChatGptBrowserWorker {
     maintenancePage?: Page,
     reuseConversation = false,
     trackUsage = false,
+    browserUiHealth = new ChatGptBrowserUiHealthTracker(),
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
@@ -4976,6 +5036,9 @@ export class ChatGptBrowserWorker {
         cause: Error,
         callerSignal?: AbortSignal,
       ): Promise<void> => {
+        if (cause instanceof ChatGptBrowserObservationTimeoutError) {
+          browserUiHealth.record("dom-observation-timeout");
+        }
         if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause;
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
@@ -5000,12 +5063,18 @@ export class ChatGptBrowserWorker {
                   : turn.abortSignal
                     ? AbortSignal.any([stageSignal, turn.abortSignal])
                     : stageSignal;
-                await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+                const renderer = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
                   phase: "heartbeat",
                   traceId: turn.traceId,
                   helperPid: process.pid,
                   refreshViewport: true,
                 });
+                if (renderer) {
+                  browserUiHealth.record(
+                    renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
+                    renderer.rendererStateChangedAt ?? undefined,
+                  );
+                }
                 const rebound = await connectLauncherBrowserHost(
                   this.config.browserHostDescriptorPath!,
                   browserStageTimeouts.browserPage,
@@ -5521,6 +5590,7 @@ export class ChatGptBrowserWorker {
         }
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+        browserUiHealth.record("dom-observation-ok");
         if (!snapshot.responsePresent) {
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
@@ -5536,6 +5606,7 @@ export class ChatGptBrowserWorker {
               responseDomCache.key = undefined;
               responseDomCache.snapshot = undefined;
               snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+              browserUiHealth.record("dom-observation-ok");
             }
           } catch (error) {
             if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;

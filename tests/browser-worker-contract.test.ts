@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, chatGptSendStageTimeout, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptBrowserUiHealthTracker, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, chatGptSendStageTimeout, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptBrowserTabClosedError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -4405,6 +4405,54 @@ test("clearing the missing-response window preserves whether a response was ever
   tracker.clearMissingResponse();
   expect(tracker.update(absent, 5_000)).toBeUndefined();
   expect(tracker.update(absent, 6_000)).toContain("response DOM disappeared");
+});
+
+test("browser UI health tracks DOM degradation independently from native renderer health", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.current()).toBe("responsive");
+  expect(tracker.record("dom-observation-timeout", 1_000)).toEqual({
+    previous: "responsive",
+    current: "degraded",
+    reason: "dom-observation-timeout",
+    at: 1_000,
+  });
+  expect(tracker.record("dom-observation-timeout", 1_100)).toBeUndefined();
+  expect(tracker.current()).toBe("degraded");
+
+  expect(tracker.record("renderer-unresponsive", 1_200)).toEqual({
+    previous: "degraded",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 1_200,
+  });
+  expect(tracker.record("renderer-unresponsive", 1_300)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  // A successful DOM read and unrelated backend/MCP progress cannot overrule native
+  // Electron evidence that the renderer itself is still unresponsive.
+  expect(tracker.record("dom-observation-ok", 1_400)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+  expect(tracker.record("renderer-responsive", 1_500)).toEqual({
+    previous: "unresponsive",
+    current: "responsive",
+    reason: "renderer-responsive",
+    at: 1_500,
+  });
+  expect(tracker.record("renderer-responsive", 1_600)).toBeUndefined();
+});
+
+test("browser UI health recovers a DOM-only degradation after a successful observation", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+  tracker.record("dom-observation-timeout", 2_000);
+
+  expect(tracker.record("dom-observation-ok", 2_100)).toEqual({
+    previous: "degraded",
+    current: "responsive",
+    reason: "dom-observation-ok",
+    at: 2_100,
+  });
+  expect(tracker.record("dom-observation-ok", 2_200)).toBeUndefined();
 });
 
 test("the launcher helper transport carries MCP progress into the out-of-process browser worker", () => {
