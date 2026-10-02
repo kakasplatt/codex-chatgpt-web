@@ -468,6 +468,48 @@ test("turn renderer health transitions stay scoped to the owning tab", () => {
   }
 });
 
+test("manual turn renderer health follows native unresponsive and responsive events", () => {
+  const contents = new EventEmitter();
+  contents.setWindowOpenHandler = () => {};
+  contents.getURL = () => "https://chatgpt.com/?temporary-chat=true";
+  const tab = {
+    id: "manual-tab",
+    traceId: "manual-trace",
+    label: "ChatGPT 1",
+    status: "running",
+    loading: false,
+    interactionMode: "manual",
+    manualState: "awaiting-user",
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+    view: { webContents: contents },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: tab.id,
+    turnTabs: new Map([[tab.id, tab]]),
+    logger: { info() {}, warn() {}, error() {} },
+    publishState() {},
+    snapshot() { return { tabs: [...this.turnTabs.values()].map(value => this.tabSnapshot(value)) }; },
+  });
+  fixture.bindManualTurnContents(tab);
+
+  const originalDateNow = Date.now;
+  try {
+    let now = 2_000;
+    Date.now = () => now;
+    contents.emit("unresponsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererHealth, "unresponsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererStateChangedAt, 2_000);
+
+    now = 2_250;
+    contents.emit("responsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererHealth, "responsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererStateChangedAt, 2_250);
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
 test("browser surface visibility requires both requested and active state", () => {
   assert.equal(browserViewVisible(false, false, false), false);
   assert.equal(browserViewVisible(true, false, true), false);

@@ -1056,6 +1056,22 @@ class BrowserHost {
       this.signalManualTerminal(tab, "failed");
       this.removeTurnTab(tab, true);
     });
+    contents.on("unresponsive", () => {
+      if (tab.rendererHealth !== "unresponsive") {
+        tab.rendererHealth = "unresponsive";
+        tab.rendererStateChangedAt = Date.now();
+        this.publishState?.(this.snapshot());
+      }
+      this.logger.warn("browser.tab_unresponsive", { tabId: tab.id, traceId: tab.traceId });
+    });
+    contents.on("responsive", () => {
+      if (tab.rendererHealth !== "responsive") {
+        tab.rendererHealth = "responsive";
+        tab.rendererStateChangedAt = Date.now();
+        this.publishState?.(this.snapshot());
+      }
+      this.logger.info("browser.tab_responsive", { tabId: tab.id, traceId: tab.traceId });
+    });
   }
 
   bindWebContents() {
