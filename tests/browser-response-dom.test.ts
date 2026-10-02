@@ -14,6 +14,7 @@ const powerActivityHtml = readFileSync(new URL("./fixtures/chatgpt-power-activit
 const activitySummariesHtml = readFileSync(new URL("./fixtures/chatgpt-activity-summaries.html", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 type Snapshot = {
   responsePresent: boolean;
+  assistantSurfacePresent: boolean;
   visibleText: string;
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
@@ -49,6 +50,7 @@ async function snapshot(html: string): Promise<Snapshot> {
     });
     const errors: unknown[] = [];
     const locator = {
+      count: async () => window.document.getElementById("turn") ? 1 : 0,
       evaluate: async (callback: Function, options: unknown) => {
         try { return runInContext(`(${callback.toString()})`, context)(window.document.getElementById("turn"), options); }
         catch (error) { errors.push(error); throw error; }
@@ -72,6 +74,22 @@ async function snapshot(html: string): Promise<Snapshot> {
     else delete window.HTMLElement.prototype.append;
   }
 }
+
+test("a shared turn group is distinct from an observable assistant surface", async () => {
+  const shell = await snapshot('<section id="turn" data-turn-key="shared"><div data-user-message-bubble>Prompt</div></section>');
+  expect(shell.responsePresent).toBeTrue();
+  expect(shell.assistantSurfacePresent).toBeFalse();
+  expect(shell.visibleText).toBe("");
+  expect(shell.traceBlocks).toEqual([]);
+
+  const reasoning = await snapshot('<section id="turn" data-turn-key="shared"><div data-user-message-bubble>Prompt</div><div data-streaming-response-status><div role="status">Searching</div></div></section>');
+  expect(reasoning.responsePresent).toBeTrue();
+  expect(reasoning.assistantSurfacePresent).toBeTrue();
+
+  const answer = await snapshot('<section id="turn" data-turn-key="shared"><div data-content-search-unit-key="answer"><div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message"><p>Answer.</p></div></div></section>');
+  expect(answer.responsePresent).toBeTrue();
+  expect(answer.assistantSurfacePresent).toBeTrue();
+});
 
 test("captured Activity progress is commentary before any assistant answer exists", async () => {
   const progress = await snapshot(powerActivityHtml);

@@ -220,6 +220,37 @@ export async function selectLauncherPage(
   const targetId = descriptor.surfaceTargets[surfaceId];
   if (!targetId) throw new Error("Launcher browser surface is no longer registered with its native target");
   const deadline = Date.now() + timeoutMs;
+  class LauncherPageSelectionDeadlineError extends Error {}
+  const withSelectionDeadline = async <T>(operation: Promise<T>, selectionSignal?: AbortSignal): Promise<T> => {
+    if (abortSignal?.aborted || selectionSignal?.aborted) {
+      throw new DOMException("Launcher browser connection aborted", "AbortError");
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new LauncherPageSelectionDeadlineError();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    let onSelectionAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new LauncherPageSelectionDeadlineError()), remaining);
+          if (abortSignal) {
+            onAbort = () => reject(new DOMException("Launcher browser connection aborted", "AbortError"));
+            abortSignal.addEventListener("abort", onAbort, { once: true });
+          }
+          if (selectionSignal) {
+            onSelectionAbort = () => reject(new DOMException("Launcher browser connection aborted", "AbortError"));
+            selectionSignal.addEventListener("abort", onSelectionAbort, { once: true });
+          }
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) abortSignal?.removeEventListener("abort", onAbort);
+      if (onSelectionAbort) selectionSignal?.removeEventListener("abort", onSelectionAbort);
+    }
+  };
   do {
     if (abortSignal?.aborted) {
       throw new DOMException("Launcher browser connection aborted", "AbortError");
@@ -227,25 +258,83 @@ export async function selectLauncherPage(
     const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
     // Target metadata belongs to the browser process. Evaluating every page here makes an
     // unrelated busy/paused renderer block acquisition of an already-responsive owned page.
-    const inspected = await Promise.all(candidates.map(async candidate => {
-      const session = await candidate.context.newCDPSession(candidate.page).catch(() => undefined);
-      if (!session) return { ...candidate, targetId: undefined };
+    const inspectionController = new AbortController();
+    const inspectCandidate = async (candidate: { context: BrowserContext; page: Page }) => {
+      let session;
       try {
-        const { targetInfo } = await session.send("Target.getTargetInfo");
-        return { ...candidate, targetId: targetInfo.targetId };
-      } catch {
-        return { ...candidate, targetId: undefined };
-      } finally {
-        await session.detach().catch(() => {});
+        session = await withSelectionDeadline(
+          candidate.context.newCDPSession(candidate.page),
+          inspectionController.signal,
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError" && abortSignal?.aborted) throw error;
+        return { ...candidate, targetId: undefined as string | undefined };
       }
-    }));
-    const owned = inspected.filter(candidate => candidate.targetId === targetId);
-    if (owned.length === 1) {
-      return { context: owned[0].context, page: owned[0].page };
-    }
-    if (owned.length > 1) {
-      throw new Error(`Launcher browser host exposed ${owned.length} surfaces with the same ownership id`);
-    }
+      try {
+        const { targetInfo } = await withSelectionDeadline(
+          session.send("Target.getTargetInfo"),
+          inspectionController.signal,
+        );
+        return { ...candidate, targetId: targetInfo.targetId as string | undefined };
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError" && abortSignal?.aborted) throw error;
+        return { ...candidate, targetId: undefined as string | undefined };
+      } finally {
+        void withSelectionDeadline(session.detach(), inspectionController.signal).catch(() => {});
+      }
+    };
+    const owned = await new Promise<{ context: BrowserContext; page: Page } | undefined>((resolve, reject) => {
+      if (candidates.length === 0) {
+        resolve(undefined);
+        return;
+      }
+      let remaining = candidates.length;
+      let firstOwned: { context: BrowserContext; page: Page } | undefined;
+      let settleTimer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const resolveMissing = () => {
+        if (settled || remaining !== 0 || firstOwned) return;
+        settled = true;
+        inspectionController.abort();
+        resolve(undefined);
+      };
+      for (const candidate of candidates) {
+        void inspectCandidate(candidate).then(inspected => {
+          if (settled) return;
+          remaining -= 1;
+          if (inspected.targetId === targetId) {
+            if (firstOwned) {
+              settled = true;
+              if (settleTimer) clearTimeout(settleTimer);
+              inspectionController.abort();
+              reject(new Error("Launcher browser host exposed 2 surfaces with the same ownership id"));
+              return;
+            }
+            firstOwned = { context: inspected.context, page: inspected.page };
+            settleTimer = setTimeout(() => {
+              if (settled || !firstOwned) return;
+              settled = true;
+              inspectionController.abort();
+              resolve(firstOwned);
+            }, 0);
+            return;
+          }
+          resolveMissing();
+        }).catch(error => {
+          if (settled) return;
+          if (error instanceof DOMException && error.name === "AbortError") {
+            settled = true;
+            if (settleTimer) clearTimeout(settleTimer);
+            inspectionController.abort();
+            reject(error);
+            return;
+          }
+          remaining -= 1;
+          resolveMissing();
+        });
+      }
+    });
+    if (owned) return owned;
     await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
   throw new Error("Launcher browser host did not expose its owned browser surface");

@@ -247,6 +247,7 @@ test("response caching rechecks CSS visibility without requiring a DOM mutation"
       });
       const evaluationErrors: string[] = [];
       const locator = {
+        count: async () => 1,
         evaluate: async (callback: Function, options: unknown) => {
           try { return runInContext(`(${callback.toString()})`, context)(window.document.getElementById("turn"), options); }
           catch (error) { evaluationErrors.push((error as Error).stack ?? String(error)); throw error; }
@@ -1556,11 +1557,30 @@ test("a failed stale-browser disconnect prevents the replacement connection", as
   expect(replacementAttempts).toBe(0);
 });
 
+test("launcher observation recovery may retry reacquisition after the stale connection closed", async () => {
+  let closeAttempts = 0;
+  let replacementAttempts = 0;
+  const result = await connectAfterClosingBrowserConnection(
+    { close: async () => { closeAttempts += 1; } },
+    async () => {
+      replacementAttempts += 1;
+      if (replacementAttempts === 1) throw new Error("first reacquisition failed");
+      return "replacement";
+    },
+    2,
+  );
+
+  expect(result).toBe("replacement");
+  expect(closeAttempts).toBe(1);
+  expect(replacementAttempts).toBe(2);
+});
+
 test("closing the launcher page is an immediate terminal turn error", async () => {
   const responseDomSnapshot = (ChatGptBrowserWorker.prototype as unknown as {
     responseDomSnapshot(responseTurn: unknown): Promise<unknown>;
   }).responseDomSnapshot;
   const responseTurn = {
+    count: async () => 1,
     evaluate: async () => { throw new Error("Target page has been closed"); },
     page: () => ({ isClosed: () => true }),
   };
@@ -1574,6 +1594,34 @@ test("closing the launcher page is an immediate terminal turn error", async () =
     retryable: false,
   });
   expect((error as Error).message).toContain("turn was cancelled");
+});
+
+test("response DOM observation failures on an open page are not reclassified as absence", async () => {
+  const responseDomSnapshot = (ChatGptBrowserWorker.prototype as unknown as {
+    responseDomSnapshot(responseTurn: unknown): Promise<unknown>;
+  }).responseDomSnapshot;
+  const observationFailure = new Error("Execution context was destroyed while observing the response");
+  const responseTurn = {
+    count: async () => 1,
+    evaluate: async () => { throw observationFailure; },
+    page: () => ({ isClosed: () => false }),
+  };
+
+  await expect(responseDomSnapshot.call({}, responseTurn)).rejects.toBe(observationFailure);
+});
+
+test("response DOM probe timeouts stay observation timeouts instead of becoming missing DOM", async () => {
+  const responseDomSnapshot = (ChatGptBrowserWorker.prototype as unknown as {
+    responseDomSnapshot(responseTurn: unknown): Promise<unknown>;
+  }).responseDomSnapshot;
+  const playwrightTimeout = Object.assign(new Error("locator.evaluate: Timeout 2000ms exceeded"), { name: "TimeoutError" });
+  const responseTurn = {
+    count: async () => 1,
+    evaluate: async () => { throw playwrightTimeout; },
+    page: () => ({ isClosed: () => false }),
+  };
+
+  await expect(responseDomSnapshot.call({}, responseTurn)).rejects.toBeInstanceOf(ChatGptBrowserObservationTimeoutError);
 });
 
 test("active composer resolution waits for exactly one visible editor", async () => {
@@ -4316,16 +4364,82 @@ test("browser send accepts only new logical turns or generation, not remounted h
   expect(chatGptSubmissionEvidence({ ...idle, generationRunning: true })).toBe("generation_running");
 });
 
-test("visible reasoning keeps the browser turn healthy before final assistant markdown exists", () => {
+test("a static response shell expires when no semantic assistant progress appears", () => {
   const health = new ChatGptTurnDomHealthTracker(1_000, 500);
-  const reasoning = {
+  const shell = {
+    responsePresent: true,
+    running: false,
+    currentText: "",
+    completionActionVisible: false,
+    semanticProgress: "",
+  };
+  expect(health.update(shell, 1_000)).toBeUndefined();
+  expect(health.update(shell, 1_999)).toBeUndefined();
+  expect(health.update(shell, 2_000)).toContain("semantic assistant progress");
+});
+
+test("changing visible reasoning renews the semantic-progress grace window", () => {
+  const health = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const shell = {
     responsePresent: true,
     running: false,
     currentText: "",
     completionActionVisible: false,
   };
-  expect(health.update(reasoning, 1_000)).toBeUndefined();
-  expect(health.update(reasoning, 10_000)).toBeUndefined();
+  expect(health.update({ ...shell, semanticProgress: "Searching" }, 1_000)).toBeUndefined();
+  expect(health.update({ ...shell, semanticProgress: "Searching" }, 1_999)).toBeUndefined();
+  expect(health.update({ ...shell, semanticProgress: "Reading result 1" }, 2_000)).toBeUndefined();
+  expect(health.update({ ...shell, semanticProgress: "Reading result 1" }, 2_999)).toBeUndefined();
+  expect(health.update({ ...shell, semanticProgress: "Reading result 1" }, 3_000)).toContain("semantic assistant progress");
+});
+
+test("running generation suspends semantic-progress expiry and restarts its grace", () => {
+  const health = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const shell = {
+    responsePresent: true,
+    running: false,
+    currentText: "",
+    completionActionVisible: false,
+    semanticProgress: "Thinking",
+  };
+  expect(health.update(shell, 1_000)).toBeUndefined();
+  expect(health.update({ ...shell, running: true }, 2_000)).toBeUndefined();
+  expect(health.update({ ...shell, running: true }, 60_000)).toBeUndefined();
+  expect(health.update(shell, 61_000)).toBeUndefined();
+  expect(health.update(shell, 61_999)).toBeUndefined();
+  expect(health.update(shell, 62_000)).toContain("semantic assistant progress");
+});
+
+test("live MCP progress suspends semantic-progress expiry and restarts its grace", () => {
+  const health = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const shell = {
+    responsePresent: true,
+    running: false,
+    currentText: "",
+    completionActionVisible: false,
+    semanticProgress: "Calling tool",
+  };
+  expect(health.update(shell, 1_000)).toBeUndefined();
+  expect(health.update({ ...shell, externalProgressLive: true }, 2_000)).toBeUndefined();
+  expect(health.update({ ...shell, externalProgressLive: true }, 60_000)).toBeUndefined();
+  expect(health.update(shell, 61_000)).toBeUndefined();
+  expect(health.update(shell, 61_999)).toBeUndefined();
+  expect(health.update(shell, 62_000)).toContain("semantic assistant progress");
+});
+
+test("multipart semantic-progress expiry uses the extended response grace", () => {
+  const health = new ChatGptTurnDomHealthTracker(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, 500);
+  const shell = {
+    responsePresent: true,
+    running: false,
+    currentText: "",
+    completionActionVisible: false,
+    semanticProgress: "",
+  };
+  expect(health.update(shell, 0)).toBeUndefined();
+  expect(health.update(shell, CHATGPT_RESPONSE_DOM_GRACE_MS)).toBeUndefined();
+  expect(health.update(shell, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS - 1)).toBeUndefined();
+  expect(health.update(shell, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS)).toContain("semantic assistant progress");
 });
 
 test("suspending DOM health for proven MCP progress restarts the missing-response window", () => {
@@ -4540,6 +4654,141 @@ test("multipart observation surfaces Stopped thinking on its first observation e
   )).rejects.toMatchObject({ code: "chatgpt_stopped_thinking", retryable: false });
   expect(observations).toBe(1);
   expect(acknowledged).toBeFalse();
+});
+
+test("multipart acknowledgement renews DOM health when semantic reasoning changes", async () => {
+  const absent = {
+    last() { return this; }, filter() { return this; }, locator() { return this; }, getByText() { return this; },
+    getByTestId() { return this; }, isVisible: async () => false, count: async () => 0,
+  };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { identity: "group:assistant:accepted", acceptedTurnIdentities: [], locator: absent };
+  const stage = { acknowledgement: "ACK" };
+  const snapshots = [
+    {
+      responsePresent: true, assistantSurfacePresent: true, stoppedThinkingVisible: false,
+      visibleText: "", fullHtml: "", completionActionVisible: false,
+      traceBlocks: [{ kind: "status", text: "Searching source 1" }],
+    },
+    {
+      responsePresent: true, assistantSurfacePresent: true, stoppedThinkingVisible: false,
+      visibleText: "", fullHtml: "", completionActionVisible: false,
+      traceBlocks: [{ kind: "status", text: "Reading source 2" }],
+    },
+    {
+      responsePresent: true, assistantSurfacePresent: true, stoppedThinkingVisible: false,
+      visibleText: "ACK", fullHtml: "<p>ACK</p>", completionActionVisible: true,
+      traceBlocks: [{ kind: "answer", text: "ACK" }],
+    },
+    {
+      responsePresent: true, assistantSurfacePresent: true, stoppedThinkingVisible: false,
+      visibleText: "ACK", fullHtml: "<p>ACK</p>", completionActionVisible: true,
+      traceBlocks: [{ kind: "answer", text: "ACK" }],
+    },
+  ];
+  const realNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+  try {
+    const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+    const worker = {
+      responseDomSnapshot: async () => {
+        const next = snapshots.shift() ?? snapshots.at(-1);
+        now += CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS + 1;
+        return next;
+      },
+    };
+    await expect(observe.call(
+      worker,
+      page,
+      binding,
+      {},
+      stage,
+      undefined,
+      undefined,
+      undefined,
+      new ChatGptCompletionTracker(0),
+    )).resolves.toBeUndefined();
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("multipart acknowledgement recovers the same accepted turn after a semantic stall", async () => {
+  const stop = {
+    last() { return this; }, filter() { return this; }, locator() { return this; }, getByText() { return this; },
+    getByTestId() { return this; }, isVisible: async () => false, count: async () => 0,
+  };
+  const firstLocator = { ...stop, count: async () => 1 };
+  const reboundLocator = { ...stop, count: async () => 1 };
+  const firstPage = { isClosed: () => false, locator: () => stop } as unknown as Page;
+  const reboundPage = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.includes("data-turn-key") ? reboundLocator : stop,
+  } as unknown as Page;
+  const binding = {
+    identity: "group:assistant:accepted",
+    acceptedTurnIdentities: ["group:assistant:accepted"],
+    locator: firstLocator,
+  };
+  const stage = { acknowledgement: "ACK" };
+  const shell = {
+    responsePresent: true, assistantSurfacePresent: true, stoppedThinkingVisible: false,
+    visibleText: "", fullHtml: "", completionActionVisible: false,
+    traceBlocks: [{ kind: "status", text: "Waiting on renderer" }],
+  };
+  const ack = {
+    responsePresent: true, assistantSurfacePresent: true, stoppedThinkingVisible: false,
+    visibleText: "ACK", fullHtml: "<p>ACK</p>", completionActionVisible: true,
+    traceBlocks: [{ kind: "answer", text: "ACK" }],
+  };
+  const realNow = Date.now;
+  let now = 1_000;
+  let recovered = false;
+  let observations = 0;
+  Date.now = () => now;
+  try {
+    const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+    const worker = {
+      responseDomSnapshot: async () => {
+        observations += 1;
+        now += CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS + 1;
+        return recovered ? ack : shell;
+      },
+      reconcileAssistantTurnBinding: async () => binding,
+    };
+    const recoveries: Array<{ attempt: number; message: string }> = [];
+    await expect(observe.call(
+      worker,
+      firstPage,
+      binding,
+      { initialTurnIdentities: [], domCache: {} },
+      stage,
+      undefined,
+      undefined,
+      undefined,
+      new ChatGptCompletionTracker(0),
+      async (attempt: number, cause: Error) => {
+        recoveries.push({ attempt, message: cause.message });
+        recovered = true;
+        return { page: reboundPage, baseline: { initialTurnIdentities: [], domCache: {} } };
+      },
+    )).resolves.toBeUndefined();
+    expect(recoveries).toEqual([{ attempt: 1, message: expect.stringContaining("semantic assistant progress") }]);
+    expect(observations).toBeGreaterThanOrEqual(4);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("multipart staging wires accepted-response recovery into acknowledgement observation", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const call = worker.indexOf("await this.waitForMultipartAcknowledgement(");
+  expect(call).toBeGreaterThan(0);
+  const body = worker.slice(call, call + 1_400);
+  expect(body).toContain("new ChatGptCompletionTracker()");
+  expect(body).toContain("recoverAssistantObservation");
+  expect(body).toContain("stageBaseline = recovered.baseline");
 });
 
 test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {
