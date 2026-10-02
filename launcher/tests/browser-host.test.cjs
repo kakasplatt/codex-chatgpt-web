@@ -2058,9 +2058,12 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   });
 
   const before = Date.now();
-  const snapshot = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
+  const heartbeat = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
 
-  assert.deepEqual(snapshot, { activeTabId: tab.id });
+  assert.deepEqual(heartbeat, {
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+  });
   assert.ok(tab.lastHeartbeatAt >= before);
   assert.equal(tab.deviceEmulationDirty, true);
   assert.equal(visibilitySyncs, 1);

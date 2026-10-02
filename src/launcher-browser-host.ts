@@ -409,6 +409,22 @@ export type LauncherTurnActivity =
       connectorBound?: boolean;
     };
 
+export type LauncherBrowserRendererHealth = "responsive" | "unresponsive";
+
+export interface LauncherBrowserHeartbeatState {
+  rendererHealth: LauncherBrowserRendererHealth;
+  rendererStateChangedAt: number | null;
+}
+
+export interface LauncherBrowserTurnControlState {
+  surfaceId?: string;
+  reused?: boolean;
+  connectorBound?: boolean;
+  cancelledByUser?: boolean;
+  authenticationRequired?: boolean;
+  trackUsage?: boolean;
+}
+
 // Startup must outlast the launcher's ten-second idle bootstrap. This is not a model-turn budget.
 export const LAUNCHER_TURN_START_TIMEOUT_MS = 30_000;
 export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -637,6 +653,18 @@ export async function cancelLauncherManualTurn(
   if (!response.ok) throwManualControlError(response, body);
 }
 
+export function notifyLauncherTurn(
+  descriptorPath: string,
+  activity: Extract<LauncherTurnActivity, { phase: "heartbeat" }>,
+  timeoutMs?: number,
+  signal?: AbortSignal,
+): Promise<LauncherBrowserHeartbeatState>;
+export function notifyLauncherTurn(
+  descriptorPath: string,
+  activity: LauncherTurnActivity,
+  timeoutMs?: number,
+  signal?: AbortSignal,
+): Promise<LauncherBrowserTurnControlState>;
 export async function notifyLauncherTurn(
   descriptorPath: string,
   activity: LauncherTurnActivity,
@@ -646,14 +674,7 @@ export async function notifyLauncherTurn(
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
   signal?: AbortSignal,
-): Promise<{
-  surfaceId?: string;
-  reused?: boolean;
-  connectorBound?: boolean;
-  cancelledByUser?: boolean;
-  authenticationRequired?: boolean;
-  trackUsage?: boolean;
-}> {
+): Promise<LauncherBrowserHeartbeatState | LauncherBrowserTurnControlState> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -698,6 +719,19 @@ export async function notifyLauncherTurn(
         reused: body.reused,
         connectorBound: body.connectorBound,
         trackUsage: body.trackUsage === true,
+      };
+    }
+    if (activity.phase === "heartbeat") {
+      if (body.rendererHealth !== "responsive" && body.rendererHealth !== "unresponsive") {
+        throw new Error("Launcher browser control channel returned invalid renderer health");
+      }
+      if (body.rendererStateChangedAt !== null
+        && (typeof body.rendererStateChangedAt !== "number" || !Number.isFinite(body.rendererStateChangedAt))) {
+        throw new Error("Launcher browser control channel returned invalid renderer state timestamp");
+      }
+      return {
+        rendererHealth: body.rendererHealth,
+        rendererStateChangedAt: body.rendererStateChangedAt,
       };
     }
     if (activity.phase === "end") {

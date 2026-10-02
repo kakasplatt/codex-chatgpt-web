@@ -33,7 +33,9 @@ test("launcher activity follows actual send callbacks and current-turn tool coun
     messages.push(message);
     return Response.json(message.phase === "start"
       ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
-      : { cancelledByUser: false });
+      : message.phase === "heartbeat"
+        ? { rendererHealth: "responsive", rendererStateChangedAt: null }
+        : { cancelledByUser: false });
   } });
   const waitForStage = async (stage: string) => {
     const deadline = Date.now() + 1_000;
@@ -182,7 +184,9 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":true,"connectorBound":true}\n'
       : request.url === "/v1/turn/end"
         ? '{"ok":true,"cancelledByUser":false}\n'
-        : '{"ok":true}\n');
+        : request.url === "/v1/turn/heartbeat"
+          ? '{"ok":true,"rendererHealth":"unresponsive","rendererStateChangedAt":1234}\n'
+          : '{"ok":true}\n');
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -214,11 +218,14 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       connectorIdentity: "Codex Native2",
       requireRetainedConversation: true,
     });
-    await notifyLauncherTurn(path, {
+    await expect(notifyLauncherTurn(path, {
       phase: "heartbeat",
       traceId: "abc123def456",
       helperPid: process.pid,
       refreshViewport: true,
+    })).resolves.toEqual({
+      rendererHealth: "unresponsive",
+      rendererStateChangedAt: 1234,
     });
     expect(received.body).toEqual({
       phase: "heartbeat",
@@ -242,6 +249,46 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       retain: true,
       connectorBound: true,
     });
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("launcher turn heartbeat rejects malformed renderer health", async () => {
+  let heartbeatBody: Record<string, unknown> = {
+    ok: true,
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+  };
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(`${JSON.stringify(heartbeatBody)}\n`);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    const heartbeat = () => notifyLauncherTurn(path, {
+      phase: "heartbeat",
+      traceId: "abc123def456",
+      helperPid: process.pid,
+    });
+
+    await expect(heartbeat()).resolves.toEqual({
+      rendererHealth: "responsive",
+      rendererStateChangedAt: null,
+    });
+    heartbeatBody = { ok: true, rendererHealth: "degraded", rendererStateChangedAt: null };
+    await expect(heartbeat()).rejects.toThrow("invalid renderer health");
+    heartbeatBody = { ok: true, rendererHealth: "responsive", rendererStateChangedAt: "1234" };
+    await expect(heartbeat()).rejects.toThrow("invalid renderer state timestamp");
+    heartbeatBody = { ok: true, rendererHealth: "unresponsive", rendererStateChangedAt: true };
+    await expect(heartbeat()).rejects.toThrow("invalid renderer state timestamp");
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
   }

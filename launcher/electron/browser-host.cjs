@@ -1505,7 +1505,12 @@ class BrowserHost {
       tab.deviceEmulationDirty = true;
       this.syncViewVisibility();
     }
-    return this.snapshot();
+    return {
+      rendererHealth: tab.rendererHealth === "unresponsive" ? "unresponsive" : "responsive",
+      rendererStateChangedAt: Number.isFinite(tab.rendererStateChangedAt)
+        ? tab.rendererStateChangedAt
+        : null,
+    };
   }
 
   setTurnApprovalPending(traceId, helperPid, pending) {

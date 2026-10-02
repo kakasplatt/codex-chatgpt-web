@@ -338,9 +338,18 @@ class BrowserControlServer {
         writeJson(response, 200, { ok: true, ...lease, trackUsage: this.limits?.enabled() === true });
         return;
       } else if (request.url === "/v1/turn/heartbeat") {
-        host.heartbeatTurn(body.traceId, body.helperPid, body.refreshViewport === true, body.progress);
+        const renderer = host.heartbeatTurn(
+          body.traceId,
+          body.helperPid,
+          body.refreshViewport === true,
+          body.progress,
+        );
         this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId });
-        writeJson(response, 200, { ok: true });
+        writeJson(response, 200, {
+          ok: true,
+          rendererHealth: renderer.rendererHealth,
+          rendererStateChangedAt: renderer.rendererStateChangedAt,
+        });
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
