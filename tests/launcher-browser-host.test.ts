@@ -294,6 +294,31 @@ test("launcher turn heartbeat rejects malformed renderer health", async () => {
   }
 });
 
+test("launcher turn heartbeat accepts the legacy ok-only response without inventing renderer health", async () => {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":true}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(notifyLauncherTurn(path, {
+      phase: "heartbeat",
+      traceId: "legacy-heartbeat",
+      helperPid: process.pid,
+      refreshViewport: true,
+    })).resolves.toBeUndefined();
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 test("launcher retained-conversation release uses its authenticated exact-key endpoint", async () => {
   let received: { url?: string; authorization?: string; body?: unknown } = {};
   const server = createServer(async (request, response) => {

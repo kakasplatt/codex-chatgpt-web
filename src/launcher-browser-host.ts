@@ -658,7 +658,7 @@ export function notifyLauncherTurn(
   activity: Extract<LauncherTurnActivity, { phase: "heartbeat" }>,
   timeoutMs?: number,
   signal?: AbortSignal,
-): Promise<LauncherBrowserHeartbeatState>;
+): Promise<LauncherBrowserHeartbeatState | undefined>;
 export function notifyLauncherTurn(
   descriptorPath: string,
   activity: LauncherTurnActivity,
@@ -674,7 +674,7 @@ export async function notifyLauncherTurn(
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
   signal?: AbortSignal,
-): Promise<LauncherBrowserHeartbeatState | LauncherBrowserTurnControlState> {
+): Promise<LauncherBrowserHeartbeatState | LauncherBrowserTurnControlState | undefined> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -722,6 +722,11 @@ export async function notifyLauncherTurn(
       };
     }
     if (activity.phase === "heartbeat") {
+      if (body.ok === true
+        && body.rendererHealth === undefined
+        && body.rendererStateChangedAt === undefined) {
+        return undefined;
+      }
       if (body.rendererHealth !== "responsive" && body.rendererHealth !== "unresponsive") {
         throw new Error("Launcher browser control channel returned invalid renderer health");
       }
