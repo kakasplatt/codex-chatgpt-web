@@ -1229,9 +1229,18 @@ export async function withChatGptBrowserObservationTimeout<T>(
 export async function connectAfterClosingBrowserConnection<T>(
   previousConnection: Pick<Browser, "close"> | undefined,
   connect: () => Promise<T>,
+  connectAttempts = 1,
 ): Promise<T> {
   if (previousConnection) await previousConnection.close();
-  return connect();
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= Math.max(1, connectAttempts); attempt += 1) {
+    try {
+      return await connect();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 export const CHATGPT_MIN_OPERATIONAL_VIEWPORT = Object.freeze({ width: 320, height: 240 });
@@ -1332,7 +1341,7 @@ interface ChatGptSubmissionObservationRecovery {
 
 type ChatGptObservationRecovery = (
   attempt: number,
-  cause: ChatGptBrowserObservationTimeoutError,
+  cause: Error,
   baseline: ChatGptSubmissionBaseline,
   abortSignal?: AbortSignal,
 ) => Promise<ChatGptSubmissionObservationRecovery>;
@@ -1586,6 +1595,7 @@ export class ChatGptTurnDomHealthTracker {
   private missingResponseSince?: number;
   private emptyCompletionSince?: number;
   private missingCompletionAction?: { text: string; since: number };
+  private semanticProgress?: { signature: string; since: number };
 
   constructor(
     private readonly missingResponseMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
@@ -1604,12 +1614,18 @@ export class ChatGptTurnDomHealthTracker {
     this.missingResponseSince = undefined;
   }
 
+  clearSemanticProgress(): void {
+    this.semanticProgress = undefined;
+  }
+
   update(state: {
     responsePresent: boolean;
+    assistantSurfacePresent?: boolean;
     running: boolean;
     currentText: string;
     completionActionVisible: boolean;
     externalProgressLive?: boolean;
+    semanticProgress?: string;
   }, now = Date.now()): string | undefined {
     if (state.responsePresent) this.sawResponse = true;
     if (state.externalProgressLive || state.running) {
@@ -1619,6 +1635,7 @@ export class ChatGptTurnDomHealthTracker {
       this.missingResponseSince = undefined;
       this.emptyCompletionSince = undefined;
       this.missingCompletionAction = undefined;
+      this.semanticProgress = undefined;
       return undefined;
     }
     if (state.responsePresent) {
@@ -1642,6 +1659,23 @@ export class ChatGptTurnDomHealthTracker {
       this.emptyCompletionSince ??= now;
       if (now - this.emptyCompletionSince >= this.emptyCompletionMs) {
         return "ChatGPT browser turn completed without a final answer";
+      }
+    }
+
+    const awaitingSemanticProgress = state.responsePresent
+      && !state.running
+      && state.currentText.length === 0
+      && !state.completionActionVisible;
+    if (!awaitingSemanticProgress) {
+      this.semanticProgress = undefined;
+    } else {
+      const signature = state.semanticProgress ?? "";
+      if (this.semanticProgress?.signature !== signature) {
+        this.semanticProgress = { signature, since: now };
+      } else if (now - this.semanticProgress.since >= this.missingResponseMs) {
+        return state.assistantSurfacePresent === false
+          ? "ChatGPT response group remained present without an observable assistant surface or semantic assistant progress"
+          : "ChatGPT response DOM remained present without semantic assistant progress";
       }
     }
 
@@ -1713,6 +1747,7 @@ export interface ChatGptVisibleTraceEvent {
 
 interface ChatGptResponseDomSnapshot {
   responsePresent: boolean;
+  assistantSurfacePresent: boolean;
   visibleText: string;
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
@@ -1730,6 +1765,7 @@ interface ChatGptResponseDomCache {
 
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   responsePresent: false,
+  assistantSurfacePresent: false,
   visibleText: "",
   fullHtml: "",
   markdownSegments: [],
@@ -3774,14 +3810,15 @@ export class ChatGptBrowserWorker {
   }
 
   private async waitForMultipartAcknowledgement(
-    page: Page,
+    initialPage: Page,
     initialResponseTurn: ChatGptAssistantTurnBinding,
-    submissionBaseline: ChatGptSubmissionBaseline,
+    initialSubmissionBaseline: ChatGptSubmissionBaseline,
     stage: ChatGptWebMultipartStage,
     deadline: number | undefined,
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
     completionTracker = new ChatGptCompletionTracker(),
+    recoverObservation?: ChatGptObservationRecovery,
   ): Promise<void> {
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
     // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
@@ -3791,7 +3828,40 @@ export class ChatGptBrowserWorker {
       CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
     );
     const responseDomCache: ChatGptResponseDomCache = {};
+    let page = initialPage;
     let responseTurn = initialResponseTurn;
+    let submissionBaseline = initialSubmissionBaseline;
+    let recoveryAttempts = 0;
+    let lastHealthSignature: string | undefined;
+    const clearObservationGrace = () => {
+      domHealthTracker.clearMissingResponse();
+      domHealthTracker.clearSemanticProgress();
+    };
+    const recover = async (cause: Error): Promise<void> => {
+      if (!recoverObservation) throw cause;
+      recoveryAttempts += 1;
+      if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+        throw new Error(
+          `ChatGPT accepted the message, but its response remained unhealthy after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+          { cause },
+        );
+      }
+      const recovered = await recoverObservation(
+        recoveryAttempts,
+        cause,
+        submissionBaseline,
+        abortSignal,
+      );
+      page = recovered.page;
+      submissionBaseline = recovered.baseline;
+      responseTurn = {
+        ...responseTurn,
+        locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)),
+      };
+      responseDomCache.key = undefined;
+      responseDomCache.snapshot = undefined;
+      clearObservationGrace();
+    };
     for (;;) {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       if (abortSignal?.aborted) {
@@ -3804,18 +3874,38 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
-      let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+      let snapshot: ChatGptResponseDomSnapshot;
+      try {
+        snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+      } catch (error) {
+        if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
+          await recover(error);
+          continue;
+        }
+        throw error;
+      }
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
-        const rebound = await this.reconcileAssistantTurnBinding(
-          page,
-          submissionBaseline,
-          responseTurn,
-          abortSignal,
-        );
+        let rebound: ChatGptAssistantTurnBinding;
+        try {
+          rebound = await withChatGptBrowserObservationTimeout(this.reconcileAssistantTurnBinding(
+            page,
+            submissionBaseline,
+            responseTurn,
+            abortSignal,
+          ));
+        } catch (error) {
+          if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
+            await recover(error);
+            continue;
+          }
+          throw error;
+        }
         if (rebound.identity !== responseTurn.identity) {
           responseTurn = rebound;
           responseDomCache.key = undefined;
           responseDomCache.snapshot = undefined;
+          clearObservationGrace();
+          recoveryAttempts = 0;
           snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         }
       }
@@ -3838,19 +3928,85 @@ export class ChatGptBrowserWorker {
       if (!snapshot.responsePresent && externalProgressLive) {
         // Proven MCP activity outranks a momentarily unavailable staging DOM, exactly as it does
         // in the main turn loop.
-        domHealthTracker.clearMissingResponse();
+        clearObservationGrace();
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
         continue;
       }
       const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
+      const semanticProgress = snapshot.traceBlocks?.map(block => `${block.kind}:${block.text}`).join("\n") ?? "";
+      const healthSignature = `${snapshot.visibleText}\u0000${snapshot.completionActionVisible}\u0000${semanticProgress}`;
+      if (lastHealthSignature !== undefined && healthSignature !== lastHealthSignature) recoveryAttempts = 0;
+      if (running || externalProgressLive) recoveryAttempts = 0;
+      lastHealthSignature = healthSignature;
       const domError = domHealthTracker.update({
         responsePresent: snapshot.responsePresent,
+        assistantSurfacePresent: snapshot.assistantSurfacePresent,
         running,
         currentText: snapshot.visibleText,
         completionActionVisible: snapshot.completionActionVisible,
         externalProgressLive,
+        semanticProgress,
       });
-      if (domError) throw new Error(domError);
+      if (domError) {
+        responseDomCache.key = undefined;
+        responseDomCache.snapshot = undefined;
+        let freshSnapshot: ChatGptResponseDomSnapshot;
+        try {
+          freshSnapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+        } catch (error) {
+          if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
+            await recover(error);
+            continue;
+          }
+          throw error;
+        }
+        if (freshSnapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+        const freshRunning = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
+        const freshProgressSnapshot = externalProgress?.snapshot();
+        const freshExternalProgressLive = chatGptExternalProgressSuppressesDomHealth(
+          freshProgressSnapshot,
+          Date.now(),
+        );
+        const freshSemanticProgress = freshSnapshot.traceBlocks?.map(block => `${block.kind}:${block.text}`).join("\n") ?? "";
+        const freshDomError = domHealthTracker.update({
+          responsePresent: freshSnapshot.responsePresent,
+          assistantSurfacePresent: freshSnapshot.assistantSurfacePresent,
+          running: freshRunning,
+          currentText: freshSnapshot.visibleText,
+          completionActionVisible: freshSnapshot.completionActionVisible,
+          externalProgressLive: freshExternalProgressLive,
+          semanticProgress: freshSemanticProgress,
+        });
+        if (!freshDomError) {
+          lastHealthSignature = `${freshSnapshot.visibleText}\u0000${freshSnapshot.completionActionVisible}\u0000${freshSemanticProgress}`;
+          continue;
+        }
+        let rebound: ChatGptAssistantTurnBinding;
+        try {
+          rebound = await withChatGptBrowserObservationTimeout(this.reconcileAssistantTurnBinding(
+            page,
+            submissionBaseline,
+            responseTurn,
+            abortSignal,
+          ));
+        } catch (error) {
+          if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
+            await recover(error);
+            continue;
+          }
+          throw error;
+        }
+        if (rebound.identity !== responseTurn.identity) {
+          responseTurn = rebound;
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          clearObservationGrace();
+          recoveryAttempts = 0;
+          continue;
+        }
+        await recover(new Error(freshDomError));
+        continue;
+      }
       if (completionTracker.update({
         responsePresent: snapshot.responsePresent,
         running,
@@ -4089,7 +4245,26 @@ export class ChatGptBrowserWorker {
     responseTurn: Locator,
     cache?: ChatGptResponseDomCache,
   ): Promise<ChatGptResponseDomSnapshot> {
-    const observed = await responseTurn.evaluate((element, options) => {
+    const observe = async <T>(operation: Promise<T>, timeoutMs: number): Promise<T> => {
+      try {
+        return await withChatGptBrowserObservationTimeout(operation, timeoutMs);
+      } catch (error) {
+        if (responseTurn.page().isClosed()) throw chatGptBrowserTabClosedError();
+        if (error instanceof ChatGptBrowserObservationTimeoutError) throw error;
+        if (error instanceof Error && error.name === "TimeoutError") {
+          throw new ChatGptBrowserObservationTimeoutError(timeoutMs);
+        }
+        throw error;
+      }
+    };
+    const responseCount = await observe(
+      responseTurn.count(),
+      CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS,
+    );
+    if (responseCount !== 1) return absentResponseDomSnapshot();
+
+    const evaluateTimeoutMs = 2_000;
+    const observed = await observe(responseTurn.evaluate((element, options) => {
       const root = element as HTMLElement;
       type ObserverState = {
         id: number;
@@ -4590,10 +4765,15 @@ export class ChatGptBrowserWorker {
         }
         return false;
       })();
+      const assistantSurfacePresent = renderedRoots.length > 0
+        || traceBlocks.length > 0
+        || completionAction !== undefined
+        || stoppedThinkingVisible;
       return {
         key: observerKey,
         snapshot: {
           responsePresent: true,
+          assistantSurfacePresent,
           visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
           fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
@@ -4607,13 +4787,7 @@ export class ChatGptBrowserWorker {
       stoppedThinkingLabels: [...CHATGPT_STOPPED_THINKING_LABELS],
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
-    }, { timeout: 2_000 }).catch(() => undefined);
-    if (!observed) {
-      if (responseTurn.page().isClosed()) {
-        throw chatGptBrowserTabClosedError();
-      }
-      return absentResponseDomSnapshot();
-    }
+    }, { timeout: evaluateTimeoutMs }), evaluateTimeoutMs);
     const snapshot = observed.snapshot ?? cache?.snapshot ?? absentResponseDomSnapshot();
     if (observed.snapshot && cache) {
       cache.key = observed.key;
@@ -4948,15 +5122,17 @@ export class ChatGptBrowserWorker {
                   launcherSurfaceId,
                   signal,
                 );
-                // Own the connection before validating its page: viewport failure still needs
-                // the outer diagnostic capture and finally block to release this exact transport.
-                turnConnection = rebound.browser;
-                diagnosticPage = rebound.page;
-                await waitForOperationalChatGptViewport(rebound.page, signal);
-                return rebound;
+                try {
+                  await waitForOperationalChatGptViewport(rebound.page, signal);
+                  return rebound;
+                } catch (error) {
+                  await rebound.browser.close().catch(() => {});
+                  throw error;
+                }
               },
             );
           },
+          2,
         );
         turnConnection = connection.browser;
         page = connection.page;
@@ -4967,7 +5143,7 @@ export class ChatGptBrowserWorker {
       };
       const recoverPageObservation = async (
         attempt: number,
-        cause: ChatGptBrowserObservationTimeoutError,
+        cause: Error,
         baseline: ChatGptSubmissionBaseline,
         checkpoint: "submission-page-rebound" | "assistant-page-rebound",
         abortSignal?: AbortSignal,
@@ -5177,6 +5353,14 @@ export class ChatGptBrowserWorker {
                     deadline,
                     acknowledgementSignal,
                     turn.externalProgress,
+                    new ChatGptCompletionTracker(),
+                    launcherObservationRecovery
+                      ? async (...args) => {
+                        const recovered = await recoverAssistantObservation(...args);
+                        stageBaseline = recovered.baseline;
+                        return recovered;
+                      }
+                      : undefined,
                   );
                 },
                 chatGptSuspensionClock,
@@ -5399,9 +5583,54 @@ export class ChatGptBrowserWorker {
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
+      let lastAcceptedResponseProgressSignature: string | undefined;
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      const clearResponseObservationGrace = () => {
+        domHealthTracker.clearMissingResponse();
+        domHealthTracker.clearSemanticProgress();
+      };
+      const noteAcceptedResponseProgress = (
+        currentText: string,
+        semanticProgress: string,
+        running: boolean,
+        externalProgressLive: boolean,
+      ): void => {
+        const hasSemanticEvidence = currentText.length > 0 || semanticProgress.length > 0;
+        if (hasSemanticEvidence) {
+          const signature = `${currentText}\u0000${semanticProgress}`;
+          if (signature !== lastAcceptedResponseProgressSignature) {
+            consecutiveObservationRebinds = 0;
+            lastAcceptedResponseProgressSignature = signature;
+          }
+        }
+        if (running || externalProgressLive) consecutiveObservationRebinds = 0;
+      };
+      const recoverAcceptedResponseObservation = async (cause: Error): Promise<void> => {
+        if (!launcherObservationRecovery) throw cause;
+        consecutiveObservationRebinds += 1;
+        if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+          throw new Error(
+            `ChatGPT accepted the message, but its response remained unhealthy after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+            { cause },
+          );
+        }
+        const recovered = await recoverAssistantObservation(
+          consecutiveObservationRebinds,
+          cause,
+          submissionBaseline,
+          turn.abortSignal,
+        );
+        submissionBaseline = recovered.baseline;
+        responseTurn = {
+          ...responseTurn,
+          locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)),
+        };
+        responseDomCache.key = undefined;
+        responseDomCache.snapshot = undefined;
+        clearResponseObservationGrace();
+      };
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5438,7 +5667,16 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
-        let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+        let snapshot: ChatGptResponseDomSnapshot;
+        try {
+          snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+        } catch (error) {
+          if (error instanceof ChatGptBrowserObservationTimeoutError && launcherObservationRecovery) {
+            await recoverAcceptedResponseObservation(error);
+            continue;
+          }
+          throw error;
+        }
         if (!snapshot.responsePresent) {
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
@@ -5456,33 +5694,13 @@ export class ChatGptBrowserWorker {
               snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
             }
           } catch (error) {
-            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
-            consecutiveObservationRebinds += 1;
-            if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
-              throw new Error(
-                `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
-                { cause: error },
-              );
-            }
-            await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
-            submissionBaseline = {
-              ...submissionBaseline,
-              userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
-              responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
-              domCache: {},
-            };
-            responseTurn = {
-              ...responseTurn,
-              locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)),
-            };
-            responseDomCache.key = undefined;
-            responseDomCache.snapshot = undefined;
+            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherObservationRecovery) throw error;
+            await recoverAcceptedResponseObservation(error);
             await diagnostics.capture(page, "response-page-rebound");
             continue;
           }
         }
         if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
-        if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
         // The page was read successfully, so the fault budget is genuinely consecutive even when
         // this iteration goes on to `continue` for a rebind, confirmation, or liveness pause.
         internalObservationFaults = 0;
@@ -5508,13 +5726,16 @@ export class ChatGptBrowserWorker {
           // Current-turn MCP activity proves that ChatGPT is still executing even if its renderer
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
           // completion; this only prevents a live turn from being misclassified as vanished.
-          domHealthTracker.clearMissingResponse();
+          clearResponseObservationGrace();
+          consecutiveObservationRebinds = 0;
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
+        const semanticProgress = snapshot.traceBlocks?.map(block => `${block.kind}:${block.text}`).join("\n") ?? "";
+        noteAcceptedResponseProgress(snapshot.visibleText, semanticProgress, running, externalProgressLive);
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
@@ -5534,12 +5755,77 @@ export class ChatGptBrowserWorker {
           if (textDelta) emitMarkdownDelta(textDelta);
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
+            assistantSurfacePresent: snapshot.assistantSurfacePresent,
             running,
             currentText: snapshot.visibleText,
             completionActionVisible: snapshot.completionActionVisible,
             externalProgressLive,
+            semanticProgress,
           });
-          if (domError) throw new Error(domError);
+          if (domError) {
+            responseDomCache.key = undefined;
+            responseDomCache.snapshot = undefined;
+            let freshSnapshot: ChatGptResponseDomSnapshot;
+            try {
+              freshSnapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+            } catch (error) {
+              if (error instanceof ChatGptBrowserObservationTimeoutError && launcherObservationRecovery) {
+                await recoverAcceptedResponseObservation(error);
+                continue;
+              }
+              throw error;
+            }
+            if (freshSnapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+            const freshRunning = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
+            const freshProgressSnapshot = turn.externalProgress?.snapshot();
+            const freshExternalProgressLive = chatGptExternalProgressSuppressesDomHealth(
+              freshProgressSnapshot,
+              Date.now(),
+            );
+            const freshSemanticProgress = freshSnapshot.traceBlocks?.map(block => `${block.kind}:${block.text}`).join("\n") ?? "";
+            const freshDomError = domHealthTracker.update({
+              responsePresent: freshSnapshot.responsePresent,
+              assistantSurfacePresent: freshSnapshot.assistantSurfacePresent,
+              running: freshRunning,
+              currentText: freshSnapshot.visibleText,
+              completionActionVisible: freshSnapshot.completionActionVisible,
+              externalProgressLive: freshExternalProgressLive,
+              semanticProgress: freshSemanticProgress,
+            });
+            noteAcceptedResponseProgress(
+              freshSnapshot.visibleText,
+              freshSemanticProgress,
+              freshRunning,
+              freshExternalProgressLive,
+            );
+            if (!freshDomError) {
+              continue;
+            }
+            let rebound: ChatGptAssistantTurnBinding;
+            try {
+              rebound = await withChatGptBrowserObservationTimeout(this.reconcileAssistantTurnBinding(
+                page,
+                submissionBaseline,
+                responseTurn,
+                turn.abortSignal,
+              ));
+            } catch (error) {
+              if (error instanceof ChatGptBrowserObservationTimeoutError && launcherObservationRecovery) {
+                await recoverAcceptedResponseObservation(error);
+                continue;
+              }
+              throw error;
+            }
+            if (rebound.identity !== responseTurn.identity) {
+              responseTurn = rebound;
+              responseDomCache.key = undefined;
+              responseDomCache.snapshot = undefined;
+              clearResponseObservationGrace();
+              continue;
+            }
+            await recoverAcceptedResponseObservation(new Error(freshDomError));
+            continue;
+          }
           const completionReady = completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -5612,12 +5898,38 @@ export class ChatGptBrowserWorker {
         } else {
           const domError = domHealthTracker.update({
             responsePresent: false,
+            assistantSurfacePresent: false,
             running,
             currentText: "",
             completionActionVisible: false,
             externalProgressLive,
+            semanticProgress: "",
           });
-          if (domError) throw new Error(domError);
+          if (domError) {
+            responseDomCache.key = undefined;
+            responseDomCache.snapshot = undefined;
+            try {
+              const rebound = await withChatGptBrowserObservationTimeout(this.reconcileAssistantTurnBinding(
+                page,
+                submissionBaseline,
+                responseTurn,
+                turn.abortSignal,
+              ));
+              if (rebound.identity !== responseTurn.identity) {
+                responseTurn = rebound;
+                clearResponseObservationGrace();
+                continue;
+              }
+            } catch (error) {
+              if (error instanceof ChatGptBrowserObservationTimeoutError && launcherObservationRecovery) {
+                await recoverAcceptedResponseObservation(error);
+                continue;
+              }
+              throw error;
+            }
+            await recoverAcceptedResponseObservation(new Error(domError));
+            continue;
+          }
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
        } catch (error) {

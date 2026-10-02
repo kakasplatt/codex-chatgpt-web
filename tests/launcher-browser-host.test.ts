@@ -436,6 +436,34 @@ test("launcher page selection uses native ownership without evaluating unrelated
   });
 });
 
+test("launcher page selection returns the owned surface even when an unrelated CDP session stalls", async () => {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
+  const stalledPage = {} as Page;
+  const ownedPage = {} as Page;
+  const context = {
+    pages: () => [stalledPage, ownedPage],
+    newCDPSession: async (page: Page) => {
+      if (page === stalledPage) return await new Promise<never>(() => {});
+      return {
+        send: async (method: string) => {
+          expect(method).toBe("Target.getTargetInfo");
+          return { targetInfo: { targetId: "native-owned-target" } };
+        },
+        detach: async () => {},
+      };
+    },
+  } as unknown as BrowserContext;
+  const browser = { contexts: () => [context] } as unknown as Browser;
+
+  const guard = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error("owned launcher page was blocked by an unrelated CDP stall")), 250);
+  });
+  await expect(Promise.race([
+    selectLauncherPage(browser, descriptor, 50),
+    guard,
+  ])).resolves.toEqual({ context, page: ownedPage });
+});
+
 test("launcher page selection rejects duplicated native target ownership", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const page = () => ({
@@ -480,6 +508,47 @@ test("launcher page selection stops immediately when acquisition is aborted", as
     descriptor.surfaceId,
     controller.signal,
   )).rejects.toMatchObject({ name: "AbortError" });
+});
+
+test("launcher page selection bounds a stalled CDP session by its acquisition deadline", async () => {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
+  const page = {} as Page;
+  const context = {
+    pages: () => [page],
+    newCDPSession: async () => await new Promise<never>(() => {}),
+  } as unknown as BrowserContext;
+  const browser = { contexts: () => [context] } as unknown as Browser;
+
+  const guard = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error("selectLauncherPage ignored its CDP deadline")), 250);
+  });
+  await expect(Promise.race([
+    selectLauncherPage(browser, descriptor, 25),
+    guard,
+  ])).rejects.toThrow("Launcher browser host did not expose its owned browser surface");
+});
+
+test("launcher page selection aborts a stalled target-info CDP request", async () => {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
+  const page = {} as Page;
+  const context = {
+    pages: () => [page],
+    newCDPSession: async () => ({
+      send: async () => await new Promise<never>(() => {}),
+      detach: async () => {},
+    }),
+  } as unknown as BrowserContext;
+  const browser = { contexts: () => [context] } as unknown as Browser;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 25);
+
+  const guard = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error("selectLauncherPage ignored its abort signal")), 250);
+  });
+  await expect(Promise.race([
+    selectLauncherPage(browser, descriptor, 60_000, descriptor.surfaceId, controller.signal),
+    guard,
+  ])).rejects.toMatchObject({ name: "AbortError" });
 });
 
 test("manual launcher control separates idempotent start from reconnectable Sent observation", async () => {
