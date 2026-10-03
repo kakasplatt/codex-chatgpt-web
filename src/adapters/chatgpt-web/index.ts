@@ -939,12 +939,18 @@ export function createChatGptWebAdapter(
                   );
                   let handoffTimer: ReturnType<typeof setTimeout> | undefined;
                   let handoffPhase = "source_settlement";
+                  let retainedHandoffCommitted = false;
+                  const onRetainedHandoffAccepted = (): void => {
+                    retainedHandoffCommitted = true;
+                    handoffPhase = "browser_cleanup";
+                  };
                   const armHandoffDeadline = (): void => {
                     if (handoffDeadline.signal.aborted) return;
                     if (handoffTimer) clearTimeout(handoffTimer);
                     handoffTimer = setTimeout(
                       () => {
-                        console.warn(`[chatgpt-web] compaction_timeout ${JSON.stringify({
+                        const diagnostic = retainedHandoffCommitted ? "compaction_cleanup_timeout" : "compaction_timeout";
+                        console.warn(`[chatgpt-web] ${diagnostic} ${JSON.stringify({
                           traceId: compactionTraceId, phase: handoffPhase, timeoutMs: handoffTimeoutMs,
                         })}`);
                         handoffDeadline.abort(handoffTimeoutError);
@@ -1059,6 +1065,7 @@ export function createChatGptWebAdapter(
                         handoffTraceId,
                         operationSignal,
                         handoffTimeoutMs,
+                        onRetainedHandoffAccepted,
                       );
                     } else {
                       if (source.isActive()) {
@@ -1078,19 +1085,33 @@ export function createChatGptWebAdapter(
                         handoffTraceId,
                         operationSignal,
                         handoffTimeoutMs,
+                        onRetainedHandoffAccepted,
                       );
                     }
                     const summary = canonicalizeCompactionHandoff(parsed, rawSummary);
-                    await withAbort(
-                      preserveFinalResponse
-                        ? chatGptTurnSessions.retireConversationPreservingFinalResponse(
-                          retainedKey,
-                          source,
-                          compactedSourceExecutionKey,
-                        )
-                        : chatGptTurnSessions.retireConversationAndWait(retainedKey),
-                      operationSignal,
-                    );
+                    const retirement = preserveFinalResponse
+                      ? chatGptTurnSessions.retireConversationPreservingFinalResponse(
+                        retainedKey,
+                        source,
+                        compactedSourceExecutionKey,
+                      )
+                      : chatGptTurnSessions.retireConversationAndWait(retainedKey);
+                    if (retainedHandoffCommitted) {
+                      const reportCleanup = (error: unknown): void => {
+                        console.warn(`[chatgpt-web] compaction_cleanup_incomplete ${JSON.stringify({
+                          traceId: compactionTraceId,
+                          phase: "conversation_retirement",
+                          reason: error instanceof Error ? error.message : String(error),
+                        })}`);
+                      };
+                      // Keep physical ownership even when the existing wait bound expires.
+                      // Neither cancellation nor release failure can undo broker receipt.
+                      const cleanup = retirement.then(() => {}, reportCleanup);
+                      retainOwnershipUntil(cleanup);
+                      await withAbort(cleanup, operationSignal).catch(reportCleanup);
+                    } else {
+                      await withAbort(retirement, operationSignal);
+                    }
                     return summary;
                   } catch (error) {
                     const retainedKey = source?.conversationKey();

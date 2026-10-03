@@ -1520,6 +1520,126 @@ test("adapter compact returns one same-agent handoff and preserves a pre-existin
   }
 });
 
+test.each(["timeout", "cancellation", "retirement_failure"] as const)(
+  "adapter preserves an accepted handoff through cleanup %s",
+  async cleanupOutcome => {
+    const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-committed-cleanup-"));
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://committed-cleanup-${root}`,
+      chatgptWeb: {
+        browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+        brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true,
+        solAvailable: true, turnTimeoutMs: 250,
+      },
+    };
+    const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run;
+    const sourceRequest = request(false);
+    const compact = request(true);
+    const compactTurnId = `turn_compact_cleanup_${cleanupOutcome}_${root}`;
+    (compact._rawBody as { client_metadata: Record<string, unknown> }).client_metadata = {
+      "x-codex-turn-metadata": JSON.stringify({
+        thread_id: "thread_retained_compaction", turn_id: compactTurnId,
+      }),
+    };
+    const namespace = chatGptWebExecutionNamespace(provider);
+    const sourceKey = `${namespace}:${chatGptTurnExecutionKey(sourceRequest)}`;
+    let releaseBrowser!: () => void;
+    const physicalSettlement = new Promise<void>(resolve => { releaseBrowser = resolve; });
+    let accepted!: () => void;
+    const receipt = new Promise<void>(resolve => { accepted = resolve; });
+    let cleanupAttempts = 0;
+    let conversationReleaseAttempts = 0;
+    let browserMessages = 0;
+    chatGptTurnSessions.getOrCreate(sourceKey, () => ({
+      mode: "read-only", browser: Promise.resolve("source complete"),
+      physicalSettlement: Promise.resolve(), trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+      usageInput: sourceRequest, conversationKey: chatGptConversationKey(sourceRequest, namespace)!,
+      releaseRetainedConversation: async () => {
+        conversationReleaseAttempts += 1;
+        await physicalSettlement;
+        if (cleanupOutcome === "retirement_failure") throw new Error("retained conversation release failed");
+      },
+      cancel() {},
+    }));
+    await chatGptTurnSessions.find(sourceKey)!.browserOutcome;
+    worker.run = async turn => {
+      browserMessages += 1;
+      turn.abortSignal!.addEventListener("abort", () => {
+        cleanupAttempts += 1;
+        expect(turn.abortSignal!.reason).toBeInstanceOf(ChatGptCompactionHandoffAccepted);
+        accepted();
+      });
+      const prepared = await turn.prepareResume!();
+      const binding = controlBinding(prepared.text);
+      prepared.release();
+      await callTurnBroker(broker.socketPath, {
+        method: "submit_compaction_handoff", ...binding, summary: "Committed adapter checkpoint",
+      });
+      await physicalSettlement;
+      return "Browser physically retired";
+    };
+    const events: AdapterEvent[] = [];
+    const diagnostics: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); };
+    let run: Promise<void> | undefined;
+    let cancellation: ReturnType<typeof cancelStructuredCompactionNativeTurn> | undefined;
+    try {
+      const adapter = createChatGptWebAdapter(provider);
+      run = adapter.runTurn!(compact, { headers: new Headers() }, event => events.push(event));
+      await receipt;
+      expect(cleanupAttempts).toBe(1);
+      if (cleanupOutcome === "timeout") await Bun.sleep(260);
+      if (cleanupOutcome === "cancellation") {
+        cancellation = cancelStructuredCompactionNativeTurn(
+          "thread_retained_compaction", compactTurnId, new Error("operator cancelled after receipt"),
+        );
+        let physicallySettled = false;
+        void cancellation.settlement.then(() => { physicallySettled = true; });
+        await Bun.sleep(5);
+        expect(physicallySettled).toBeFalse();
+      }
+      await Bun.sleep(5);
+      if (cleanupOutcome !== "retirement_failure") {
+        await Promise.race([
+          run,
+          Bun.sleep(100).then(() => { throw new Error("committed result waited for physical cleanup"); }),
+        ]);
+        expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+        expect(conversationReleaseAttempts).toBe(1);
+      }
+      releaseBrowser();
+      await run;
+      await cancellation?.settlement;
+      expect(events.filter(event => event.type === "error")).toHaveLength(0);
+      expect(events.some(event => event.type === "text_delta"
+        && event.text.includes("Committed adapter checkpoint"))).toBeTrue();
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      expect(conversationReleaseAttempts).toBe(1);
+      expect(diagnostics.some(line => line.startsWith("[chatgpt-web] compaction_cleanup_incomplete "))).toBeTrue();
+      expect(diagnostics.some(line => line.startsWith("[chatgpt-web] compaction_timeout "))).toBeFalse();
+      if (cleanupOutcome === "timeout") {
+        expect(diagnostics.some(line => line.startsWith("[chatgpt-web] compaction_cleanup_timeout "))).toBeTrue();
+      }
+      const replay: AdapterEvent[] = [];
+      await adapter.runTurn!(compact, { headers: new Headers() }, event => replay.push(event));
+      expect(replay.at(-1)).toMatchObject({ type: "done", endTurn: true });
+      expect(browserMessages).toBe(1);
+    } finally {
+      releaseBrowser();
+      await run;
+      await cancellation?.settlement;
+      console.warn = originalWarn;
+      worker.run = originalRun;
+      chatGptTurnSessions.clear();
+      await broker.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test("a compact HTTP observer can reconnect without sending a second retained-chat message", async () => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-compact-reconnect-"));
   const provider: CodexProviderConfig = {
