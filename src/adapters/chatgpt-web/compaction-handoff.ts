@@ -365,8 +365,10 @@ export async function requestRetainedCompactionHandoff(
     }, () => {});
     transaction = await withCompactionAbort(transactionPromise, operationSignal);
     const instruction = structuredCompactionHandoffInstruction(transaction);
-    const prepare = async () => ({ text: instruction, images: [], release: () => {} });
-    recordPhase("compaction_instruction_delivered");
+    const prepare = async () => {
+      recordPhase("compaction_instruction_delivered");
+      return { text: instruction, images: [], release: () => {} };
+    };
     browser = worker.run({
       traceId,
       modelId: parsed.modelId,
@@ -381,9 +383,10 @@ export async function requestRetainedCompactionHandoff(
       conversationKey,
       requireRetainedConversation: true,
       abortSignal: browserAbort.signal,
+      onPreparedSelected: () => recordPhase("retained_turn_started"),
+      onSendActivated: () => recordPhase("waiting_for_control_handoff"),
       onTextDelta: () => {},
     });
-    recordPhase("retained_turn_started");
     const handoff = broker.waitForCompactionHandoff(transaction.token, operationSignal);
     const browserWithoutHandoff = browser.then<never>(() => {
       // The control handler accepts the summary before replying to ChatGPT. A fully
@@ -393,7 +396,6 @@ export async function requestRetainedCompactionHandoff(
         { status: 409, errorType: "invalid_request_error", code: "compaction_handoff_missing", retryable: false },
       );
     });
-    recordPhase("waiting_for_control_handoff");
     const summary = await withCompactionAbort(
       Promise.race([
         handoff,
@@ -414,13 +416,22 @@ export async function requestRetainedCompactionHandoff(
     recordPhase("complete");
     return summary;
   } catch (error) {
-    if (!(error instanceof RetainedCompactionHandoffTimeoutError)) {
-      console.warn(`[chatgpt-web] retained_compaction_failed ${JSON.stringify({
+    if (error instanceof RetainedCompactionHandoffTimeoutError) throw error;
+    if (error instanceof ChatGptWebAdapterError && error.code === "compaction_handoff_timeout") {
+      const elapsed = elapsedMs();
+      console.warn(`[chatgpt-web] retained_compaction_timeout ${JSON.stringify({
         traceId,
         phase,
-        elapsedMs: elapsedMs(),
+        timeoutMs: operationTimeoutMs,
+        elapsedMs: elapsed,
       })}`);
+      throw new RetainedCompactionHandoffTimeoutError(operationTimeoutMs, phase, elapsed);
     }
+    console.warn(`[chatgpt-web] retained_compaction_failed ${JSON.stringify({
+      traceId,
+      phase,
+      elapsedMs: elapsedMs(),
+    })}`);
     throw error;
   } finally {
     browserAbort.abort();

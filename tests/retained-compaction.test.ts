@@ -503,7 +503,13 @@ test("retained compaction timeout identifies the waiting control-handoff phase",
     abortCompactionTransaction() {},
   } as unknown as TurnBroker;
   const worker = {
-    run: async () => new Promise<string>(() => {}),
+    run: async (turn: BrowserTurn) => {
+      const prepared = await turn.prepare();
+      prepared.release();
+      await turn.onPreparedSelected?.(true);
+      await turn.onSendActivated?.();
+      return new Promise<string>(() => {});
+    },
   };
 
   let caught: unknown;
@@ -529,6 +535,113 @@ test("retained compaction timeout identifies the waiting control-handoff phase",
   expect((caught as Error).message).toContain("waiting_for_control_handoff");
 });
 
+test("external handoff deadline preserves the retained compaction phase", async () => {
+  const sourceRequest = request(false);
+  const source = new ChatGptTurnSession({
+    mode: "read-only",
+    browser: Promise.resolve("source complete"),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    usageInput: sourceRequest,
+    conversationKey: chatGptConversationKey(sourceRequest, "provider")!,
+    cancel() {},
+  });
+  const broker = {
+    beginCompactionTransaction: async () => ({
+      token: "control_11111111111111111111111111111111",
+      handoffId: "handoff_22222222222222222222222222222222",
+    }),
+    waitForCompactionHandoff: async () => new Promise<string>(() => {}),
+    abortCompactionTransaction() {},
+  } as unknown as TurnBroker;
+  const externalDeadline = new AbortController();
+  const worker = {
+    run: async (turn: BrowserTurn) => {
+      const prepared = await turn.prepare();
+      prepared.release();
+      await turn.onPreparedSelected?.(true);
+      await turn.onSendActivated?.();
+      externalDeadline.abort(new ChatGptWebAdapterError(
+        "shared handoff deadline expired",
+        {
+          status: 409,
+          errorType: "invalid_request_error",
+          code: "compaction_handoff_timeout",
+          retryable: false,
+        },
+      ));
+      return new Promise<string>(() => {});
+    },
+  };
+
+  let caught: unknown;
+  try {
+    await requestRetainedCompactionHandoff(
+      worker as never,
+      request(true),
+      source,
+      broker,
+      { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      "trace_external_handoff_timeout",
+      externalDeadline.signal,
+      1_000,
+    );
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toMatchObject({
+    code: "compaction_handoff_timeout",
+    phase: "waiting_for_control_handoff",
+  });
+  expect((caught as Error).message).toContain("waiting_for_control_handoff");
+});
+
+test("retained compaction records browser phases only after the browser reaches them", async () => {
+  const sourceRequest = request(false);
+  const source = new ChatGptTurnSession({
+    mode: "read-only",
+    browser: Promise.resolve("source complete"),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    usageInput: sourceRequest,
+    conversationKey: chatGptConversationKey(sourceRequest, "provider")!,
+    cancel() {},
+  });
+  const broker = {
+    beginCompactionTransaction: async () => ({
+      token: "control_11111111111111111111111111111111",
+      handoffId: "handoff_22222222222222222222222222222222",
+    }),
+    waitForCompactionHandoff: async () => new Promise<string>(() => {}),
+    abortCompactionTransaction() {},
+  } as unknown as TurnBroker;
+  const diagnostics: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); };
+  try {
+    await expect(requestRetainedCompactionHandoff(
+      { run: async () => { throw new Error("worker refused before prepare"); } } as never,
+      request(true),
+      source,
+      broker,
+      { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      "trace_worker_refused_before_prepare",
+      undefined,
+      1_000,
+    )).rejects.toThrow("worker refused before prepare");
+  } finally {
+    console.info = originalInfo;
+  }
+
+  expect(diagnostics.some(line => line.includes('"phase":"source_settling"'))).toBeTrue();
+  expect(diagnostics.some(line => line.includes('"phase":"compaction_instruction_delivered"'))).toBeFalse();
+  expect(diagnostics.some(line => line.includes('"phase":"retained_turn_started"'))).toBeFalse();
+  expect(diagnostics.some(line => line.includes('"phase":"waiting_for_control_handoff"'))).toBeFalse();
+});
+
 test("retained compaction records handoff accepted before stalled browser retirement times out", async () => {
   const sourceRequest = request(false);
   const source = new ChatGptTurnSession({
@@ -550,7 +663,13 @@ test("retained compaction records handoff accepted before stalled browser retire
     abortCompactionTransaction() {},
   } as unknown as TurnBroker;
   const worker = {
-    run: async () => new Promise<string>(() => {}),
+    run: async (turn: BrowserTurn) => {
+      const prepared = await turn.prepare();
+      prepared.release();
+      await turn.onPreparedSelected?.(true);
+      await turn.onSendActivated?.();
+      return new Promise<string>(() => {});
+    },
   };
   const diagnostics: string[] = [];
   const originalInfo = console.info;
