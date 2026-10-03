@@ -3,15 +3,21 @@ import { estimateTokens } from "../../lib/token-estimate";
 import {
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
+  CHATGPT_WEB_FULL_CONTEXT_WINDOW,
+  CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT,
+  CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT,
   isChatGptWebZeroRiskBackendModel,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
+  supportsChatGptWebFullContext,
+  type ChatGptWebBackendModel,
 } from "../../chatgpt-web-models";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import {
   CHATGPT_BIGGER_CONTEXT_PARTS,
+  CHATGPT_FULL_CONTEXT_MAX_PARTS,
   compileChatGptWebPrompt,
   type ChatGptWebBiggerContextPartCount,
   type ChatGptWebMultipartPartCount,
@@ -19,8 +25,14 @@ import {
   type CompileChatGptWebPromptOptions,
 } from "./prompt";
 import { extractChatGptTurnIdentity } from "./environment";
-import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import {
+  CHATGPT_WEB_LUNA_MODEL_ID,
+  resolveChatGptWebModelMode,
+  type ChatGptWebCapabilities,
+  type ChatGptWebModelMode,
+} from "./model";
 import type { BrokerToolRequest } from "./turn-broker";
+import { ChatGptWebAdapterError } from "./adapter-error";
 
 // The real capability has the same length. Keeping it out of usage accounting would make
 // estimates differ slightly between the prepared browser prompt and later Codex tool rounds.
@@ -125,6 +137,123 @@ export function biggerContextPartCount(
   if (inputTokens < onePartLimit * 2) return 2;
   return CHATGPT_BIGGER_CONTEXT_PARTS;
 }
+
+/**
+ * Select the smallest safe number of parts (from 2 up to 12) required for the physical request.
+ * Inline is evaluated first. If no plan through 12 parts fits, fails with context_length_exceeded
+ * before submission and states that atomic records are not split.
+ */
+export function resolveFullContextMultipartPlan(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+  experimentalSkillAttachments = false,
+): ChatGptWebMultipartPartCount | undefined {
+  if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
+    throw new Error("Full Context is unavailable for ChatGPT Zero Risk");
+  }
+  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+    throw new Error("Full Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
+  }
+  if (!supportsChatGptWebFullContext(parsed.modelId as ChatGptWebBackendModel)) {
+    throw new Error(`ChatGPT Full Context limit is not defined for model: ${parsed.modelId}`);
+  }
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+
+  const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
+    parsed,
+    capabilities,
+    mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
+    {
+      experimentalMultipartParts: parts,
+      experimentalMultipartMode: "full",
+      experimentalSkillAttachments,
+    },
+  );
+
+  const maxPossibleComposerChars = capabilities.proAvailable
+    ? CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT
+    : CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT;
+  const widestEffort: ChatGptWebModelMode["effort"] = capabilities.proAvailable ? "max" : "medium";
+  const maxPossibleMessageTokens = resolveChatGptWebMessageTokenBudget(
+    CHATGPT_WEB_BACKEND_MODEL, widestEffort, capabilities,
+  );
+
+  const checkAtomicString = (text: string): void => {
+    if (text.length > maxPossibleComposerChars) {
+      throw new ChatGptWebAdapterError(
+        `A Full Context record contains ${text.length.toLocaleString("en-US")} characters, which exceeds the measured ${maxPossibleComposerChars.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      );
+    }
+    const tokens = estimateTokens(text, parsed.modelId);
+    if (tokens > maxPossibleMessageTokens) {
+      throw new ChatGptWebAdapterError(
+        `A Full Context record requires ${tokens.toLocaleString("en-US")} visible message tokens, which exceeds its ${maxPossibleMessageTokens.toLocaleString("en-US")}-token input budget after reserving space for ChatGPT and attachments. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      );
+    }
+  };
+
+  if (parsed.context.systemPrompt) {
+    for (const sys of parsed.context.systemPrompt) {
+      if (typeof sys === "string") checkAtomicString(sys);
+    }
+  }
+  for (const message of parsed.context.messages) {
+    if (typeof message.content === "string") {
+      checkAtomicString(message.content);
+    }
+  }
+
+  const inline = compile();
+  const inputTokens = estimateCompiledChatGptWebInputTokens(inline, parsed.modelId);
+  if (inputTokens >= CHATGPT_WEB_FULL_CONTEXT_WINDOW) {
+    throw new ChatGptWebAdapterError(
+      `This Full Context transaction is estimated at ${inputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${CHATGPT_WEB_FULL_CONTEXT_WINDOW.toLocaleString("en-US")}-token ceiling. Run /compact, then retry.`,
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+
+  const fits = (compiled: CompiledChatGptWebPrompt): boolean => {
+    const messages = compiledChatGptWebMessages(compiled);
+    const stagingEffort = capabilities.proAvailable ? "max" : "medium";
+    for (const [index, text] of messages.entries()) {
+      const final = index === messages.length - 1;
+      const effort = final ? mode.effort : stagingEffort;
+      const { browserComposerCharLimit } = resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
+      if (browserComposerCharLimit !== undefined && text.length > browserComposerCharLimit) return false;
+      const budget = resolveChatGptWebMessageTokenBudget(
+        CHATGPT_WEB_BACKEND_MODEL,
+        effort,
+        capabilities,
+        final ? estimateChatGptWebImageTokens(compiled) + skillFileTokens(compiled.skillFiles, parsed.modelId) : 0,
+      );
+      if (estimateTokens(text, parsed.modelId) > budget) return false;
+    }
+    return true;
+  };
+
+  if (fits(inline)) return undefined;
+
+  for (let count = 2; count <= CHATGPT_FULL_CONTEXT_MAX_PARTS; count++) {
+    const candidateParts = count as ChatGptWebMultipartPartCount;
+    let candidate: CompiledChatGptWebPrompt;
+    try {
+      candidate = compile(candidateParts);
+    } catch {
+      continue;
+    }
+    if (fits(candidate)) {
+      return candidateParts;
+    }
+  }
+
+  throw new ChatGptWebAdapterError(
+    `A Full Context transaction requires more parts than the maximum allowed 12 parts, or contains an individual Codex message or JSON record that exceeds ChatGPT message limits. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+  );
+}
+
 
 function roundEvidenceText(evidence: ChatGptWebRoundEvidence): string {
   return JSON.stringify({

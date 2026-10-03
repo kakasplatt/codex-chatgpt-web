@@ -233,7 +233,7 @@ export function resolveChatGptWebMessageTokenBudget(
   imageTokens = 0,
 ): number {
   const { contextWindow } = resolveChatGptWebContextLimits(
-    backendModel, effort, { ...capabilities, experimentalBiggerContext: false },
+    backendModel, effort, { ...capabilities, experimentalBiggerContext: false, experimentalFullContext: false },
   );
   const { browserMessageTokenLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
   return Math.max(0, Math.min(

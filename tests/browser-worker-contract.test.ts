@@ -3988,6 +3988,92 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
   )).toThrow("unavailable for Luna");
 });
 
+test("Full Context preflight allows total context up to 1,050,000 tokens across all part counts while preserving per-message boundaries", () => {
+  const pro = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    extraHighAvailable: true, proAvailable: true,
+    experimentalFullContext: true,
+  };
+  // 600,000 tokens across 8 parts is permitted in Full Context
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    600_000,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    500_000,
+    8,
+    undefined,
+    "full",
+  )).not.toThrow();
+
+  // Exactly or above 1,050,000 is rejected independent of part count
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    1_050_000,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    500_000,
+    12,
+    undefined,
+    "full",
+  )).toThrow("1,050,000-token ceiling");
+
+  // Rejects invalid part counts (1 or 13)
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    500_000,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    500_000,
+    1,
+    undefined,
+    "full",
+  )).toThrow("Full Context requires between 2 and 12 context parts");
+
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    500_000,
+    95_000,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    500_000,
+    13,
+    undefined,
+    "full",
+  )).toThrow("Full Context requires between 2 and 12 context parts");
+
+  // Luna is rejected
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    20_000,
+    10_000,
+    "gpt-5.6-luna",
+    "low",
+    { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false },
+    40_000,
+    2,
+    undefined,
+    "full",
+  )).toThrow("unavailable for Luna");
+
+  // Per-message token boundary failure uses Full Context label
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    280_000,
+    103_001,
+    "gpt-5.6-sol",
+    "high",
+    pro,
+    500_000,
+    6,
+    undefined,
+    "full",
+  )).toThrow("A Full Context stage requires");
+});
+
+
 test("Bigger Context staging respects the requested-effort floor while choosing the cheapest mode that fits", () => {
   const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
   const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
