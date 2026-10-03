@@ -4521,6 +4521,81 @@ test("renderer recovery preserves an unresolved DOM degradation", () => {
   expect(tracker.current()).toBe("responsive");
 });
 
+test("browser UI health ignores stale or untimestamped renderer samples after newer native evidence", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.record("renderer-unresponsive", 5_000)).toEqual({
+    previous: "responsive",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 5_000,
+  });
+
+  expect(tracker.record("renderer-responsive", 4_000)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  expect(tracker.record("renderer-responsive")).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  expect(tracker.record("renderer-responsive", 6_000)).toEqual({
+    previous: "unresponsive",
+    current: "responsive",
+    reason: "renderer-responsive",
+    at: 6_000,
+  });
+  expect(tracker.current()).toBe("responsive");
+});
+
+test("submission observation timeout degrades browser UI health when page recovery is unavailable", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  worker.waitForSubmissionAccepted = async () => { throw timeout; };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await expect(worker.waitForSubmissionAcceptedWithRecovery(
+    {} as Page,
+    { initialTurnIdentities: [], domCache: {} },
+    undefined,
+    undefined,
+    0,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toBe(timeout);
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("assistant-turn observation timeout degrades browser UI health when page recovery is unavailable", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  worker.submissionDomState = async () => { throw timeout; };
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: () => absent,
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await expect(worker.waitForNewAssistantTurn(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    CHATGPT_RESPONSE_DOM_GRACE_MS,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toBe(timeout);
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
 test("managed browser turns report degraded UI health while MCP progress remains live", async () => {
   const warnings: string[] = [];
   const originalWarn = console.warn;

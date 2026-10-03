@@ -1701,6 +1701,7 @@ export interface ChatGptBrowserUiHealthTransition {
 export class ChatGptBrowserUiHealthTracker {
   private rendererHealth: "responsive" | "unresponsive" = "responsive";
   private domHealth: "responsive" | "degraded" = "responsive";
+  private lastRendererStateChangedAt: number | undefined;
 
   constructor(
     private readonly onTransition?: (transition: ChatGptBrowserUiHealthTransition) => void,
@@ -1718,8 +1719,16 @@ export class ChatGptBrowserUiHealthTracker {
 
   record(
     reason: ChatGptBrowserUiHealthReason,
-    at = Date.now(),
+    at?: number,
   ): ChatGptBrowserUiHealthTransition | undefined {
+    const rendererSample = reason === "renderer-unresponsive" || reason === "renderer-responsive";
+    if (rendererSample) {
+      if (this.lastRendererStateChangedAt !== undefined) {
+        if (at === undefined || at <= this.lastRendererStateChangedAt) return undefined;
+      }
+      if (at !== undefined) this.lastRendererStateChangedAt = at;
+    }
+    const transitionAt = at ?? Date.now();
     const previous = this.combinedHealth();
     switch (reason) {
       case "dom-observation-timeout":
@@ -1737,7 +1746,7 @@ export class ChatGptBrowserUiHealthTracker {
     }
     const next = this.combinedHealth();
     if (next === previous) return undefined;
-    const transition = { previous, current: next, reason, at };
+    const transition = { previous, current: next, reason, at: transitionAt };
     this.onTransition?.(transition);
     return transition;
   }
@@ -3169,6 +3178,9 @@ export class ChatGptBrowserWorker {
         );
       } catch (error) {
         const latestProgress = externalProgress?.snapshot();
+        if (error instanceof ChatGptBrowserObservationTimeoutError) {
+          browserUiHealth?.record("dom-observation-timeout");
+        }
         if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
           recoveryAttempts += 1;
           if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
@@ -3752,6 +3764,9 @@ export class ChatGptBrowserWorker {
         );
         return evidence;
       } catch (error) {
+        if (error instanceof ChatGptBrowserObservationTimeoutError) {
+          browserUiHealth?.record("dom-observation-timeout");
+        }
         if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !recoverObservation) throw error;
         recoveryAttempts += 1;
         if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
