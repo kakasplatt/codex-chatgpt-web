@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { estimateChatGptWebInputTokens, resolveBiggerContextMultipartParts, resolveFullContextMultipartPlan } from "../src/adapters/chatgpt-web/usage";
+import {
+  estimateChatGptWebInputTokens,
+  estimateChatGptWebUsage,
+  resolveBiggerContextMultipartParts,
+  resolveFullContextMultipartPlan,
+} from "../src/adapters/chatgpt-web/usage";
 import { compileChatGptWebPrompt, CHATGPT_FULL_CONTEXT_MAX_PARTS } from "../src/adapters/chatgpt-web/prompt";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
@@ -179,4 +184,41 @@ test("Full Context planner evaluates inline first, selects smallest safe count u
   expect(() => resolveFullContextMultipartPlan(atomicTooManyChars, plus))
     .toThrow("The bridge will not split an individual Codex message or JSON record");
 }, 60_000);
+
+test("Full Context usage accounting always reports logical canonical tokens, ignoring smaller physical resume/recovery input", () => {
+  const largeCanonical = request("word ".repeat(50_000));
+  const smallSuffix = request("word ".repeat(100));
+
+  const evidence = { answer: "Completed.", reasoning: [] };
+  const canonicalUsage = estimateChatGptWebUsage(
+    largeCanonical,
+    evidence,
+    capabilities,
+    false, // bigger context
+    false, // skill attachments
+    true,  // full context
+  );
+
+  const suffixUsage = estimateChatGptWebUsage(
+    smallSuffix,
+    evidence,
+    capabilities,
+    false,
+    false,
+    true,
+  );
+
+  expect(canonicalUsage.inputTokens).toBeGreaterThan(50_000);
+  expect(suffixUsage.inputTokens).toBeLessThan(12_000);
+  expect(canonicalUsage.inputTokens).toBeGreaterThan(suffixUsage.inputTokens + 40_000);
+
+  const lunaReq = request("hello");
+  lunaReq.modelId = "gpt-5.6-luna";
+  lunaReq.options.reasoning = "low";
+  const lunaCapabilities = { ...capabilities, solAvailable: false };
+  expect(() => estimateChatGptWebUsage(lunaReq, evidence, lunaCapabilities, false, false, true))
+    .toThrow("Full Context is unavailable for Luna");
+});
+
+
 

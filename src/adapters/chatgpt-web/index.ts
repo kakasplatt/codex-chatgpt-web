@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
+import { isChatGptWebZeroRiskBackendModel, supportsChatGptWebFullContext } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import {
   cancelLauncherManualTurn,
@@ -29,12 +29,16 @@ import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
-import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
+import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts, resolveFullContextMultipartPlan } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
   ChatGptLunaCheckpointStore,
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
+import {
+  ChatGptFullContextCheckpointStore,
+  type CapturedChatGptFullContextCheckpoint,
+} from "./full-context-checkpoint";
 import { ChatGptExternalTurnProgress } from "./turn-progress";
 import {
   canonicalizeCompactionHandoff,
@@ -362,6 +366,14 @@ export function createChatGptWebAdapter(
   if (experimentalBiggerContext !== undefined && typeof experimentalBiggerContext !== "boolean") {
     throw new Error("ChatGPT Bigger Context preference must be a boolean");
   }
+  const experimentalFullContext = provider.chatgptWeb?.experimentalFullContext === true;
+  if (provider.chatgptWeb?.experimentalFullContext !== undefined
+    && typeof provider.chatgptWeb.experimentalFullContext !== "boolean") {
+    throw new Error("ChatGPT Full Context preference must be a boolean");
+  }
+  if (experimentalBiggerContext && experimentalFullContext) {
+    throw new Error("ChatGPT Bigger Context and Full Context cannot be enabled together");
+  }
   const configuredCapabilities: ChatGptWebCapabilities = {
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
     solAvailable: provider.chatgptWeb?.solAvailable !== false,
@@ -400,11 +412,19 @@ export function createChatGptWebAdapter(
       ? resolve(expandUserPath(provider.chatgptWeb.lunaCheckpointStatePath))
       : undefined,
   );
-  const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => (
-    parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !parsed._compactionRequest
-      ? lunaCheckpointStore.apply(parsed).parsed
-      : parsed
+  const fullContextCheckpointStore = new ChatGptFullContextCheckpointStore(
+    provider.chatgptWeb?.fullContextCheckpointStatePath
+      ? resolve(expandUserPath(provider.chatgptWeb.fullContextCheckpointStatePath))
+      : undefined,
   );
+  const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => {
+    if (parsed._compactionRequest) return parsed;
+    if (experimentalFullContext) return parsed;
+    if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+      return lunaCheckpointStore.apply(parsed).parsed;
+    }
+    return parsed;
+  };
 
   const startRuntime = (
     parsed: CodexParsedRequest,
@@ -428,18 +448,42 @@ export function createChatGptWebAdapter(
     const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
       && !parsed._compactionRequest
       && Boolean(identity.threadId && identity.turnId);
-    const checkpointInput = captureLunaCheckpoint
+    const lunaCheckpointInput = captureLunaCheckpoint
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
+
+    const canUseFullCheckpoint = experimentalFullContext
+      && !parsed._compactionRequest
+      && supportsChatGptWebFullContext(parsed.modelId)
+      && Boolean(identity.threadId && identity.turnId);
+    const recoveryInput = canUseFullCheckpoint
+      ? fullContextCheckpointStore.apply(parsed)
+      : { parsed, applied: false };
+
+    let canonicalRequiresMultipart = false;
+    if (canUseFullCheckpoint) {
+      try {
+        canonicalRequiresMultipart = resolveFullContextMultipartPlan(parsed, turnCapabilities, experimentalSkillAttachments) !== undefined;
+      } catch {
+        // Preparation will surface any context length exceeded error
+      }
+    }
+    const shouldCaptureFullCheckpoint = canUseFullCheckpoint
+      && (recoveryInput.applied || canonicalRequiresMultipart);
+
+    const initialInput = captureLunaCheckpoint
+      ? lunaCheckpointInput.parsed
+      : (recoveryInput.applied ? recoveryInput.parsed : parsed);
+
     const conversationKey = !parsed._compactionRequest
       && !freshConversationPerTurn
       && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
       && mode.localTools
       && retainedLauncherDescriptor
-      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
+      ? chatGptConversationKey(parsed, executionNamespace)
       : undefined;
     const resumeInput = conversationKey
-      ? retainedConversationResumeRequest(checkpointInput.parsed)
+      ? retainedConversationResumeRequest(parsed)
       : undefined;
     const retainConversation = conversationKey !== undefined;
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
@@ -449,6 +493,21 @@ export function createChatGptWebAdapter(
       : undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
+      if (experimentalFullContext && supportsChatGptWebFullContext(parsed.modelId)) {
+        const experimentalMultipartParts = resolveFullContextMultipartPlan(
+          input,
+          turnCapabilities,
+          experimentalSkillAttachments,
+        );
+        return {
+          experimentalMultipartMode: "full" as const,
+          experimentalSkillAttachments,
+          captureCheckpoint: shouldCaptureFullCheckpoint ? ("full" as const) : undefined,
+          ...(experimentalMultipartParts !== undefined
+            ? { experimentalMultipartParts }
+            : {}),
+        };
+      }
       const experimentalMultipartParts = experimentalBiggerContext
         ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments)
         : undefined;
@@ -462,22 +521,39 @@ export function createChatGptWebAdapter(
     };
     if (captureLunaCheckpoint) {
       console.info(
-        `[chatgpt-web] Luna rolling checkpoint applied=${checkpointInput.applied}${checkpointInput.reason ? ` reason=${checkpointInput.reason}` : ""}`,
+        `[chatgpt-web] Luna rolling checkpoint applied=${lunaCheckpointInput.applied}${lunaCheckpointInput.reason ? ` reason=${lunaCheckpointInput.reason}` : ""}`,
       );
     }
-    let capturedCheckpoint: CapturedChatGptLunaCheckpoint | undefined;
+    if (canUseFullCheckpoint) {
+      console.info(
+        `[chatgpt-web] Full Context recovery checkpoint applied=${recoveryInput.applied}${recoveryInput.reason ? ` reason=${recoveryInput.reason}` : ""}`,
+      );
+    }
+    let capturedLunaCheckpoint: CapturedChatGptLunaCheckpoint | undefined;
+    let capturedFullCheckpoint: CapturedChatGptFullContextCheckpoint | undefined;
     let checkpointCaptureError: Error | undefined;
-    const captureCheckpoint = (captured: CapturedChatGptLunaCheckpoint): void => {
-      if (capturedCheckpoint) {
+    const captureLunaCallback = (captured: CapturedChatGptLunaCheckpoint): void => {
+      if (capturedLunaCheckpoint) {
         checkpointCaptureError = new Error("ChatGPT Luna emitted more than one rolling checkpoint");
         return;
       }
-      capturedCheckpoint = captured;
+      capturedLunaCheckpoint = captured;
+    };
+    const captureFullCallback = (captured: CapturedChatGptFullContextCheckpoint): void => {
+      if (capturedFullCheckpoint) {
+        checkpointCaptureError = new Error("ChatGPT Full Context emitted more than one recovery checkpoint");
+        return;
+      }
+      capturedFullCheckpoint = captured;
     };
     const finalizeCheckpoint = (browser: Promise<string>): Promise<string> => browser.then(answer => {
-      if (!captureLunaCheckpoint) return answer;
       if (checkpointCaptureError) throw checkpointCaptureError;
-      if (capturedCheckpoint) lunaCheckpointStore.commit(parsed, capturedCheckpoint, answer);
+      if (captureLunaCheckpoint && capturedLunaCheckpoint) {
+        lunaCheckpointStore.commit(parsed, capturedLunaCheckpoint, answer);
+      }
+      if (shouldCaptureFullCheckpoint && capturedFullCheckpoint) {
+        fullContextCheckpointStore.commit(parsed, capturedFullCheckpoint, answer);
+      }
       return answer;
     });
     const browserAbort = new AbortController();
@@ -551,7 +627,7 @@ export function createChatGptWebAdapter(
           activeToken = await broker.registerSafe(environment, surfaceNonce, undefined, traceId);
           observeCapabilityRetirement(activeToken, externalProgress);
           const compiled = compileChatGptWebPrompt(
-            checkpointInput.parsed,
+            initialInput,
             turnCapabilities,
             activeToken,
             { manualControl: true },
@@ -673,7 +749,7 @@ export function createChatGptWebAdapter(
         physicalSettlement: browserTurn.physicalSettlement,
         trace,
         text,
-        usageInput: checkpointInput.parsed,
+        usageInput: currentUsageInput(parsed),
         manualControl: { surfaceNonce },
         ...(conversationKey ? { conversationKey } : {}),
         ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
@@ -700,10 +776,10 @@ export function createChatGptWebAdapter(
         capabilities: turnCapabilities,
         prepare: async () => ({
           ...compileChatGptWebPrompt(
-            checkpointInput.parsed,
+            initialInput,
             turnCapabilities,
             undefined,
-            compileOptionsFor(checkpointInput.parsed),
+            compileOptionsFor(initialInput),
           ),
           release: () => {},
         }),
@@ -716,7 +792,13 @@ export function createChatGptWebAdapter(
         onTextDelta: delta => text.push(delta),
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
-          onLunaCheckpoint: captureCheckpoint,
+          onLunaCheckpoint: captureLunaCallback,
+        } : {}),
+        ...(shouldCaptureFullCheckpoint ? {
+          checkpointCapture: {
+            mode: "full" as const,
+            onCheckpoint: captureFullCallback,
+          },
         } : {}),
       })), browserAbort);
       return {
@@ -725,7 +807,7 @@ export function createChatGptWebAdapter(
         physicalSettlement: browserTurn.physicalSettlement,
         trace,
         text,
-        usageInput: checkpointInput.parsed,
+        usageInput: currentUsageInput(parsed),
         submission,
         cancel: browserTurn.cancel,
       };
@@ -769,7 +851,7 @@ export function createChatGptWebAdapter(
       reasoning: parsed.options.reasoning,
       ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
       capabilities: turnCapabilities,
-      prepare: () => prepareWith(checkpointInput.parsed),
+      prepare: () => prepareWith(initialInput),
       ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
       ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
       abortSignal: browserAbort.signal,
@@ -786,7 +868,13 @@ export function createChatGptWebAdapter(
       },
       ...(captureLunaCheckpoint ? {
         captureLunaCheckpoint: true,
-        onLunaCheckpoint: captureCheckpoint,
+        onLunaCheckpoint: captureLunaCallback,
+      } : {}),
+      ...(shouldCaptureFullCheckpoint ? {
+        checkpointCapture: {
+          mode: "full" as const,
+          onCheckpoint: captureFullCallback,
+        },
       } : {}),
     }))), browserAbort);
     void browserTurn.browser.catch(error => {
@@ -803,7 +891,7 @@ export function createChatGptWebAdapter(
       physicalSettlement: browserTurn.physicalSettlement,
       trace,
       text,
-      usageInput: checkpointInput.parsed,
+      usageInput: currentUsageInput(parsed),
       ...(conversationKey ? { conversationKey } : {}),
       ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
       retireCapability: async () => {
@@ -1176,7 +1264,7 @@ export function createChatGptWebAdapter(
             emit({ type: "text_delta", text: summary, phase: "final_answer" });
             emitBrowserCompletion(
               { type: "final", answer: summary },
-              estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
+              estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities, experimentalBiggerContext === true, experimentalSkillAttachments, experimentalFullContext),
               emit,
             );
             chatGptWebTurnRetryPolicy.clear(retryKey);
@@ -1269,7 +1357,7 @@ export function createChatGptWebAdapter(
               session.setFinalEvents(session.roundEvents(roundKey));
               emitRoundBatch(buffer => emitBrowserCompletion(
                 settled,
-                estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
+                estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities, experimentalBiggerContext === true, experimentalSkillAttachments, experimentalFullContext),
                 buffer,
               ));
               session.completeRound(roundKey);
@@ -1291,7 +1379,7 @@ export function createChatGptWebAdapter(
                   if (replay.length === 0) emitRoundEvents(session.eventsForOutstandingReplay());
                   emitRoundBatch(buffer => emitToolBatch(
                     outstanding,
-                    estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning, toolRequests: outstanding }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
+                    estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning, toolRequests: outstanding }, turnCapabilities, experimentalBiggerContext === true, experimentalSkillAttachments, experimentalFullContext),
                     buffer,
                   ));
                   session.completeRound(roundKey);
@@ -1375,7 +1463,7 @@ export function createChatGptWebAdapter(
                 }
                 emitRoundBatch(buffer => emitBrowserCompletion(
                   completedOutcome,
-                  estimateChatGptWebUsage(currentUsageInput(parsed), { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
+                  estimateChatGptWebUsage(currentUsageInput(parsed), { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities, experimentalBiggerContext === true, experimentalSkillAttachments, experimentalFullContext),
                   buffer,
                 ));
                 session.completeRound(roundKey);
@@ -1433,7 +1521,7 @@ export function createChatGptWebAdapter(
                 session.setOutstanding(next.requests, roundReasoning, session.roundEvents(roundKey));
                 emitRoundBatch(buffer => emitToolBatch(
                   next.requests,
-                  estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
+                  estimateChatGptWebUsage(currentUsageInput(parsed), { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities, experimentalBiggerContext === true, experimentalSkillAttachments, experimentalFullContext),
                   buffer,
                 ));
                 session.completeRound(roundKey);

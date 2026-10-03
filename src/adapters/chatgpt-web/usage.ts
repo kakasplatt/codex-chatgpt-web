@@ -277,12 +277,18 @@ export function estimateChatGptWebUsage(
   capabilities: ChatGptWebCapabilities,
   experimentalBiggerContext = false,
   experimentalSkillAttachments = false,
+  experimentalFullContext = false,
 ): CodexUsage {
+  const experimentalMultipartMode = experimentalFullContext ? "full" : "bigger";
+  const experimentalMultipartParts = experimentalFullContext
+    ? resolveFullContextMultipartPlan(parsed, capabilities, experimentalSkillAttachments)
+    : (experimentalBiggerContext
+      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments)
+      : undefined);
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
     experimentalSkillAttachments,
-    experimentalMultipartParts: experimentalBiggerContext
-      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments)
-      : undefined,
+    experimentalMultipartMode,
+    experimentalMultipartParts,
   });
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
   return {
