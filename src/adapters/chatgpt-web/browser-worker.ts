@@ -1353,7 +1353,7 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void | Promise<void>;
-  /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
+  /** One inert multipart stage completed its exact acknowledgement boundary. */
   onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
   onReasoningSummary?: (text: string, continuation?: boolean) => void;
@@ -3980,7 +3980,7 @@ export class ChatGptBrowserWorker {
         throw new DOMException("ChatGPT multipart stage aborted", "AbortError");
       }
       if (deadline !== undefined && Date.now() >= deadline) {
-        throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
+        throw new Error("ChatGPT multipart transaction timed out while awaiting a stage acknowledgement");
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
@@ -5425,7 +5425,7 @@ export class ChatGptBrowserWorker {
                   checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
                   turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
                   undefined,
-                  { onSubmitted: recordStageUsage ? () => { stageSubmitted = true; } : undefined, onSendActivated: async () => {
+                  { onSubmitted: () => { stageSubmitted = true; }, onSendActivated: async () => {
                     await this.assertSelectedEffort(page, mode);
                     submissionRejection.begin(page);
                     sendActivated = true;
@@ -5509,6 +5509,7 @@ export class ChatGptBrowserWorker {
                 stagingEffort = nextStagingEffort;
                 submissionRejection.reset();
                 resetRejectionAbort();
+                stageSubmitted = false;
                 console.warn(
                   `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length}`
                   + ` was rejected by ChatGPT in ${rejectedEffort} effort; retrying this part in ${nextStagingEffort}`,
