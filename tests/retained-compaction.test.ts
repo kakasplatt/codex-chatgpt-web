@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError, chatGptRetainedConversationUnavailableError } from "../src/adapters/chatgpt-web/adapter-error";
 import {
   MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
@@ -641,6 +642,122 @@ test("retained compaction records browser phases only after the browser reaches 
   expect(diagnostics.some(line => line.includes('"phase":"retained_turn_started"'))).toBeFalse();
   expect(diagnostics.some(line => line.includes('"phase":"waiting_for_control_handoff"'))).toBeFalse();
 });
+
+for (const browserHost of ["managed-chrome", "launcher"] as const) {
+  test(`retained compaction orders turn selection before preparation on ${browserHost}`, async () => {
+    const root = mkdtempSync(join(shortSocketTempRoot(), "compaction-phase-host-"));
+    const sourceRequest = request(false);
+    const source = new ChatGptTurnSession({
+      mode: "read-only",
+      browser: Promise.resolve("source complete"),
+      physicalSettlement: Promise.resolve(),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      usageInput: sourceRequest,
+      conversationKey: chatGptConversationKey(sourceRequest, "provider")!,
+      cancel() {},
+    });
+    const broker = {
+      beginCompactionTransaction: async () => ({
+        token: "control_11111111111111111111111111111111",
+        handoffId: "handoff_22222222222222222222222222222222",
+      }),
+      waitForCompactionHandoff: async () => new Promise<string>(() => {}),
+      abortCompactionTransaction() {},
+    } as unknown as TurnBroker;
+    const worker = ChatGptBrowserWorker.forProvider({
+      adapter: "chatgpt-web",
+      baseUrl: `browser://${root}`,
+      chatgptWeb: {
+        browserHost,
+        browserHostDescriptorPath: join(root, "launcher.json"),
+        browserDiagnosticsPath: root,
+      },
+    });
+    const pageTimeout = new ChatGptWebAdapterError("page acquisition deadline expired", {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: "compaction_handoff_timeout",
+      retryable: false,
+    });
+    const stages: string[] = [];
+    const frames: string[] = [];
+    if (browserHost === "managed-chrome") {
+      // Keep run(), runExclusive(), runBrowserTurn(), and prompt selection real.
+      Object.assign(worker, {
+        runStage: async (_traceId: string, stage: string) => {
+          stages.push(stage);
+          throw pageTimeout;
+        },
+      });
+    } else {
+      const client = new LauncherBrowserHelperClient({
+        appName: "Codex Native2",
+        browserHost,
+        browserHostDescriptorPath: join(root, "launcher.json"),
+        storageStatePath: join(root, "unused-state.json"),
+        chromeExecutablePath: join(root, "unused-chrome"),
+        headed: true,
+        autoApproveToolCalls: false,
+        useSavedChats: true,
+      });
+      const internal = client as unknown as {
+        child: unknown;
+        ensureChild(): Promise<void>;
+        send(message: { type: string; id?: string; turn?: { requireRetainedConversation?: boolean } }): Promise<void>;
+        handleLine(child: unknown, line: string): void;
+      };
+      const child = {};
+      internal.child = child;
+      internal.ensureChild = async () => {};
+      // Substitute only IPC transport. The real client selects prepareResume and
+      // dispatches lifecycle callbacks from the helper's prepared_selected event.
+      internal.send = async message => {
+        frames.push(message.type);
+        if (message.type === "run") {
+          expect(message.turn?.requireRetainedConversation).toBeTrue();
+          queueMicrotask(() => internal.handleLine(child, JSON.stringify({
+            type: "event", id: message.id, event: "prepared_selected", reused: true,
+          })));
+        } else if (message.type === "prepared_selected_ack") {
+          queueMicrotask(() => internal.handleLine(child, JSON.stringify({
+            type: "error", id: message.id, message: pageTimeout.message,
+            status: pageTimeout.status, errorType: pageTimeout.errorType,
+            code: pageTimeout.code, retryable: pageTimeout.retryable,
+          })));
+        }
+      };
+      Object.assign(worker, { launcherHelper: client });
+    }
+    const phases: string[] = [];
+    const originalInfo = console.info;
+    console.info = (...args: unknown[]) => {
+      const line = args.map(String).join(" ");
+      if (line.startsWith("[chatgpt-web] retained_compaction_phase ")) {
+        phases.push(JSON.parse(line.slice(line.indexOf("{"))).phase);
+      }
+    };
+    try {
+      const caught = await requestRetainedCompactionHandoff(
+        worker, request(true), source, broker,
+        { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+        `trace_phase_${browserHost}`, undefined, 1_000,
+      ).catch(error => error);
+      if (browserHost === "managed-chrome") expect(stages).toEqual(["browser_page"]);
+      else expect(frames).toEqual(["run", "prepared_selected_ack"]);
+      expect(phases).toEqual([
+        "source_settling", "retained_turn_started", "compaction_instruction_delivered",
+      ]);
+      expect(caught).toMatchObject({
+        code: "compaction_handoff_timeout",
+        phase: "compaction_instruction_delivered",
+      });
+    } finally {
+      console.info = originalInfo;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("retained compaction records handoff accepted before stalled browser retirement times out", async () => {
   const sourceRequest = request(false);

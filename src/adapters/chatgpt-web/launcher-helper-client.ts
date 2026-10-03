@@ -513,7 +513,11 @@ export class LauncherBrowserHelperClient {
       }
       else if (message.event === "prepared_selected") {
         const prepare = message.reused ? pending.turn.prepareResume : pending.turn.prepare;
-        void Promise.resolve().then(() => prepare?.()).then(prepared => {
+        void Promise.resolve().then(async () => {
+          if (!prepare) throw new Error("Launcher browser helper selected an unavailable continuation prompt");
+          await pending.turn.onPreparedSelected?.(message.reused);
+          return prepare();
+        }).then(prepared => {
           if (!prepared) throw new Error("Launcher browser helper selected an unavailable continuation prompt");
           if (this.pending.get(message.id) !== pending) {
             prepared.release();
@@ -523,21 +527,18 @@ export class LauncherBrowserHelperClient {
           if (prepared.skillFiles?.length && !this.helperFeatures.has("skill-attachments")) {
             throw new Error("Launcher browser helper does not support skill attachments; update or restart the launcher");
           }
-          return Promise.resolve(pending.turn.onPreparedSelected?.(message.reused)).then(() => {
-            if (this.pending.get(message.id) !== pending) return;
-            return this.send({
-              type: "prepared_selected_ack",
-              id: message.id,
-              prepared: {
-                text: prepared.text,
-                images: prepared.images,
-                ...(prepared.skillFiles ? { skillFiles: prepared.skillFiles } : {}),
-                ...(prepared.multipart ? { multipart: prepared.multipart } : {}),
-                ...(prepared.trimmedCompactionMessages !== undefined
-                  ? { trimmedCompactionMessages: prepared.trimmedCompactionMessages }
-                  : {}),
-              } satisfies CompiledChatGptWebPrompt,
-            });
+          return this.send({
+            type: "prepared_selected_ack",
+            id: message.id,
+            prepared: {
+              text: prepared.text,
+              images: prepared.images,
+              ...(prepared.skillFiles ? { skillFiles: prepared.skillFiles } : {}),
+              ...(prepared.multipart ? { multipart: prepared.multipart } : {}),
+              ...(prepared.trimmedCompactionMessages !== undefined
+                ? { trimmedCompactionMessages: prepared.trimmedCompactionMessages }
+                : {}),
+            } satisfies CompiledChatGptWebPrompt,
           });
         }).catch(error => this.abortWithLocalFailure(
           message.id,

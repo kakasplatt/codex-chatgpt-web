@@ -383,6 +383,7 @@ export async function requestRetainedCompactionHandoff(
       conversationKey,
       requireRetainedConversation: true,
       abortSignal: browserAbort.signal,
+      // Selection precedes prompt preparation on both managed and helper browser hosts.
       onPreparedSelected: () => recordPhase("retained_turn_started"),
       onSendActivated: () => recordPhase("waiting_for_control_handoff"),
       onTextDelta: () => {},
