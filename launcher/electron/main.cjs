@@ -532,7 +532,7 @@ function syncBrowserPreferences(stateStore, config) {
 function registerIpc({ logger, stateStore }) {
   const runtimeChannels = new Set([
     "launcher:setup-core", "launcher:setup-mcp", "launcher:uninstall-integration",
-    "launcher:bigger-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
+    "launcher:bigger-context", "launcher:full-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
     "launcher:use-saved-chats", "launcher:zero-risk-pro", "launcher:browser-interaction-mode",
     "launcher:auto-approve-tool-calls",
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
@@ -781,6 +781,7 @@ function registerIpc({ logger, stateStore }) {
       codexRestartRequired: true,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      experimentalFullContext: false,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
       useSavedChats: false,
@@ -861,7 +862,7 @@ function registerIpc({ logger, stateStore }) {
       : await runSetup();
     const state = stateStore.update({
       browserInteractionMode: interactionMode,
-      ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
+      ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalFullContext: false, experimentalSkillAttachments: false } : {}),
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -910,6 +911,19 @@ function registerIpc({ logger, stateStore }) {
     const result = await runtimeHost.setBiggerContext(enabled === true);
     const state = stateStore.update({
       experimentalBiggerContext: result.enabled,
+      ...(result.enabled ? { experimentalFullContext: false } : {}),
+      codexCatalogVerified: IS_DEV_PROFILE ? true : false,
+      codexRestartRequired: IS_DEV_PROFILE ? false : true,
+    });
+    send("launcher:state-changed", state);
+    if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
+    return state;
+  });
+  handle("launcher:full-context", async (_event, enabled) => {
+    const result = await runtimeHost.setFullContext(enabled === true);
+    const state = stateStore.update({
+      experimentalFullContext: result.enabled,
+      ...(result.enabled ? { experimentalBiggerContext: false } : {}),
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
     });
@@ -992,7 +1006,7 @@ function registerIpc({ logger, stateStore }) {
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
       autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
-      ...(mode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
+      ...(mode === "manual" ? { experimentalBiggerContext: false, experimentalFullContext: false, experimentalSkillAttachments: false } : {}),
       ...(result.configured ? {
         codexCatalogVerified: IS_DEV_PROFILE,
         codexRestartRequired: !IS_DEV_PROFILE,
@@ -1304,6 +1318,7 @@ async function start() {
       codexRestartRequired: false,
       autoStart: false,
       experimentalBiggerContext: config?.experimentalBiggerContext === true,
+      experimentalFullContext: config?.experimentalFullContext === true,
       experimentalSkillAttachments: config?.experimentalSkillAttachments === true,
       experimentalFreshConversationPerTurn: config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: config?.useSavedChats === true,
@@ -1334,6 +1349,7 @@ async function start() {
         codexCatalogVerified: false,
         codexRestartRequired: true,
         experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
+        experimentalFullContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalFullContext === true,
         experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
         experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
         useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -1360,6 +1376,7 @@ async function start() {
     const configuredRuntime = runtimeHost.runtimeConfigSnapshot();
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
+      const experimentalFullContext = configuredRuntime.config?.experimentalFullContext === true;
       const experimentalSkillAttachments = configuredRuntime.config?.experimentalSkillAttachments === true;
       const experimentalFreshConversationPerTurn = configuredRuntime.config?.experimentalFreshConversationPerTurn === true;
       const useSavedChats = configuredRuntime.config?.useSavedChats === true;
@@ -1371,8 +1388,9 @@ async function start() {
         || saved.useSavedChats !== useSavedChats
         || saved.autoApproveToolCalls !== autoApproveToolCalls
         || saved.experimentalBiggerContext !== enabled
+        || saved.experimentalFullContext !== experimentalFullContext
         || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, autoApproveToolCalls, zeroRiskProEnabled });
+        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalFullContext, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, autoApproveToolCalls, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
     }
@@ -1388,6 +1406,7 @@ async function start() {
         coreSetupComplete: true,
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
+        experimentalFullContext: config.experimentalFullContext === true,
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
         experimentalFreshConversationPerTurn: config.experimentalFreshConversationPerTurn === true,
         useSavedChats: config.useSavedChats === true,

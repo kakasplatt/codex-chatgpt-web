@@ -45,8 +45,6 @@ test("localized READMEs preserve every command block and link target from Englis
     assert.deepEqual(linkTargets(source), linkTargets(englishReadme));
   }
 });
-
-
 for (const language of Object.keys(languages).filter(language => language !== "en")) test(`${language} runtime localization preserves literal connector names and endpoints`, () => {
   const { copyFor, localizeRuntimeMessage } = loadI18nModule();
   const copy = copyFor(language);
@@ -196,5 +194,25 @@ test("plugin setup and Zero Risk instructions show configured names in every lan
     assert.ok(copy.connectorMigrationNotice.includes(names.automatic));
     assert.ok(copy.pluginNameWarning.length > 0);
     assert.equal(copyFor(language).manualPromptInstruction.includes("Codex Manual"), false);
+  }
+});
+
+test("Full Context copy is present and localized in all supported languages", () => {
+  const { copyFor } = loadI18nModule();
+  const english = copyFor("en");
+  assert.ok(typeof english.fullContext === "string" && english.fullContext.trim());
+  assert.ok(typeof english.fullContextBody === "string" && english.fullContextBody.trim());
+  assert.ok(typeof english.manualFullContextUnavailable === "string" && english.manualFullContextUnavailable.trim());
+
+  for (const language of Object.keys(languages)) {
+    const copy = copyFor(language);
+    assert.ok(typeof copy.fullContext === "string" && copy.fullContext.trim(), `missing fullContext in ${language}`);
+    assert.ok(typeof copy.fullContextBody === "string" && copy.fullContextBody.trim(), `missing fullContextBody in ${language}`);
+    assert.ok(typeof copy.manualFullContextUnavailable === "string" && copy.manualFullContextUnavailable.trim(), `missing manualFullContextUnavailable in ${language}`);
+    if (language !== "en") {
+      assert.notEqual(copy.fullContext, english.fullContext, `fullContext not localized in ${language}`);
+      assert.notEqual(copy.fullContextBody, english.fullContextBody, `fullContextBody not localized in ${language}`);
+      assert.notEqual(copy.manualFullContextUnavailable, english.manualFullContextUnavailable, `manualFullContextUnavailable not localized in ${language}`);
+    }
   }
 });

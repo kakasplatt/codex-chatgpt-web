@@ -262,6 +262,13 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
     && typeof config.experimentalBiggerContext !== "boolean") {
     throw new Error("Runtime configuration has an invalid experimentalBiggerContext");
   }
+  if (config.experimentalFullContext !== undefined
+    && typeof config.experimentalFullContext !== "boolean") {
+    throw new Error("Runtime configuration has an invalid experimentalFullContext");
+  }
+  if (config.experimentalBiggerContext === true && config.experimentalFullContext === true) {
+    throw new Error("Runtime configuration cannot enable both Bigger Context and Full Context");
+  }
   if (config.experimentalFreshConversationPerTurn !== undefined
     && typeof config.experimentalFreshConversationPerTurn !== "boolean") {
     throw new Error("Runtime configuration has an invalid experimentalFreshConversationPerTurn");

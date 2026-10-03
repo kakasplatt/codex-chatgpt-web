@@ -27,6 +27,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      experimentalFullContext: false,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
       useSavedChats: false,
@@ -44,6 +45,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       keepRunningOnClose: false,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
+      experimentalFullContext: true,
     });
     assert.deepEqual(createStateStore(file).read(), {
       version: 1,
@@ -57,6 +59,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      experimentalFullContext: true,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
       useSavedChats: false,
@@ -138,6 +141,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      experimentalFullContext: false,
       experimentalSkillAttachments: false,
       experimentalFreshConversationPerTurn: false,
       useSavedChats: false,

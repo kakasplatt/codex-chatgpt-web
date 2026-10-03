@@ -134,6 +134,19 @@ test("browser interaction mode changes reuse the transactional setup and refresh
   assert.equal(automatic.invocation().args.includes("--automatic-browser-interaction"), true);
   assert.equal(automatic.invocation().args.includes("--refresh-account-capabilities"), true);
   assert.equal(automatic.invocation().args.includes("--bigger-context"), true);
+
+  const fullConfig = {
+    mode: "full",
+    browserHost: "launcher",
+    appName: "Codex Native2",
+    experimentalFullContext: true,
+  };
+  const automaticFull = hostFor(fullConfig);
+  const automaticFullResult = await automaticFull.host.setBrowserInteractionMode("automatic");
+  assert.equal(automaticFullResult.mode, "automatic");
+  assert.equal(automaticFull.invocation().args.includes("--automatic-browser-interaction"), true);
+  assert.equal(automaticFull.invocation().args.includes("--refresh-account-capabilities"), true);
+  assert.equal(automaticFull.invocation().args.includes("--full-context"), true);
 });
 
 test("switching back from Zero Risk preserves the saved automatic connector identity", async () => {
@@ -198,6 +211,45 @@ test("Bigger Context updates the isolated DEV config without installing a Codex 
   assert.equal(result.enabled, false);
   assert.deepEqual(fixture.invocation(), {
     name: "bigger-context",
+    args: [
+      "dev",
+      "setup",
+      "--browser-only",
+      "--browser-host-descriptor",
+      "/dev/runtime/launcher-browser.json",
+      "--automatic-browser-interaction",
+      "--acknowledge-unofficial",
+      "--standard-context",
+    ],
+  });
+});
+
+test("Full Context uses the setup transaction and refreshes the production Codex catalog", async () => {
+  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
+  const result = await fixture.host.setFullContext(true);
+  assert.equal(result.enabled, true);
+  assert.deepEqual(fixture.invocation(), {
+    name: "full-context",
+    args: [
+      "setup",
+      "--full",
+      "--browser-host-descriptor",
+      "/runtime/launcher-browser.json",
+      "--automatic-browser-interaction",
+      "--replace-codex-route",
+      "--acknowledge-unofficial",
+      "--restart-service",
+      "--full-context",
+    ],
+  });
+});
+
+test("Full Context updates the isolated DEV config without installing a Codex route", async () => {
+  const fixture = devHostFor({ mode: "browser-only" });
+  const result = await fixture.host.setFullContext(false);
+  assert.equal(result.enabled, false);
+  assert.deepEqual(fixture.invocation(), {
+    name: "full-context",
     args: [
       "dev",
       "setup",

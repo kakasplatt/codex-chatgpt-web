@@ -256,6 +256,55 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.match(appSource, /api!\.setBiggerContext\(enabled\)/);
   assert.match(electronMain, /runtimeHost\.setBiggerContext\(enabled === true\)/);
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
+  assert.match(appSource, /manualFullContextUnavailable[\s\S]*?copy\.fullContextBody/);
+  assert.match(appSource, /api!\.setFullContext\(enabled\)/);
+  assert.match(electronMain, /runtimeHost\.setFullContext\(enabled === true\)/);
+  assert.match(preloadSource, /setFullContext:\s*\(enabled\)\s*=>\s*ipcRenderer\.invoke\("launcher:full-context",\s*enabled\)/);
+});
+
+test("Bigger Context and Full Context are mutually exclusive in launcher IPC", async () => {
+  const vm = require("node:vm");
+  const handlers = new Map();
+  const state = {
+    coreSetupComplete: true,
+    codexCatalogVerified: true,
+    experimentalBiggerContext: false,
+    experimentalFullContext: false,
+  };
+  const stateStore = { read: () => state, update: patch => Object.assign(state, patch) };
+  const logger = { info() {}, error() {} };
+  const context = vm.createContext({
+    runtimeStartup: Promise.resolve(),
+    logger,
+    stateStore,
+    IS_DEV_PROFILE: false,
+    ipcMain: { on() {} },
+    registerLoggedIpc: (_ipc, _logger, channel, handler) => handlers.set(channel, handler),
+    send() {},
+    publishOperation() {},
+    startCatalogVerificationMonitor() {},
+    runtimeHost: {
+      setBiggerContext: async (enabled) => ({ enabled }),
+      setFullContext: async (enabled) => ({ enabled }),
+    },
+  });
+  vm.runInContext(
+    electronMain.slice(electronMain.indexOf("function registerIpc("), electronMain.indexOf("async function requestQuit("))
+      + "\nregisterIpc({ logger, stateStore });",
+    context,
+  );
+
+  await handlers.get("launcher:bigger-context")({}, true);
+  assert.equal(state.experimentalBiggerContext, true);
+  assert.equal(state.experimentalFullContext, false);
+
+  await handlers.get("launcher:full-context")({}, true);
+  assert.equal(state.experimentalBiggerContext, false);
+  assert.equal(state.experimentalFullContext, true);
+
+  await handlers.get("launcher:full-context")({}, false);
+  assert.equal(state.experimentalBiggerContext, false);
+  assert.equal(state.experimentalFullContext, false);
 });
 
 test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {

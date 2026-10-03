@@ -166,6 +166,18 @@ test("launcher runtime ownership cannot cross production and DEV profiles", () =
     assert.throws(() => validateConfig({ ...production,
       experimentalFreshConversationPerTurn: invalid }, descriptorPath), /invalid experimentalFreshConversationPerTurn/);
   }
+  for (const enabled of [false, true]) {
+    assert.equal(validateConfig({ ...production,
+      experimentalFullContext: enabled }, descriptorPath).experimentalFullContext, enabled);
+  }
+  for (const invalid of ["true", 1, null]) {
+    assert.throws(() => validateConfig({ ...production,
+      experimentalFullContext: invalid }, descriptorPath), /invalid experimentalFullContext/);
+  }
+  assert.throws(
+    () => validateConfig({ ...production, experimentalBiggerContext: true, experimentalFullContext: true }, descriptorPath),
+    /Runtime configuration cannot enable both Bigger Context and Full Context/,
+  );
 });
 
 test("DEV runtime supervision ignores launcher version mismatch and starts only the isolated MCP tunnel", async () => {
