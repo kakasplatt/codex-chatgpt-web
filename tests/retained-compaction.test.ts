@@ -482,6 +482,98 @@ test("retained compaction deadline bounds browser settlement after the control h
   expect(transactionAborted).toBeTrue();
 });
 
+test("retained compaction timeout identifies the waiting control-handoff phase", async () => {
+  const sourceRequest = request(false);
+  const source = new ChatGptTurnSession({
+    mode: "read-only",
+    browser: Promise.resolve("source complete"),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    usageInput: sourceRequest,
+    conversationKey: chatGptConversationKey(sourceRequest, "provider")!,
+    cancel() {},
+  });
+  const broker = {
+    beginCompactionTransaction: async () => ({
+      token: "control_11111111111111111111111111111111",
+      handoffId: "handoff_22222222222222222222222222222222",
+    }),
+    waitForCompactionHandoff: async () => new Promise<string>(() => {}),
+    abortCompactionTransaction() {},
+  } as unknown as TurnBroker;
+  const worker = {
+    run: async () => new Promise<string>(() => {}),
+  };
+
+  let caught: unknown;
+  try {
+    await requestRetainedCompactionHandoff(
+      worker as never,
+      request(true),
+      source,
+      broker,
+      { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      "trace_waiting_handoff_timeout",
+      undefined,
+      20,
+    );
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toMatchObject({
+    code: "compaction_handoff_timeout",
+    phase: "waiting_for_control_handoff",
+  });
+  expect((caught as Error).message).toContain("waiting_for_control_handoff");
+});
+
+test("retained compaction records handoff accepted before stalled browser retirement times out", async () => {
+  const sourceRequest = request(false);
+  const source = new ChatGptTurnSession({
+    mode: "read-only",
+    browser: Promise.resolve("source complete"),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    usageInput: sourceRequest,
+    conversationKey: chatGptConversationKey(sourceRequest, "provider")!,
+    cancel() {},
+  });
+  const broker = {
+    beginCompactionTransaction: async () => ({
+      token: "control_11111111111111111111111111111111",
+      handoffId: "handoff_22222222222222222222222222222222",
+    }),
+    waitForCompactionHandoff: async () => "Committed checkpoint",
+    abortCompactionTransaction() {},
+  } as unknown as TurnBroker;
+  const worker = {
+    run: async () => new Promise<string>(() => {}),
+  };
+  const diagnostics: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); };
+  try {
+    await expect(requestRetainedCompactionHandoff(
+      worker as never,
+      request(true),
+      source,
+      broker,
+      { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      "trace_handoff_accepted_cleanup_stall",
+      undefined,
+      20,
+    )).rejects.toThrow("timed out after 20ms");
+  } finally {
+    console.info = originalInfo;
+  }
+
+  expect(diagnostics.some(line => line.includes('"traceId":"trace_handoff_accepted_cleanup_stall"')
+    && line.includes('"phase":"handoff_accepted"'))).toBeTrue();
+});
+
 test("a rejected exact compaction run is evicted while a successful run remains replayable", async () => {
   const key = `exact-retry-${Date.now()}-${Math.random()}`;
   const owner = { ownerKey: `owner-${key}`, traceIds: [`trace-${key}`] };

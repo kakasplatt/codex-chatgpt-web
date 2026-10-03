@@ -130,6 +130,35 @@ function currentToolResults(
 
 export const MAX_COMPACTION_HANDOFF_TIMEOUT_MS = 5 * 60_000;
 
+export type RetainedCompactionPhase =
+  | "source_settling"
+  | "compaction_instruction_delivered"
+  | "retained_turn_started"
+  | "waiting_for_control_handoff"
+  | "handoff_accepted"
+  | "retiring_browser"
+  | "complete";
+
+export class RetainedCompactionHandoffTimeoutError extends ChatGptWebAdapterError {
+  readonly phase: RetainedCompactionPhase;
+  readonly elapsedMs: number;
+
+  constructor(timeoutMs: number, phase: RetainedCompactionPhase, elapsedMs: number) {
+    super(
+      `ChatGPT compaction handoff timed out after ${timeoutMs}ms during ${phase}`,
+      {
+        status: 409,
+        errorType: "invalid_request_error",
+        code: "compaction_handoff_timeout",
+        retryable: false,
+      },
+    );
+    this.name = "RetainedCompactionHandoffTimeoutError";
+    this.phase = phase;
+    this.elapsedMs = elapsedMs;
+  }
+}
+
 function boundedCompactionTimeout(timeoutMs: number): number {
   return Math.min(timeoutMs, MAX_COMPACTION_HANDOFF_TIMEOUT_MS);
 }
@@ -290,9 +319,31 @@ export async function requestRetainedCompactionHandoff(
   const conversationKey = source.conversationKey();
   if (!conversationKey) throw new Error("The completed ChatGPT source has no retained conversation identity");
   const operationTimeoutMs = boundedCompactionTimeout(timeoutMs);
+  const startedAt = Date.now();
+  let phase: RetainedCompactionPhase = "source_settling";
+  const elapsedMs = (): number => Math.max(0, Date.now() - startedAt);
+  const recordPhase = (next: RetainedCompactionPhase): void => {
+    if (phase === next && next !== "source_settling") return;
+    phase = next;
+    console.info(`[chatgpt-web] retained_compaction_phase ${JSON.stringify({
+      traceId,
+      phase,
+      elapsedMs: elapsedMs(),
+    })}`);
+  };
+  recordPhase("source_settling");
   const deadline = new AbortController();
   const deadlineTimer = setTimeout(
-    () => deadline.abort(new Error(`ChatGPT compaction handoff timed out after ${operationTimeoutMs}ms`)),
+    () => {
+      const elapsed = elapsedMs();
+      console.warn(`[chatgpt-web] retained_compaction_timeout ${JSON.stringify({
+        traceId,
+        phase,
+        timeoutMs: operationTimeoutMs,
+        elapsedMs: elapsed,
+      })}`);
+      deadline.abort(new RetainedCompactionHandoffTimeoutError(operationTimeoutMs, phase, elapsed));
+    },
     operationTimeoutMs,
   );
   deadlineTimer.unref?.();
@@ -315,6 +366,7 @@ export async function requestRetainedCompactionHandoff(
     transaction = await withCompactionAbort(transactionPromise, operationSignal);
     const instruction = structuredCompactionHandoffInstruction(transaction);
     const prepare = async () => ({ text: instruction, images: [], release: () => {} });
+    recordPhase("compaction_instruction_delivered");
     browser = worker.run({
       traceId,
       modelId: parsed.modelId,
@@ -331,6 +383,7 @@ export async function requestRetainedCompactionHandoff(
       abortSignal: browserAbort.signal,
       onTextDelta: () => {},
     });
+    recordPhase("retained_turn_started");
     const handoff = broker.waitForCompactionHandoff(transaction.token, operationSignal);
     const browserWithoutHandoff = browser.then<never>(() => {
       // The control handler accepts the summary before replying to ChatGPT. A fully
@@ -340,6 +393,7 @@ export async function requestRetainedCompactionHandoff(
         { status: 409, errorType: "invalid_request_error", code: "compaction_handoff_missing", retryable: false },
       );
     });
+    recordPhase("waiting_for_control_handoff");
     const summary = await withCompactionAbort(
       Promise.race([
         handoff,
@@ -347,15 +401,27 @@ export async function requestRetainedCompactionHandoff(
       ]),
       operationSignal,
     );
+    recordPhase("handoff_accepted");
     // The one-shot control submission is the terminal event for this purpose-built response.
     // ChatGPT may render no assistant text after a tool-only response, and therefore no Copy
     // action. End our owned turn explicitly and wait for the launcher/helper cleanup handshake.
     browserAbort.abort(new ChatGptCompactionHandoffAccepted());
+    recordPhase("retiring_browser");
     await withCompactionAbort(
       browser.then(() => undefined, () => undefined),
       operationSignal,
     );
+    recordPhase("complete");
     return summary;
+  } catch (error) {
+    if (!(error instanceof RetainedCompactionHandoffTimeoutError)) {
+      console.warn(`[chatgpt-web] retained_compaction_failed ${JSON.stringify({
+        traceId,
+        phase,
+        elapsedMs: elapsedMs(),
+      })}`);
+    }
+    throw error;
   } finally {
     browserAbort.abort();
     if (transaction) broker.abortCompactionTransaction(transaction.token);
