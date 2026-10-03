@@ -157,6 +157,33 @@ test("compaction capability is one-shot and structurally bound to its handoff id
   store.close();
 });
 
+test("compaction transactions reject late submissions after timeout or abort", async () => {
+  const store = new CompactionTransactionStore();
+  const timedOut = store.begin("trace_timeout", 20);
+  await expect(store.wait(timedOut.token)).rejects.toThrow("compaction transaction timed out");
+  expect(() => store.submit(timedOut.token, timedOut.handoffId, "late")).toThrow(
+    "compaction control token is invalid, expired, or consumed",
+  );
+
+  const aborted = store.begin("trace_abort", 1_000);
+  store.abort(aborted.token);
+  expect(() => store.submit(aborted.token, aborted.handoffId, "late")).toThrow(
+    "compaction control token is invalid, expired, or consumed",
+  );
+  await expect(store.wait(aborted.token)).rejects.toThrow(
+    "compaction control token is invalid, expired, or consumed",
+  );
+
+  const committed = store.begin("trace_committed", 1_000);
+  store.submit(committed.token, committed.handoffId, "summary");
+  await expect(store.wait(committed.token)).resolves.toBe("summary");
+  store.abort(committed.token);
+  expect(() => store.submit(committed.token, committed.handoffId, "again")).toThrow(
+    "compaction control token is invalid, expired, or consumed",
+  );
+  store.close();
+});
+
 test("retained compaction provides one exact same-agent control binding", () => {
   const prompt = structuredCompactionHandoffInstruction({
     token: "control_11111111111111111111111111111111",
