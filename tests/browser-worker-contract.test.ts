@@ -4596,6 +4596,100 @@ test("assistant-turn observation timeout degrades browser UI health when page re
   expect(browserUiHealth.current()).toBe("degraded");
 });
 
+test("submission recovery clears transient UI degradation after a successful DOM probe", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  let probes = 0;
+  worker.currentSubmissionEvidence = async () => {
+    if (probes++ === 0) throw timeout;
+    return "assistant_turn";
+  };
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = { locator: () => absent };
+  const baseline = { initialTurnIdentities: [], domCache: {} };
+  const transitions: string[] = [];
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker(transition => {
+    transitions.push(transition.reason);
+  });
+
+  await expect(worker.waitForSubmissionAcceptedWithRecovery(
+    page,
+    baseline,
+    undefined,
+    undefined,
+    0,
+    undefined,
+    async () => ({ page, baseline }),
+    browserUiHealth,
+  )).resolves.toBe("assistant_turn");
+
+  expect(browserUiHealth.current()).toBe("responsive");
+  expect(transitions).toEqual(["dom-observation-timeout", "dom-observation-ok"]);
+});
+
+test("assistant-turn recovery clears transient UI degradation after a successful DOM probe", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  let probes = 0;
+  worker.submissionDomState = async () => {
+    if (probes++ === 0) throw timeout;
+    return {
+      turnIdentities: ["assistant:new"],
+      responseIdentities: ["assistant:new"],
+      visibleStopButtonCount: 0,
+    };
+  };
+  worker.waitForTurnDomOrExternalProgress = async () => {};
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const assistant = {};
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.startsWith("[data-turn-id=") ? assistant : absent,
+  };
+  const progress = {
+    snapshot: () => ({
+      revision: 1,
+      lastToolBatchRevision: 0,
+      activeToolCalls: 1,
+      lastProgressAt: Date.now(),
+    }),
+    waitForChange: async () => ({
+      revision: 1,
+      lastToolBatchRevision: 0,
+      activeToolCalls: 1,
+      lastProgressAt: Date.now(),
+    }),
+    acknowledgeToolBatch: async () => {},
+  };
+  const transitions: string[] = [];
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker(transition => {
+    transitions.push(transition.reason);
+  });
+
+  await expect(worker.waitForNewAssistantTurn(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    Date.now() + 1_000,
+    undefined,
+    progress,
+    CHATGPT_RESPONSE_DOM_GRACE_MS,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).resolves.toMatchObject({ identity: "assistant:new", locator: assistant });
+
+  expect(browserUiHealth.current()).toBe("responsive");
+  expect(transitions).toEqual(["dom-observation-timeout", "dom-observation-ok"]);
+});
+
 test("managed browser turns report degraded UI health while MCP progress remains live", async () => {
   const warnings: string[] = [];
   const originalWarn = console.warn;

@@ -2959,12 +2959,14 @@ export class ChatGptBrowserWorker {
               .then(() => ({ kind: "external" as const })),
           ]), signal);
           if (observed.kind === "external") continue;
+          browserUiHealth?.record("dom-observation-ok");
           evidence = observed.value;
         } finally {
           progressWaitAbort.abort();
         }
       } else {
         evidence = await this.currentSubmissionEvidence(page, baseline, signal);
+        browserUiHealth?.record("dom-observation-ok");
       }
       if (evidence) return evidence;
       await this.waitForTurnDomOrExternalProgress(
@@ -3208,6 +3210,7 @@ export class ChatGptBrowserWorker {
         );
         continue;
       }
+      browserUiHealth?.record("dom-observation-ok");
       recoveryAttempts = 0;
       // A tool batch can arrive while the DOM probe is in flight. Read progress again before
       // acknowledging its boundary; the pre-probe snapshot can otherwise leave the broker waiting
