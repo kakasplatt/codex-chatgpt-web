@@ -4492,6 +4492,86 @@ test("browser UI health recovers a DOM-only degradation after a successful obser
   expect(tracker.record("dom-observation-ok", 2_200)).toBeUndefined();
 });
 
+test("submission tool-boundary response timeout degrades shared browser UI health", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  worker.submissionDomState = async () => ({ responseIdentities: ["assistant:new"] });
+  worker.responseDomSnapshot = async (_locator: unknown, cache: {
+    lastObservationSucceeded?: boolean;
+    lastObservationTimedOut?: boolean;
+  }) => {
+    cache.lastObservationSucceeded = false;
+    cache.lastObservationTimedOut = true;
+    return { visibleText: "" };
+  };
+  const page = { locator: () => ({}) };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await worker.currentSubmissionAnswerText(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    undefined,
+    browserUiHealth,
+  );
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("assistant-binding tool-boundary response timeout degrades shared browser UI health", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  worker.submissionDomState = async () => ({
+    turnIdentities: ["assistant:new"],
+    responseIdentities: ["assistant:new"],
+    visibleStopButtonCount: 0,
+  });
+  worker.responseDomSnapshot = async (_locator: unknown, cache: {
+    lastObservationSucceeded?: boolean;
+    lastObservationTimedOut?: boolean;
+  }) => {
+    cache.lastObservationSucceeded = false;
+    cache.lastObservationTimedOut = true;
+    return { visibleText: "" };
+  };
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.startsWith("[role=") ? absent : ({}),
+  };
+  const progress = {
+    revision: 1,
+    lastToolBatchRevision: 1,
+    activeToolCalls: 1,
+    lastProgressAt: Date.now(),
+  };
+  const externalProgress = {
+    snapshot: () => progress,
+    acknowledgeToolBatch: async () => {},
+    waitForChange: async () => {},
+  };
+  const completionTracker = {
+    needsToolBatchObservation: () => true,
+    observeToolBatch: () => {},
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await worker.waitForNewAssistantTurn(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    Date.now() + 1_000,
+    undefined,
+    externalProgress,
+    CHATGPT_RESPONSE_DOM_GRACE_MS,
+    completionTracker,
+    undefined,
+    browserUiHealth,
+  );
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
 test("the launcher helper transport carries MCP progress into the out-of-process browser worker", () => {
   const client = readFileSync("src/adapters/chatgpt-web/launcher-helper-client.ts", "utf8");
   const helper = readFileSync("src/adapters/chatgpt-web/browser-helper-main.ts", "utf8");

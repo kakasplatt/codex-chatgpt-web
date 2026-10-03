@@ -2907,6 +2907,7 @@ export class ChatGptBrowserWorker {
     externalProgress?: ChatGptTurnProgressReader,
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
     completionTracker?: ChatGptCompletionTracker,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptSubmissionEvidence> {
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     for (;;) {
@@ -2915,7 +2916,7 @@ export class ChatGptBrowserWorker {
       if (progress
         && externalProgress
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
-        const boundaryText = await this.currentSubmissionAnswerText(page, baseline, signal);
+        const boundaryText = await this.currentSubmissionAnswerText(page, baseline, signal, browserUiHealth);
         completionTracker.observeToolBatch(progress.lastToolBatchRevision, boundaryText);
         await externalProgress.acknowledgeToolBatch(progress.lastToolBatchRevision);
       }
@@ -3088,6 +3089,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     baseline: ChatGptSubmissionBaseline,
     signal?: AbortSignal,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<string> {
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const identity = chatGptNewTurnIdentity(
@@ -3096,7 +3098,7 @@ export class ChatGptBrowserWorker {
     );
     if (!identity) return "";
     const locator = page.locator(chatGptAssistantTurnSelector(identity));
-    return (await this.responseDomSnapshot(locator, {})).visibleText;
+    return this.responseDomTextWithUiHealth(locator, browserUiHealth);
   }
 
   private async captureSubmissionBaseline(page: Page, submittedText?: string): Promise<ChatGptSubmissionBaseline> {
@@ -3122,6 +3124,7 @@ export class ChatGptBrowserWorker {
     graceMs: number = CHATGPT_RESPONSE_DOM_GRACE_MS,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptAssistantTurnBinding> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -3194,10 +3197,10 @@ export class ChatGptBrowserWorker {
         && externalProgress
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
         const boundaryText = identity
-          ? (await this.responseDomSnapshot(
+          ? await this.responseDomTextWithUiHealth(
             observationPage.locator(chatGptAssistantTurnSelector(identity)),
-            {},
-          )).visibleText
+            browserUiHealth,
+          )
           : "";
         completionTracker.observeToolBatch(progress.lastToolBatchRevision, boundaryText);
         await externalProgress.acknowledgeToolBatch(progress.lastToolBatchRevision);
@@ -3719,6 +3722,7 @@ export class ChatGptBrowserWorker {
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptSubmissionEvidence> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -3732,6 +3736,7 @@ export class ChatGptBrowserWorker {
           externalProgress,
           initialToolBatchRevision,
           completionTracker,
+          browserUiHealth,
         );
         return evidence;
       } catch (error) {
@@ -3764,6 +3769,7 @@ export class ChatGptBrowserWorker {
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptSubmissionEvidence> {
     const composer = await this.activeComposer(page);
     const sendButton = composer
@@ -3803,6 +3809,7 @@ export class ChatGptBrowserWorker {
       initialToolBatchRevision,
       completionTracker,
       recoverObservation,
+      browserUiHealth,
     );
     await submissionLifecycle?.onSubmitted?.();
     return evidence;
@@ -4744,6 +4751,16 @@ export class ChatGptBrowserWorker {
     return snapshot;
   }
 
+  private async responseDomTextWithUiHealth(
+    responseTurn: Locator,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
+  ): Promise<string> {
+    const cache: ChatGptResponseDomCache = {};
+    const snapshot = await this.responseDomSnapshot(responseTurn, cache);
+    if (browserUiHealth) recordChatGptResponseDomUiHealth(browserUiHealth, cache);
+    return snapshot.visibleText;
+  }
+
   private async stalledTurnDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
     const responseState = await responseTurn.count()
       ? await responseTurn.evaluate(element => {
@@ -5308,6 +5325,7 @@ export class ChatGptBrowserWorker {
                       return recovered;
                     }
                     : undefined,
+                  browserUiHealth,
                 ),
               );
               console.info(
@@ -5338,6 +5356,7 @@ export class ChatGptBrowserWorker {
                         return recovered;
                       }
                       : undefined,
+                    browserUiHealth,
                   );
                   await this.waitForMultipartAcknowledgement(
                     page,
@@ -5512,6 +5531,7 @@ export class ChatGptBrowserWorker {
                 return recovered;
               }
               : undefined,
+            browserUiHealth,
           ),
         );
       } catch (error) {
@@ -5540,6 +5560,7 @@ export class ChatGptBrowserWorker {
             return recovered;
           }
           : undefined,
+        browserUiHealth,
       );
       await diagnostics.capture(page, "send-accepted");
 
