@@ -21,6 +21,8 @@ interface PendingTurn {
   localFailure?: Error;
   progressForwarding?: AbortController;
   acknowledgedMultipartStage?: number;
+  helperPid?: number;
+  retirementPublished?: boolean;
 }
 
 type HelperMessage =
@@ -232,7 +234,7 @@ export class LauncherBrowserHelperClient {
           rejectResult(new Error(`Duplicate launcher browser turn: ${turn.traceId}`));
           return;
         }
-        const pending: PendingTurn = { turn, resolve: resolveResult, reject: rejectResult };
+        const pending: PendingTurn = { turn, resolve: resolveResult, reject: rejectResult, helperPid: this.child?.pid };
         this.pending.set(turn.traceId, pending);
         if (turn.abortSignal) {
           const abortListener = () => {
@@ -512,8 +514,24 @@ export class LauncherBrowserHelperClient {
           ));
       }
       else if (message.event === "prepared_selected") {
+        if (!pending.retirementPublished && pending.turn.onBrowserRetirementAvailable) {
+          pending.retirementPublished = true;
+          const owner = { traceId: message.id, helperPid: pending.helperPid! };
+          pending.turn.onBrowserRetirementAvailable(async signal => {
+            signal.throwIfAborted();
+            // A completed/replaced pending turn must never retire a later owner of the trace.
+            if (this.pending.get(owner.traceId) !== pending) return;
+            await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+              phase: "end", ...owner, status: "aborted",
+            }, undefined, signal);
+          });
+        }
         const prepare = message.reused ? pending.turn.prepareResume : pending.turn.prepare;
-        void Promise.resolve().then(() => prepare?.()).then(prepared => {
+        void Promise.resolve().then(async () => {
+          if (!prepare) throw new Error("Launcher browser helper selected an unavailable continuation prompt");
+          await pending.turn.onPreparedSelected?.(message.reused);
+          return prepare();
+        }).then(prepared => {
           if (!prepared) throw new Error("Launcher browser helper selected an unavailable continuation prompt");
           if (this.pending.get(message.id) !== pending) {
             prepared.release();
@@ -523,21 +541,18 @@ export class LauncherBrowserHelperClient {
           if (prepared.skillFiles?.length && !this.helperFeatures.has("skill-attachments")) {
             throw new Error("Launcher browser helper does not support skill attachments; update or restart the launcher");
           }
-          return Promise.resolve(pending.turn.onPreparedSelected?.(message.reused)).then(() => {
-            if (this.pending.get(message.id) !== pending) return;
-            return this.send({
-              type: "prepared_selected_ack",
-              id: message.id,
-              prepared: {
-                text: prepared.text,
-                images: prepared.images,
-                ...(prepared.skillFiles ? { skillFiles: prepared.skillFiles } : {}),
-                ...(prepared.multipart ? { multipart: prepared.multipart } : {}),
-                ...(prepared.trimmedCompactionMessages !== undefined
-                  ? { trimmedCompactionMessages: prepared.trimmedCompactionMessages }
-                  : {}),
-              } satisfies CompiledChatGptWebPrompt,
-            });
+          return this.send({
+            type: "prepared_selected_ack",
+            id: message.id,
+            prepared: {
+              text: prepared.text,
+              images: prepared.images,
+              ...(prepared.skillFiles ? { skillFiles: prepared.skillFiles } : {}),
+              ...(prepared.multipart ? { multipart: prepared.multipart } : {}),
+              ...(prepared.trimmedCompactionMessages !== undefined
+                ? { trimmedCompactionMessages: prepared.trimmedCompactionMessages }
+                : {}),
+            } satisfies CompiledChatGptWebPrompt,
           });
         }).catch(error => this.abortWithLocalFailure(
           message.id,

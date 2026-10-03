@@ -537,6 +537,10 @@ class BrowserHost {
       title: tab.label,
       status: tab.status,
       loading: tab.loading === true,
+      rendererHealth: tab.rendererHealth === "unresponsive" ? "unresponsive" : "responsive",
+      rendererStateChangedAt: Number.isFinite(tab.rendererStateChangedAt)
+        ? tab.rendererStateChangedAt
+        : null,
       active: this.selectedTabId === tab.id,
       closable: true,
       ...(tab.status === "running" && tab.authenticationRequired ? { authenticationRequired: true } : {}),
@@ -604,6 +608,8 @@ class BrowserHost {
       initializingSurface: true,
       bootstrapReady: false,
       rendererReady: false,
+      rendererHealth: "responsive",
+      rendererStateChangedAt: null,
       deviceEmulationViewport: null,
       deviceEmulationDirty: true,
       bootstrapDeadlineAt: Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
@@ -702,6 +708,8 @@ class BrowserHost {
       sentAt: null,
       bootstrapReady: false,
       rendererReady: false,
+      rendererHealth: "responsive",
+      rendererStateChangedAt: null,
       lastHeartbeatAt: Date.now(),
     };
     this.turnTabs.set(id, tab);
@@ -903,9 +911,19 @@ class BrowserHost {
       this.removeTurnTab(tab, true);
     });
     contents.on("unresponsive", () => {
+      if (tab.rendererHealth !== "unresponsive") {
+        tab.rendererHealth = "unresponsive";
+        tab.rendererStateChangedAt = Date.now();
+        this.publishState?.(this.snapshot());
+      }
       this.logger.warn("browser.tab_unresponsive", { tabId: tab.id, traceId: tab.traceId });
     });
     contents.on("responsive", () => {
+      if (tab.rendererHealth !== "responsive") {
+        tab.rendererHealth = "responsive";
+        tab.rendererStateChangedAt = Date.now();
+        this.publishState?.(this.snapshot());
+      }
       this.logger.info("browser.tab_responsive", { tabId: tab.id, traceId: tab.traceId });
     });
   }
@@ -1037,6 +1055,22 @@ class BrowserHost {
       });
       this.signalManualTerminal(tab, "failed");
       this.removeTurnTab(tab, true);
+    });
+    contents.on("unresponsive", () => {
+      if (tab.rendererHealth !== "unresponsive") {
+        tab.rendererHealth = "unresponsive";
+        tab.rendererStateChangedAt = Date.now();
+        this.publishState?.(this.snapshot());
+      }
+      this.logger.warn("browser.tab_unresponsive", { tabId: tab.id, traceId: tab.traceId });
+    });
+    contents.on("responsive", () => {
+      if (tab.rendererHealth !== "responsive") {
+        tab.rendererHealth = "responsive";
+        tab.rendererStateChangedAt = Date.now();
+        this.publishState?.(this.snapshot());
+      }
+      this.logger.info("browser.tab_responsive", { tabId: tab.id, traceId: tab.traceId });
     });
   }
 
@@ -1471,7 +1505,12 @@ class BrowserHost {
       tab.deviceEmulationDirty = true;
       this.syncViewVisibility();
     }
-    return this.snapshot();
+    return {
+      rendererHealth: tab.rendererHealth === "unresponsive" ? "unresponsive" : "responsive",
+      rendererStateChangedAt: Number.isFinite(tab.rendererStateChangedAt)
+        ? tab.rendererStateChangedAt
+        : null,
+    };
   }
 
   setTurnApprovalPending(traceId, helperPid, pending) {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, chatGptSendStageTimeout, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptBrowserUiHealthTracker, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, chatGptSendStageTimeout, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptBrowserTabClosedError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -282,6 +282,43 @@ test("response caching rechecks CSS visibility without requiring a DOM mutation"
     if (originalInnerText) Object.defineProperty(dom.HTMLElement.prototype, "innerText", originalInnerText);
     else delete dom.HTMLElement.prototype.innerText;
   }
+});
+
+test("response DOM snapshot marks caught evaluation failures as unsuccessful observations", async () => {
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as {
+    responseDomSnapshot(
+      locator: { evaluate: () => Promise<unknown>; page: () => { isClosed: () => boolean } },
+      cache: { lastObservationSucceeded?: boolean },
+    ): Promise<{ responsePresent: boolean }>;
+  };
+  const cache: { lastObservationSucceeded?: boolean } = {};
+  const locator = {
+    evaluate: async () => { throw new Error("simulated Playwright evaluate failure"); },
+    page: () => ({ isClosed: () => false }),
+  };
+
+  await expect(worker.responseDomSnapshot(locator, cache)).resolves.toMatchObject({ responsePresent: false });
+  expect(cache.lastObservationSucceeded).toBeFalse();
+});
+
+test("response DOM snapshot preserves caught timeout evidence for UI health", async () => {
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as {
+    responseDomSnapshot(
+      locator: { evaluate: () => Promise<unknown>; page: () => { isClosed: () => boolean } },
+      cache: { lastObservationSucceeded?: boolean; lastObservationTimedOut?: boolean },
+    ): Promise<{ responsePresent: boolean }>;
+  };
+  const cache: { lastObservationSucceeded?: boolean; lastObservationTimedOut?: boolean } = {};
+  const timeout = new Error("simulated Playwright evaluate timeout");
+  timeout.name = "TimeoutError";
+  const locator = {
+    evaluate: async () => { throw timeout; },
+    page: () => ({ isClosed: () => false }),
+  };
+
+  await expect(worker.responseDomSnapshot(locator, cache)).resolves.toMatchObject({ responsePresent: false });
+  expect(cache.lastObservationSucceeded).toBeFalse();
+  expect(cache.lastObservationTimedOut).toBeTrue();
 });
 
 test("browser turns run concurrently up to the five-tab limit", async () => {
@@ -4407,6 +4444,478 @@ test("clearing the missing-response window preserves whether a response was ever
   expect(tracker.update(absent, 6_000)).toContain("response DOM disappeared");
 });
 
+test("browser UI health tracks DOM degradation independently from native renderer health", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.current()).toBe("responsive");
+  expect(tracker.record("dom-observation-timeout", 1_000)).toEqual({
+    previous: "responsive",
+    current: "degraded",
+    reason: "dom-observation-timeout",
+    at: 1_000,
+  });
+  expect(tracker.record("dom-observation-timeout", 1_100)).toBeUndefined();
+  expect(tracker.current()).toBe("degraded");
+
+  expect(tracker.record("renderer-unresponsive", 1_200)).toEqual({
+    previous: "degraded",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 1_200,
+  });
+  expect(tracker.record("renderer-unresponsive", 1_300)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  // A successful DOM read and unrelated backend/MCP progress cannot overrule native
+  // Electron evidence that the renderer itself is still unresponsive.
+  expect(tracker.record("dom-observation-ok", 1_400)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+  expect(tracker.record("renderer-responsive", 1_500)).toEqual({
+    previous: "unresponsive",
+    current: "responsive",
+    reason: "renderer-responsive",
+    at: 1_500,
+  });
+  expect(tracker.record("renderer-responsive", 1_600)).toBeUndefined();
+});
+
+test("browser UI health recovers a DOM-only degradation after a successful observation", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+  tracker.record("dom-observation-timeout", 2_000);
+
+  expect(tracker.record("dom-observation-ok", 2_100)).toEqual({
+    previous: "degraded",
+    current: "responsive",
+    reason: "dom-observation-ok",
+    at: 2_100,
+  });
+  expect(tracker.record("dom-observation-ok", 2_200)).toBeUndefined();
+});
+
+test("renderer recovery preserves an unresolved DOM degradation", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.record("renderer-unresponsive", 3_000)).toEqual({
+    previous: "responsive",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 3_000,
+  });
+  expect(tracker.record("dom-observation-timeout", 3_100)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  expect(tracker.record("renderer-responsive", 3_200)).toEqual({
+    previous: "unresponsive",
+    current: "degraded",
+    reason: "renderer-responsive",
+    at: 3_200,
+  });
+  expect(tracker.current()).toBe("degraded");
+
+  expect(tracker.record("dom-observation-ok", 3_300)).toEqual({
+    previous: "degraded",
+    current: "responsive",
+    reason: "dom-observation-ok",
+    at: 3_300,
+  });
+  expect(tracker.current()).toBe("responsive");
+});
+
+test("browser UI health ignores stale or untimestamped renderer samples after newer native evidence", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.record("renderer-unresponsive", 5_000)).toEqual({
+    previous: "responsive",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 5_000,
+  });
+
+  expect(tracker.record("renderer-responsive", 4_000)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  expect(tracker.record("renderer-responsive")).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  expect(tracker.record("renderer-responsive", 6_000)).toEqual({
+    previous: "unresponsive",
+    current: "responsive",
+    reason: "renderer-responsive",
+    at: 6_000,
+  });
+  expect(tracker.current()).toBe("responsive");
+});
+
+test("browser UI health accepts renderer recovery with the same native timestamp", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.record("renderer-unresponsive", 7_000)).toEqual({
+    previous: "responsive",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 7_000,
+  });
+
+  expect(tracker.record("renderer-responsive", 7_000)).toEqual({
+    previous: "unresponsive",
+    current: "responsive",
+    reason: "renderer-responsive",
+    at: 7_000,
+  });
+  expect(tracker.current()).toBe("responsive");
+});
+
+test("submission observation timeout degrades browser UI health when page recovery is unavailable", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  worker.waitForSubmissionAccepted = async () => { throw timeout; };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await expect(worker.waitForSubmissionAcceptedWithRecovery(
+    {} as Page,
+    { initialTurnIdentities: [], domCache: {} },
+    undefined,
+    undefined,
+    0,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toBe(timeout);
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("assistant-turn observation timeout degrades browser UI health when page recovery is unavailable", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  worker.submissionDomState = async () => { throw timeout; };
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: () => absent,
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await expect(worker.waitForNewAssistantTurn(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    CHATGPT_RESPONSE_DOM_GRACE_MS,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toBe(timeout);
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("submission recovery clears transient UI degradation after a successful DOM probe", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  let probes = 0;
+  worker.currentSubmissionEvidence = async () => {
+    if (probes++ === 0) throw timeout;
+    return "assistant_turn";
+  };
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = { locator: () => absent };
+  const baseline = { initialTurnIdentities: [], domCache: {} };
+  const transitions: string[] = [];
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker(transition => {
+    transitions.push(transition.reason);
+  });
+
+  await expect(worker.waitForSubmissionAcceptedWithRecovery(
+    page,
+    baseline,
+    undefined,
+    undefined,
+    0,
+    undefined,
+    async () => ({ page, baseline }),
+    browserUiHealth,
+  )).resolves.toBe("assistant_turn");
+
+  expect(browserUiHealth.current()).toBe("responsive");
+  expect(transitions).toEqual(["dom-observation-timeout", "dom-observation-ok"]);
+});
+
+test("assistant-turn recovery clears transient UI degradation after a successful DOM probe", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  const timeout = new ChatGptBrowserObservationTimeoutError(5_000);
+  let probes = 0;
+  worker.submissionDomState = async () => {
+    if (probes++ === 0) throw timeout;
+    return {
+      turnIdentities: ["assistant:new"],
+      responseIdentities: ["assistant:new"],
+      visibleStopButtonCount: 0,
+    };
+  };
+  worker.waitForTurnDomOrExternalProgress = async () => {};
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const assistant = {};
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.startsWith("[data-turn-id=") ? assistant : absent,
+  };
+  const progress = {
+    snapshot: () => ({
+      revision: 1,
+      lastToolBatchRevision: 0,
+      activeToolCalls: 1,
+      lastProgressAt: Date.now(),
+    }),
+    waitForChange: async () => ({
+      revision: 1,
+      lastToolBatchRevision: 0,
+      activeToolCalls: 1,
+      lastProgressAt: Date.now(),
+    }),
+    acknowledgeToolBatch: async () => {},
+  };
+  const transitions: string[] = [];
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker(transition => {
+    transitions.push(transition.reason);
+  });
+
+  await expect(worker.waitForNewAssistantTurn(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    Date.now() + 1_000,
+    undefined,
+    progress,
+    CHATGPT_RESPONSE_DOM_GRACE_MS,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).resolves.toMatchObject({ identity: "assistant:new", locator: assistant });
+
+  expect(browserUiHealth.current()).toBe("responsive");
+  expect(transitions).toEqual(["dom-observation-timeout", "dom-observation-ok"]);
+});
+
+test("managed browser turns report degraded UI health while MCP progress remains live", async () => {
+  const warnings: string[] = [];
+  const commentary: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const progress = {
+      snapshot: () => ({
+        revision: 1,
+        lastToolBatchRevision: 1,
+        activeToolCalls: 1,
+        lastProgressAt: Date.now(),
+      }),
+    };
+    const worker: any = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "managed-chrome" },
+      runBrowserTurn: async (
+        _turn: unknown,
+        _surfaceId: unknown,
+        _maintenancePage: unknown,
+        _reuseConversation: unknown,
+        _trackUsage: unknown,
+        browserUiHealth: ChatGptBrowserUiHealthTracker,
+      ) => {
+        browserUiHealth.record("dom-observation-timeout", 4_000);
+        return "ok";
+      },
+    });
+
+    await expect(worker.runExclusive({
+      traceId: "ui-health-diagnostic",
+      externalProgress: progress,
+      onCommentary: (text: string) => { commentary.push(text); },
+    })).resolves.toBe("ok");
+
+    expect(commentary).toEqual([
+      "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.",
+    ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("trace=ui-health-diagnostic");
+    expect(warnings[0]).toContain("current=degraded");
+    expect(warnings[0]).toContain("externalProgressLive=true");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("managed browser UI health commentary deduplicates degradation and recovery transitions", async () => {
+  const warnings: string[] = [];
+  const commentary: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const worker: any = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "managed-chrome" },
+      runBrowserTurn: async (
+        _turn: unknown,
+        _surfaceId: unknown,
+        _maintenancePage: unknown,
+        _reuseConversation: unknown,
+        _trackUsage: unknown,
+        browserUiHealth: ChatGptBrowserUiHealthTracker,
+      ) => {
+        browserUiHealth.record("dom-observation-timeout", 4_000);
+        browserUiHealth.record("dom-observation-timeout", 4_001);
+        browserUiHealth.record("dom-observation-ok", 4_002);
+        browserUiHealth.record("dom-observation-ok", 4_003);
+        return "ok";
+      },
+    });
+
+    await expect(worker.runExclusive({
+      traceId: "ui-health-deduplication",
+      onCommentary: (text: string) => { commentary.push(text); },
+    })).resolves.toBe("ok");
+
+    expect(commentary).toEqual([
+      "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.",
+      "ChatGPT browser UI became responsive again.",
+    ]);
+    expect(warnings).toHaveLength(2);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("managed browser UI health commentary waits for native recovery from renderer unresponsive", async () => {
+  const warnings: string[] = [];
+  const commentary: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const worker: any = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "managed-chrome" },
+      runBrowserTurn: async (
+        _turn: unknown,
+        _surfaceId: unknown,
+        _maintenancePage: unknown,
+        _reuseConversation: unknown,
+        _trackUsage: unknown,
+        browserUiHealth: ChatGptBrowserUiHealthTracker,
+      ) => {
+        browserUiHealth.record("renderer-unresponsive", 4_000);
+        browserUiHealth.record("dom-observation-ok", 4_001);
+        expect(commentary).toEqual([
+          "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+        ]);
+        browserUiHealth.record("renderer-responsive", 4_002);
+        return "ok";
+      },
+    });
+
+    await expect(worker.runExclusive({
+      traceId: "ui-health-renderer-recovery",
+      onCommentary: (text: string) => { commentary.push(text); },
+    })).resolves.toBe("ok");
+
+    expect(commentary).toEqual([
+      "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+      "ChatGPT browser UI became responsive again.",
+    ]);
+    expect(warnings).toHaveLength(2);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("submission tool-boundary response timeout degrades shared browser UI health", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  worker.submissionDomState = async () => ({ responseIdentities: ["assistant:new"] });
+  worker.responseDomSnapshot = async (_locator: unknown, cache: {
+    lastObservationSucceeded?: boolean;
+    lastObservationTimedOut?: boolean;
+  }) => {
+    cache.lastObservationSucceeded = false;
+    cache.lastObservationTimedOut = true;
+    return { visibleText: "" };
+  };
+  const page = { locator: () => ({}) };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await worker.currentSubmissionAnswerText(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    undefined,
+    browserUiHealth,
+  );
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("assistant-binding tool-boundary response timeout degrades shared browser UI health", async () => {
+  const worker: any = Object.create(ChatGptBrowserWorker.prototype);
+  worker.submissionDomState = async () => ({
+    turnIdentities: ["assistant:new"],
+    responseIdentities: ["assistant:new"],
+    visibleStopButtonCount: 0,
+  });
+  worker.responseDomSnapshot = async (_locator: unknown, cache: {
+    lastObservationSucceeded?: boolean;
+    lastObservationTimedOut?: boolean;
+  }) => {
+    cache.lastObservationSucceeded = false;
+    cache.lastObservationTimedOut = true;
+    return { visibleText: "" };
+  };
+  const absent = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.startsWith("[role=") ? absent : ({}),
+  };
+  const progress = {
+    revision: 1,
+    lastToolBatchRevision: 1,
+    activeToolCalls: 1,
+    lastProgressAt: Date.now(),
+  };
+  const externalProgress = {
+    snapshot: () => progress,
+    acknowledgeToolBatch: async () => {},
+    waitForChange: async () => {},
+  };
+  const completionTracker = {
+    needsToolBatchObservation: () => true,
+    observeToolBatch: () => {},
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+
+  await worker.waitForNewAssistantTurn(
+    page,
+    { initialTurnIdentities: [], domCache: {} },
+    Date.now() + 1_000,
+    undefined,
+    externalProgress,
+    CHATGPT_RESPONSE_DOM_GRACE_MS,
+    completionTracker,
+    undefined,
+    browserUiHealth,
+  );
+
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
 test("the launcher helper transport carries MCP progress into the out-of-process browser worker", () => {
   const client = readFileSync("src/adapters/chatgpt-web/launcher-helper-client.ts", "utf8");
   const helper = readFileSync("src/adapters/chatgpt-web/browser-helper-main.ts", "utf8");
@@ -4505,6 +5014,22 @@ test("an accepted turn survives internal observation faults instead of being tor
   expect(worker).toContain('candidate.closest(\'[data-testid^="cot-v5"]\') !== null');
 });
 
+test("main response reconciliation records a DOM timeout before any rebind gate", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const reconciliation = worker.lastIndexOf("this.reconcileAssistantTurnBinding(");
+  const catchStart = worker.indexOf("} catch (error) {", reconciliation);
+  const nextContinue = worker.indexOf("continue;", catchStart);
+  const catchBody = worker.slice(catchStart, nextContinue);
+
+  const timeoutRecord = catchBody.indexOf('browserUiHealth.record("dom-observation-timeout")');
+  const launcherGate = catchBody.indexOf("!launcherSurfaceId");
+  const rebindBudgetGate = catchBody.indexOf("consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS");
+
+  expect(timeoutRecord).toBeGreaterThan(0);
+  expect(launcherGate).toBeGreaterThan(timeoutRecord);
+  expect(rebindBudgetGate).toBeGreaterThan(timeoutRecord);
+});
+
 test("stale MCP progress stops suppressing DOM health without penalising long active turns", () => {
   const outstanding = {
     revision: 2,
@@ -4581,6 +5106,170 @@ test("multipart observation surfaces Stopped thinking on its first observation e
   )).rejects.toMatchObject({ code: "chatgpt_stopped_thinking", retryable: false });
   expect(observations).toBe(1);
   expect(acknowledged).toBeFalse();
+});
+
+test("multipart DOM success recovers browser UI health after an observation timeout", async () => {
+  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { locator: { locator: () => absent, getByText: () => absent, getByTestId: () => absent } };
+  const snapshot = {
+    responsePresent: true,
+    stoppedThinkingVisible: false,
+    visibleText: "ACK",
+    fullHtml: "ACK",
+    completionActionVisible: true,
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  browserUiHealth.record("dom-observation-timeout", 1_000);
+  const completionTracker = { update: () => true };
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: { lastObservationSucceeded?: boolean }) => {
+        cache.lastObservationSucceeded = true;
+        return snapshot;
+      },
+    },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    completionTracker,
+    browserUiHealth,
+  )).resolves.toBeUndefined();
+  expect(browserUiHealth.current()).toBe("responsive");
+});
+
+test("multipart DOM observation failure does not recover degraded browser UI health", async () => {
+  const absent = { last() { return this; }, filter() { return this; }, isVisible: async () => false };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { locator: { locator: () => absent, getByText: () => absent, getByTestId: () => absent } };
+  const snapshot = {
+    responsePresent: true,
+    stoppedThinkingVisible: true,
+    visibleText: "",
+    fullHtml: "",
+    completionActionVisible: false,
+  };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  browserUiHealth.record("dom-observation-timeout", 1_000);
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: { lastObservationSucceeded?: boolean }) => {
+        cache.lastObservationSucceeded = false;
+        return snapshot;
+      },
+    },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toThrow();
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("multipart reconciliation timeout degrades browser UI health", async () => {
+  const absent = {
+    last() { return this; },
+    filter() { return this; },
+    locator() { return this; },
+    getByText() { return this; },
+    getByTestId() { return this; },
+    count: async () => 0,
+    isVisible: async () => false,
+  };
+  const page = { isClosed: () => false, locator: () => absent };
+  const binding = { identity: "assistant:initial", locator: absent };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: { lastObservationSucceeded?: boolean }) => {
+        cache.lastObservationSucceeded = false;
+        return {
+          responsePresent: false,
+          stoppedThinkingVisible: false,
+          visibleText: "",
+          fullHtml: "",
+          completionActionVisible: false,
+        };
+      },
+      reconcileAssistantTurnBinding: async () => {
+        throw new ChatGptBrowserObservationTimeoutError(5);
+      },
+    },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    undefined,
+    browserUiHealth,
+  )).rejects.toBeInstanceOf(ChatGptBrowserObservationTimeoutError);
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("multipart response DOM timeout degrades UI health while the bound locator remains present", async () => {
+  const bound = {
+    last() { return this; },
+    filter() { return this; },
+    locator() { return this; },
+    getByText() { return this; },
+    getByTestId() { return this; },
+    count: async () => 1,
+    isVisible: async () => false,
+  };
+  const page = { isClosed: () => false, locator: () => bound };
+  const binding = { identity: "assistant:initial", locator: bound };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  const completionTracker = {
+    needsToolBatchObservation: () => false,
+    update: () => true,
+  };
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: {
+        lastObservationSucceeded?: boolean;
+        lastObservationTimedOut?: boolean;
+      }) => {
+        cache.lastObservationSucceeded = false;
+        cache.lastObservationTimedOut = true;
+        return {
+          responsePresent: false,
+          stoppedThinkingVisible: false,
+          visibleText: "",
+          fullHtml: "",
+          completionActionVisible: false,
+        };
+      },
+    },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    completionTracker,
+    browserUiHealth,
+  )).rejects.toThrow();
+  expect(browserUiHealth.current()).toBe("degraded");
 });
 
 test("the shipped commentary classifier separates answer Markdown from reasoning in a real DOM", () => {

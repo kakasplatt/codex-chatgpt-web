@@ -375,6 +375,10 @@ export class TurnBroker implements TurnBrokerOwner {
     this.compactionTransactions.abortTrace(traceId);
   }
 
+  abortCompactionTrace(traceId: string): void {
+    this.compactionTransactions.abortTrace(traceId);
+  }
+
   updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void {
     this.prune();
     const channel = this.channels.get(token);

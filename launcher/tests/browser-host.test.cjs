@@ -403,6 +403,113 @@ function createContents() {
   return { calls, webContents };
 }
 
+test("turn renderer health transitions stay scoped to the owning tab", () => {
+  const makeContents = () => {
+    const contents = new EventEmitter();
+    contents.setWindowOpenHandler = () => {};
+    contents.getURL = () => "https://chatgpt.com/?temporary-chat=true";
+    return contents;
+  };
+  const firstContents = makeContents();
+  const secondContents = makeContents();
+  const first = {
+    id: "tab-first",
+    traceId: "trace-first",
+    label: "ChatGPT 1",
+    status: "running",
+    loading: false,
+    interactionMode: "automatic",
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+    view: { webContents: firstContents },
+  };
+  const second = {
+    id: "tab-second",
+    traceId: "trace-second",
+    label: "ChatGPT 2",
+    status: "running",
+    loading: false,
+    interactionMode: "automatic",
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+    view: { webContents: secondContents },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: first.id,
+    turnTabs: new Map([[first.id, first], [second.id, second]]),
+    logger: { info() {}, warn() {}, error() {} },
+    publishState() {},
+    snapshot() { return { tabs: [...this.turnTabs.values()].map(tab => this.tabSnapshot(tab)) }; },
+  });
+  fixture.bindTurnContents(first);
+  fixture.bindTurnContents(second);
+
+  assert.equal(fixture.tabSnapshot(first).rendererHealth, "responsive");
+  assert.equal(fixture.tabSnapshot(first).rendererStateChangedAt, null);
+
+  const originalDateNow = Date.now;
+  try {
+    let now = 1_000;
+    Date.now = () => now;
+    firstContents.emit("unresponsive");
+    assert.equal(fixture.tabSnapshot(first).rendererHealth, "unresponsive");
+    assert.equal(fixture.tabSnapshot(first).rendererStateChangedAt, 1_000);
+    assert.equal(fixture.tabSnapshot(second).rendererHealth, "responsive");
+    assert.equal(fixture.tabSnapshot(second).rendererStateChangedAt, null);
+
+    now = 1_250;
+    firstContents.emit("responsive");
+    assert.equal(fixture.tabSnapshot(first).rendererHealth, "responsive");
+    assert.equal(fixture.tabSnapshot(first).rendererStateChangedAt, 1_250);
+    assert.equal(fixture.tabSnapshot(second).rendererHealth, "responsive");
+    assert.equal(fixture.tabSnapshot(second).rendererStateChangedAt, null);
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
+test("manual turn renderer health follows native unresponsive and responsive events", () => {
+  const contents = new EventEmitter();
+  contents.setWindowOpenHandler = () => {};
+  contents.getURL = () => "https://chatgpt.com/?temporary-chat=true";
+  const tab = {
+    id: "manual-tab",
+    traceId: "manual-trace",
+    label: "ChatGPT 1",
+    status: "running",
+    loading: false,
+    interactionMode: "manual",
+    manualState: "awaiting-user",
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+    view: { webContents: contents },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: tab.id,
+    turnTabs: new Map([[tab.id, tab]]),
+    logger: { info() {}, warn() {}, error() {} },
+    publishState() {},
+    snapshot() { return { tabs: [...this.turnTabs.values()].map(value => this.tabSnapshot(value)) }; },
+  });
+  fixture.bindManualTurnContents(tab);
+
+  const originalDateNow = Date.now;
+  try {
+    let now = 2_000;
+    Date.now = () => now;
+    contents.emit("unresponsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererHealth, "unresponsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererStateChangedAt, 2_000);
+
+    now = 2_250;
+    contents.emit("responsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererHealth, "responsive");
+    assert.equal(fixture.tabSnapshot(tab).rendererStateChangedAt, 2_250);
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
 test("browser surface visibility requires both requested and active state", () => {
   assert.equal(browserViewVisible(false, false, false), false);
   assert.equal(browserViewVisible(true, false, true), false);
@@ -1951,9 +2058,12 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   });
 
   const before = Date.now();
-  const snapshot = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
+  const heartbeat = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
 
-  assert.deepEqual(snapshot, { activeTabId: tab.id });
+  assert.deepEqual(heartbeat, {
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+  });
   assert.ok(tab.lastHeartbeatAt >= before);
   assert.equal(tab.deviceEmulationDirty, true);
   assert.equal(visibilitySyncs, 1);

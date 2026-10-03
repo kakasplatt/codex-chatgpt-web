@@ -250,7 +250,10 @@ test("browser control server authenticates and owns turn visibility", async () =
         connectorBound: false,
       };
     },
-    heartbeatTurn: (...args) => calls.push(["heartbeat", ...args]),
+    heartbeatTurn: (...args) => {
+      calls.push(["heartbeat", ...args]);
+      return { rendererHealth: "unresponsive", rendererStateChangedAt: 1_234 };
+    },
     endTurn: (...args) => {
       calls.push(["end", ...args]);
       return { cancelledByUser: false };
@@ -305,6 +308,11 @@ test("browser control server authenticates and owns turn visibility", async () =
       }),
     });
     assert.equal(heartbeat.status, 200);
+    assert.deepEqual(await heartbeat.json(), {
+      ok: true,
+      rendererHealth: "unresponsive",
+      rendererStateChangedAt: 1_234,
+    });
 
     const invalidRefresh = await fetch(`${descriptor.endpoint}/v1/turn/heartbeat`, {
       method: "POST",

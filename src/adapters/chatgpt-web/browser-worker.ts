@@ -1323,6 +1323,8 @@ export interface BrowserTurn {
   requireRetainedConversation?: boolean;
   conversationKey?: string;
   onPreparedSelected?: (reused: boolean) => void | Promise<void>;
+  /** Exact acquired owner; retirement does not settle the browser/helper operation. */
+  onBrowserRetirementAvailable?: (retire: (signal: AbortSignal) => Promise<void>) => void;
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
   /** Send activation is the ambiguity boundary after which a fresh surface must not replay this prompt. */
@@ -1684,6 +1686,86 @@ export class ChatGptTurnDomHealthTracker {
   }
 }
 
+export type ChatGptBrowserUiHealth = "responsive" | "degraded" | "unresponsive";
+export type ChatGptBrowserUiHealthReason =
+  | "dom-observation-timeout"
+  | "dom-observation-ok"
+  | "renderer-unresponsive"
+  | "renderer-responsive";
+
+export interface ChatGptBrowserUiHealthTransition {
+  previous: ChatGptBrowserUiHealth;
+  current: ChatGptBrowserUiHealth;
+  reason: ChatGptBrowserUiHealthReason;
+  at: number;
+}
+
+function formatChatGptBrowserUiHealthStatus(
+  transition: ChatGptBrowserUiHealthTransition,
+): string {
+  if (transition.current === "degraded") {
+    return "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.";
+  }
+  if (transition.current === "unresponsive") {
+    return "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.";
+  }
+  return "ChatGPT browser UI became responsive again.";
+}
+
+export class ChatGptBrowserUiHealthTracker {
+  private rendererHealth: "responsive" | "unresponsive" = "responsive";
+  private domHealth: "responsive" | "degraded" = "responsive";
+  private lastRendererStateChangedAt: number | undefined;
+
+  constructor(
+    private readonly onTransition?: (transition: ChatGptBrowserUiHealthTransition) => void,
+  ) {}
+
+  private combinedHealth(): ChatGptBrowserUiHealth {
+    if (this.rendererHealth === "unresponsive") return "unresponsive";
+    if (this.domHealth === "degraded") return "degraded";
+    return "responsive";
+  }
+
+  current(): ChatGptBrowserUiHealth {
+    return this.combinedHealth();
+  }
+
+  record(
+    reason: ChatGptBrowserUiHealthReason,
+    at?: number,
+  ): ChatGptBrowserUiHealthTransition | undefined {
+    const rendererSample = reason === "renderer-unresponsive" || reason === "renderer-responsive";
+    if (rendererSample) {
+      if (this.lastRendererStateChangedAt !== undefined) {
+        if (at === undefined || at < this.lastRendererStateChangedAt) return undefined;
+      }
+      if (at !== undefined) this.lastRendererStateChangedAt = at;
+    }
+    const transitionAt = at ?? Date.now();
+    const previous = this.combinedHealth();
+    switch (reason) {
+      case "dom-observation-timeout":
+        this.domHealth = "degraded";
+        break;
+      case "dom-observation-ok":
+        this.domHealth = "responsive";
+        break;
+      case "renderer-unresponsive":
+        this.rendererHealth = "unresponsive";
+        break;
+      case "renderer-responsive":
+        this.rendererHealth = "responsive";
+        break;
+    }
+    const next = this.combinedHealth();
+    if (next === previous) return undefined;
+    const transition = { previous, current: next, reason, at: transitionAt };
+    this.onTransition?.(transition);
+    return transition;
+  }
+}
+
 /**
  * Consecutive internal observation faults tolerated before a turn is abandoned.
  *
@@ -1750,6 +1832,19 @@ interface ChatGptResponseDomCache {
   snapshot?: ChatGptResponseDomSnapshot;
   fullScans?: number;
   cacheHits?: number;
+  lastObservationSucceeded?: boolean;
+  lastObservationTimedOut?: boolean;
+}
+
+function recordChatGptResponseDomUiHealth(
+  browserUiHealth: ChatGptBrowserUiHealthTracker,
+  cache: ChatGptResponseDomCache,
+): void {
+  if (cache.lastObservationSucceeded) {
+    browserUiHealth.record("dom-observation-ok");
+  } else if (cache.lastObservationTimedOut) {
+    browserUiHealth.record("dom-observation-timeout");
+  }
 }
 
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
@@ -2847,6 +2942,7 @@ export class ChatGptBrowserWorker {
     externalProgress?: ChatGptTurnProgressReader,
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
     completionTracker?: ChatGptCompletionTracker,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptSubmissionEvidence> {
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     for (;;) {
@@ -2855,7 +2951,7 @@ export class ChatGptBrowserWorker {
       if (progress
         && externalProgress
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
-        const boundaryText = await this.currentSubmissionAnswerText(page, baseline, signal);
+        const boundaryText = await this.currentSubmissionAnswerText(page, baseline, signal, browserUiHealth);
         completionTracker.observeToolBatch(progress.lastToolBatchRevision, boundaryText);
         await externalProgress.acknowledgeToolBatch(progress.lastToolBatchRevision);
       }
@@ -2877,12 +2973,14 @@ export class ChatGptBrowserWorker {
               .then(() => ({ kind: "external" as const })),
           ]), signal);
           if (observed.kind === "external") continue;
+          browserUiHealth?.record("dom-observation-ok");
           evidence = observed.value;
         } finally {
           progressWaitAbort.abort();
         }
       } else {
         evidence = await this.currentSubmissionEvidence(page, baseline, signal);
+        browserUiHealth?.record("dom-observation-ok");
       }
       if (evidence) return evidence;
       await this.waitForTurnDomOrExternalProgress(
@@ -3028,6 +3126,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     baseline: ChatGptSubmissionBaseline,
     signal?: AbortSignal,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<string> {
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const identity = chatGptNewTurnIdentity(
@@ -3036,7 +3135,7 @@ export class ChatGptBrowserWorker {
     );
     if (!identity) return "";
     const locator = page.locator(chatGptAssistantTurnSelector(identity));
-    return (await this.responseDomSnapshot(locator, {})).visibleText;
+    return this.responseDomTextWithUiHealth(locator, browserUiHealth);
   }
 
   private async captureSubmissionBaseline(page: Page, submittedText?: string): Promise<ChatGptSubmissionBaseline> {
@@ -3062,6 +3161,7 @@ export class ChatGptBrowserWorker {
     graceMs: number = CHATGPT_RESPONSE_DOM_GRACE_MS,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptAssistantTurnBinding> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -3094,6 +3194,9 @@ export class ChatGptBrowserWorker {
         );
       } catch (error) {
         const latestProgress = externalProgress?.snapshot();
+        if (error instanceof ChatGptBrowserObservationTimeoutError) {
+          browserUiHealth?.record("dom-observation-timeout");
+        }
         if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
           recoveryAttempts += 1;
           if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
@@ -3121,6 +3224,7 @@ export class ChatGptBrowserWorker {
         );
         continue;
       }
+      browserUiHealth?.record("dom-observation-ok");
       recoveryAttempts = 0;
       // A tool batch can arrive while the DOM probe is in flight. Read progress again before
       // acknowledging its boundary; the pre-probe snapshot can otherwise leave the broker waiting
@@ -3134,10 +3238,10 @@ export class ChatGptBrowserWorker {
         && externalProgress
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
         const boundaryText = identity
-          ? (await this.responseDomSnapshot(
+          ? await this.responseDomTextWithUiHealth(
             observationPage.locator(chatGptAssistantTurnSelector(identity)),
-            {},
-          )).visibleText
+            browserUiHealth,
+          )
           : "";
         completionTracker.observeToolBatch(progress.lastToolBatchRevision, boundaryText);
         await externalProgress.acknowledgeToolBatch(progress.lastToolBatchRevision);
@@ -3659,6 +3763,7 @@ export class ChatGptBrowserWorker {
     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptSubmissionEvidence> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -3672,9 +3777,13 @@ export class ChatGptBrowserWorker {
           externalProgress,
           initialToolBatchRevision,
           completionTracker,
+          browserUiHealth,
         );
         return evidence;
       } catch (error) {
+        if (error instanceof ChatGptBrowserObservationTimeoutError) {
+          browserUiHealth?.record("dom-observation-timeout");
+        }
         if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !recoverObservation) throw error;
         recoveryAttempts += 1;
         if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
@@ -3704,6 +3813,7 @@ export class ChatGptBrowserWorker {
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
   ): Promise<ChatGptSubmissionEvidence> {
     const composer = await this.activeComposer(page);
     const sendButton = composer
@@ -3743,6 +3853,7 @@ export class ChatGptBrowserWorker {
       initialToolBatchRevision,
       completionTracker,
       recoverObservation,
+      browserUiHealth,
     );
     await submissionLifecycle?.onSubmitted?.();
     return evidence;
@@ -3806,6 +3917,7 @@ export class ChatGptBrowserWorker {
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
     completionTracker = new ChatGptCompletionTracker(),
+    browserUiHealth = new ChatGptBrowserUiHealthTracker(),
   ): Promise<void> {
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
     // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
@@ -3829,18 +3941,28 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+      recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
-        const rebound = await this.reconcileAssistantTurnBinding(
-          page,
-          submissionBaseline,
-          responseTurn,
-          abortSignal,
-        );
+        let rebound: ChatGptAssistantTurnBinding;
+        try {
+          rebound = await this.reconcileAssistantTurnBinding(
+            page,
+            submissionBaseline,
+            responseTurn,
+            abortSignal,
+          );
+        } catch (error) {
+          if (error instanceof ChatGptBrowserObservationTimeoutError) {
+            browserUiHealth.record("dom-observation-timeout");
+          }
+          throw error;
+        }
         if (rebound.identity !== responseTurn.identity) {
           responseTurn = rebound;
           responseDomCache.key = undefined;
           responseDomCache.snapshot = undefined;
           snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+          recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
         }
       }
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
@@ -4111,6 +4233,10 @@ export class ChatGptBrowserWorker {
     responseTurn: Locator,
     cache?: ChatGptResponseDomCache,
   ): Promise<ChatGptResponseDomSnapshot> {
+    if (cache) {
+      cache.lastObservationSucceeded = false;
+      cache.lastObservationTimedOut = false;
+    }
     const observed = await responseTurn.evaluate((element, options) => {
       const root = element as HTMLElement;
       type ObserverState = {
@@ -4642,13 +4768,19 @@ export class ChatGptBrowserWorker {
       stoppedThinkingLabels: [...CHATGPT_STOPPED_THINKING_LABELS],
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
-    }, { timeout: 2_000 }).catch(() => undefined);
+    }, { timeout: 2_000 }).catch(error => {
+      if (cache && error instanceof Error && error.name === "TimeoutError") {
+        cache.lastObservationTimedOut = true;
+      }
+      return undefined;
+    });
     if (!observed) {
       if (responseTurn.page().isClosed()) {
         throw chatGptBrowserTabClosedError();
       }
       return absentResponseDomSnapshot();
     }
+    if (cache) cache.lastObservationSucceeded = true;
     const snapshot = observed.snapshot ?? cache?.snapshot ?? absentResponseDomSnapshot();
     if (observed.snapshot && cache) {
       cache.key = observed.key;
@@ -4661,6 +4793,16 @@ export class ChatGptBrowserWorker {
       .map(stripChatGptTraceControlSuffix)
       .filter(block => block.text.length > 0 && !isChatGptTraceControl(block));
     return snapshot;
+  }
+
+  private async responseDomTextWithUiHealth(
+    responseTurn: Locator,
+    browserUiHealth?: ChatGptBrowserUiHealthTracker,
+  ): Promise<string> {
+    const cache: ChatGptResponseDomCache = {};
+    const snapshot = await this.responseDomSnapshot(responseTurn, cache);
+    if (browserUiHealth) recordChatGptResponseDomUiHealth(browserUiHealth, cache);
+    return snapshot.visibleText;
   }
 
   private async stalledTurnDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
@@ -4711,7 +4853,21 @@ export class ChatGptBrowserWorker {
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
+    const browserUiHealth = new ChatGptBrowserUiHealthTracker(transition => {
+      const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
+        turn.externalProgress?.snapshot(),
+        Date.now(),
+      );
+      console.warn(
+        `[chatgpt-web] browser ui health trace=${turn.traceId}`
+        + ` previous=${transition.previous} current=${transition.current}`
+        + ` reason=${transition.reason} externalProgressLive=${externalProgressLive}`,
+      );
+      turn.onCommentary?.(formatChatGptBrowserUiHealthStatus(transition));
+    });
+    if (this.config.browserHost !== "launcher") {
+      return this.runBrowserTurn(turn, undefined, undefined, false, false, browserUiHealth);
+    }
 
     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
       phase: "start",
@@ -4731,6 +4887,15 @@ export class ChatGptBrowserWorker {
       throw error;
     });
     const surfaceId = lease.surfaceId;
+    let activityFinished = false;
+    const retirementOwner = { traceId: turn.traceId, helperPid: process.pid };
+    turn.onBrowserRetirementAvailable?.(async signal => {
+      signal.throwIfAborted();
+      if (activityFinished) return;
+      await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+        phase: "end", ...retirementOwner, status: "aborted",
+      }, undefined, signal);
+    });
     const reused = lease.reused === true;
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
@@ -4738,9 +4903,17 @@ export class ChatGptBrowserWorker {
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     let heartbeatInFlight = false;
     let heartbeatPending = false;
-    let activityFinished = false;
     let lastHeartbeatFailureAt = 0;
     let activityStage: "preparing" | "sending" | "chatgpt" = "preparing";
+    const recordRendererHealth = (renderer: {
+      rendererHealth: "responsive" | "unresponsive";
+      rendererStateChangedAt: number | null;
+    }) => {
+      browserUiHealth.record(
+        renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
+        renderer.rendererStateChangedAt ?? undefined,
+      );
+    };
     const sendHeartbeat = () => {
       if (activityFinished) return;
       if (heartbeatInFlight) { heartbeatPending = true; return; }
@@ -4750,7 +4923,9 @@ export class ChatGptBrowserWorker {
         traceId: turn.traceId,
         helperPid: process.pid,
         progress: { stage: activityStage, activeToolCalls: turn.externalProgress?.snapshot().activeToolCalls ?? 0 },
-      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).catch(error => {
+      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).then(renderer => {
+        if (renderer) recordRendererHealth(renderer);
+      }).catch(error => {
         if (activityFinished) return;
         const now = Date.now();
         if (now - lastHeartbeatFailureAt < 30_000) return;
@@ -4771,7 +4946,6 @@ export class ChatGptBrowserWorker {
       if (reused && !turn.prepareResume) {
         throw new Error("Launcher reused a ChatGPT conversation without a continuation prompt");
       }
-      await turn.onPreparedSelected?.(reused);
       heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref?.();
       sendHeartbeat();
@@ -4787,7 +4961,7 @@ export class ChatGptBrowserWorker {
           sendHeartbeat();
           await turn.onSubmitted?.();
         },
-      }, surfaceId, undefined, reused, lease.trackUsage === true);
+      }, surfaceId, undefined, reused, lease.trackUsage === true, browserUiHealth);
     } catch (error) {
       originalError = error;
       terminal = error instanceof ChatGptCompactionHandoffAccepted
@@ -4839,6 +5013,7 @@ export class ChatGptBrowserWorker {
     maintenancePage?: Page,
     reuseConversation = false,
     trackUsage = false,
+    browserUiHealth = new ChatGptBrowserUiHealthTracker(),
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
@@ -4856,6 +5031,7 @@ export class ChatGptBrowserWorker {
     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, browserCapabilities);
     const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
     if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
+    await turn.onPreparedSelected?.(reuseConversation);
     const prepared = await prepare();
     const diagnostics = new ChatGptBrowserDiagnostics(
       turn.traceId,
@@ -5000,12 +5176,18 @@ export class ChatGptBrowserWorker {
                   : turn.abortSignal
                     ? AbortSignal.any([stageSignal, turn.abortSignal])
                     : stageSignal;
-                await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+                const renderer = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
                   phase: "heartbeat",
                   traceId: turn.traceId,
                   helperPid: process.pid,
                   refreshViewport: true,
                 });
+                if (renderer) {
+                  browserUiHealth.record(
+                    renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
+                    renderer.rendererStateChangedAt ?? undefined,
+                  );
+                }
                 const rebound = await connectLauncherBrowserHost(
                   this.config.browserHostDescriptorPath!,
                   browserStageTimeouts.browserPage,
@@ -5036,6 +5218,7 @@ export class ChatGptBrowserWorker {
         checkpoint: "submission-page-rebound" | "assistant-page-rebound",
         abortSignal?: AbortSignal,
       ): Promise<ChatGptSubmissionObservationRecovery> => {
+        browserUiHealth.record("dom-observation-timeout");
         await rebindLauncherPage(attempt, cause, abortSignal);
         const reboundBaseline: ChatGptSubmissionBaseline = {
           ...baseline,
@@ -5207,6 +5390,7 @@ export class ChatGptBrowserWorker {
                       return recovered;
                     }
                     : undefined,
+                  browserUiHealth,
                 ),
               );
               console.info(
@@ -5237,6 +5421,7 @@ export class ChatGptBrowserWorker {
                         return recovered;
                       }
                       : undefined,
+                    browserUiHealth,
                   );
                   await this.waitForMultipartAcknowledgement(
                     page,
@@ -5246,6 +5431,8 @@ export class ChatGptBrowserWorker {
                     deadline,
                     acknowledgementSignal,
                     turn.externalProgress,
+                    undefined,
+                    browserUiHealth,
                   );
                 },
                 chatGptSuspensionClock,
@@ -5409,6 +5596,7 @@ export class ChatGptBrowserWorker {
                 return recovered;
               }
               : undefined,
+            browserUiHealth,
           ),
         );
       } catch (error) {
@@ -5437,6 +5625,7 @@ export class ChatGptBrowserWorker {
             return recovered;
           }
           : undefined,
+        browserUiHealth,
       );
       await diagnostics.capture(page, "send-accepted");
 
@@ -5521,6 +5710,7 @@ export class ChatGptBrowserWorker {
         }
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+        recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
         if (!snapshot.responsePresent) {
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
@@ -5536,9 +5726,12 @@ export class ChatGptBrowserWorker {
               responseDomCache.key = undefined;
               responseDomCache.snapshot = undefined;
               snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+              recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
             }
           } catch (error) {
-            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
+            if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
+            browserUiHealth.record("dom-observation-timeout");
+            if (!launcherSurfaceId) throw error;
             consecutiveObservationRebinds += 1;
             if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
               throw new Error(

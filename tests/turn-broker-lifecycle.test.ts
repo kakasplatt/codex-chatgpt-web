@@ -498,3 +498,72 @@ test("turn broker names the finished turn that owns a replayed handle", async ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("turn broker rejects late or stale compaction handoffs after timeout, abort, or consumption", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-compaction-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    // 1. Timeout rejects late submission
+    const timedOut = await broker.beginCompactionTransaction("trace_timeout", 25);
+    await expect(broker.waitForCompactionHandoff(timedOut.token)).rejects.toThrow("compaction transaction timed out");
+    await expect(callTurnBroker(socketPath, {
+      method: "submit_compaction_handoff",
+      token: timedOut.token,
+      handoffId: timedOut.handoffId,
+      summary: "late after timeout",
+    })).rejects.toThrow("compaction control token is invalid, expired, or consumed");
+
+    // 2. Abort rejects late submission
+    const aborted = await broker.beginCompactionTransaction("trace_abort", 10_000);
+    broker.abortCompactionTransaction(aborted.token);
+    await expect(callTurnBroker(socketPath, {
+      method: "submit_compaction_handoff",
+      token: aborted.token,
+      handoffId: aborted.handoffId,
+      summary: "late after abort",
+    })).rejects.toThrow("compaction control token is invalid, expired, or consumed");
+    await expect(broker.waitForCompactionHandoff(aborted.token)).rejects.toThrow(
+      "compaction control token is invalid, expired, or consumed",
+    );
+
+    // 3. Trace abort rejects late submission
+    const traceAborted = await broker.beginCompactionTransaction("trace_revoked", 10_000);
+    broker.abortCompactionTrace("trace_revoked");
+    await expect(callTurnBroker(socketPath, {
+      method: "submit_compaction_handoff",
+      token: traceAborted.token,
+      handoffId: traceAborted.handoffId,
+      summary: "late after trace abort",
+    })).rejects.toThrow("compaction control token is invalid, expired, or consumed");
+
+    // 4. Committed handoff followed by cleanup does not reopen transaction
+    const committed = await broker.beginCompactionTransaction("trace_committed", 10_000);
+    await expect(callTurnBroker(socketPath, {
+      method: "submit_compaction_handoff",
+      token: committed.token,
+      handoffId: committed.handoffId,
+      summary: "Committed summary",
+    })).resolves.toEqual({ submitted: true });
+    await expect(broker.waitForCompactionHandoff(committed.token)).resolves.toBe("Committed summary");
+
+    // Cleanup abort after commit
+    broker.abortCompactionTransaction(committed.token);
+
+    // Duplicate submission rejected
+    await expect(callTurnBroker(socketPath, {
+      method: "submit_compaction_handoff",
+      token: committed.token,
+      handoffId: committed.handoffId,
+      summary: "Duplicate summary",
+    })).rejects.toThrow("compaction control token is invalid, expired, or consumed");
+
+    // Re-waiting rejected
+    await expect(broker.waitForCompactionHandoff(committed.token)).rejects.toThrow(
+      "compaction control token is invalid, expired, or consumed",
+    );
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
