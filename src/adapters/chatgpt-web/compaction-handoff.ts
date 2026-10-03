@@ -500,6 +500,7 @@ export async function requestRetainedCompactionHandoff(
       traceId,
       phase,
       elapsedMs: elapsedMs(),
+      reason: error instanceof Error ? error.message : String(error),
     })}`);
     throw error;
   } finally {
