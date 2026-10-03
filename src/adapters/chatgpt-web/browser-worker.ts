@@ -1700,6 +1700,18 @@ export interface ChatGptBrowserUiHealthTransition {
   at: number;
 }
 
+function formatChatGptBrowserUiHealthStatus(
+  transition: ChatGptBrowserUiHealthTransition,
+): string {
+  if (transition.current === "degraded") {
+    return "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.";
+  }
+  if (transition.current === "unresponsive") {
+    return "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.";
+  }
+  return "ChatGPT browser UI became responsive again.";
+}
+
 export class ChatGptBrowserUiHealthTracker {
   private rendererHealth: "responsive" | "unresponsive" = "responsive";
   private domHealth: "responsive" | "degraded" = "responsive";
@@ -4851,6 +4863,7 @@ export class ChatGptBrowserWorker {
         + ` previous=${transition.previous} current=${transition.current}`
         + ` reason=${transition.reason} externalProgressLive=${externalProgressLive}`,
       );
+      turn.onCommentary?.(formatChatGptBrowserUiHealthStatus(transition));
     });
     if (this.config.browserHost !== "launcher") {
       return this.runBrowserTurn(turn, undefined, undefined, false, false, browserUiHealth);

@@ -4711,6 +4711,7 @@ test("assistant-turn recovery clears transient UI degradation after a successful
 
 test("managed browser turns report degraded UI health while MCP progress remains live", async () => {
   const warnings: string[] = [];
+  const commentary: string[] = [];
   const originalWarn = console.warn;
   console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
   try {
@@ -4740,12 +4741,93 @@ test("managed browser turns report degraded UI health while MCP progress remains
     await expect(worker.runExclusive({
       traceId: "ui-health-diagnostic",
       externalProgress: progress,
+      onCommentary: (text: string) => { commentary.push(text); },
     })).resolves.toBe("ok");
 
+    expect(commentary).toEqual([
+      "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.",
+    ]);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("trace=ui-health-diagnostic");
     expect(warnings[0]).toContain("current=degraded");
     expect(warnings[0]).toContain("externalProgressLive=true");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("managed browser UI health commentary deduplicates degradation and recovery transitions", async () => {
+  const warnings: string[] = [];
+  const commentary: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const worker: any = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "managed-chrome" },
+      runBrowserTurn: async (
+        _turn: unknown,
+        _surfaceId: unknown,
+        _maintenancePage: unknown,
+        _reuseConversation: unknown,
+        _trackUsage: unknown,
+        browserUiHealth: ChatGptBrowserUiHealthTracker,
+      ) => {
+        browserUiHealth.record("dom-observation-timeout", 4_000);
+        browserUiHealth.record("dom-observation-timeout", 4_001);
+        browserUiHealth.record("dom-observation-ok", 4_002);
+        browserUiHealth.record("dom-observation-ok", 4_003);
+        return "ok";
+      },
+    });
+
+    await expect(worker.runExclusive({
+      traceId: "ui-health-deduplication",
+      onCommentary: (text: string) => { commentary.push(text); },
+    })).resolves.toBe("ok");
+
+    expect(commentary).toEqual([
+      "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.",
+      "ChatGPT browser UI became responsive again.",
+    ]);
+    expect(warnings).toHaveLength(2);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("managed browser UI health commentary waits for native recovery from renderer unresponsive", async () => {
+  const warnings: string[] = [];
+  const commentary: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const worker: any = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "managed-chrome" },
+      runBrowserTurn: async (
+        _turn: unknown,
+        _surfaceId: unknown,
+        _maintenancePage: unknown,
+        _reuseConversation: unknown,
+        _trackUsage: unknown,
+        browserUiHealth: ChatGptBrowserUiHealthTracker,
+      ) => {
+        browserUiHealth.record("renderer-unresponsive", 4_000);
+        browserUiHealth.record("dom-observation-ok", 4_001);
+        browserUiHealth.record("renderer-responsive", 4_002);
+        return "ok";
+      },
+    });
+
+    await expect(worker.runExclusive({
+      traceId: "ui-health-renderer-recovery",
+      onCommentary: (text: string) => { commentary.push(text); },
+    })).resolves.toBe("ok");
+
+    expect(commentary).toEqual([
+      "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+      "ChatGPT browser UI became responsive again.",
+    ]);
+    expect(warnings).toHaveLength(2);
   } finally {
     console.warn = originalWarn;
   }
