@@ -4813,6 +4813,9 @@ test("managed browser UI health commentary waits for native recovery from render
       ) => {
         browserUiHealth.record("renderer-unresponsive", 4_000);
         browserUiHealth.record("dom-observation-ok", 4_001);
+        expect(commentary).toEqual([
+          "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+        ]);
         browserUiHealth.record("renderer-responsive", 4_002);
         return "ok";
       },
