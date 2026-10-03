@@ -567,4 +567,3 @@ test("turn broker rejects late or stale compaction handoffs after timeout, abort
     rmSync(root, { recursive: true, force: true });
   }
 });
-

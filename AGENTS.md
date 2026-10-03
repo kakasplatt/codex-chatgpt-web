@@ -30,4 +30,3 @@ That guide is the repository policy for:
 - reporting Graphify evidence with source locations, confidence, and explicit uncertainty.
 
 Direct user instructions and higher-priority runtime instructions override the guide. For ordinary natural-language questions about this repository, use the existing graph before considering any rebuild. Treat Graphify as a discovery and architecture-navigation layer; source code, current diffs, Git history, and executable verification remain authoritative for behavioral conclusions.
-
