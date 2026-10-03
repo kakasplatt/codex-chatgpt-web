@@ -739,8 +739,9 @@ export function compileChatGptWebPrompt(
   // Context stages are governed by the same model-specific per-message token and composer limits
   // as ordinary multipart turns in browser-worker. Applying the legacy byte cap here silently
   // discarded context that the staged transport can carry; preserve it and let browser preflight
-  // fail explicitly if any atomic record is genuinely too large for one stage.
-  if (compiled.multipart) return compiled;
+  // fail explicitly if any atomic record is genuinely too large for one stage. Full Context never
+  // silently trims compaction history, using its multipart planner to stage the complete context.
+  if (compiled.multipart || options?.experimentalMultipartMode === "full") return compiled;
 
   const exceedsCompactionBudget = (): boolean => (
     chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET

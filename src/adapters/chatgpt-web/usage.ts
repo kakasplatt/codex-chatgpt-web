@@ -17,7 +17,9 @@ import type { CodexParsedRequest, CodexUsage } from "../../types";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import {
   CHATGPT_BIGGER_CONTEXT_PARTS,
+  CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
   CHATGPT_FULL_CONTEXT_MAX_PARTS,
+  chatGptPromptJsonBytes,
   compileChatGptWebPrompt,
   type ChatGptWebBiggerContextPartCount,
   type ChatGptWebMultipartPartCount,
@@ -215,6 +217,9 @@ export function resolveFullContextMultipartPlan(
   }
 
   const fits = (compiled: CompiledChatGptWebPrompt): boolean => {
+    if (parsed._compactionRequest && !compiled.multipart && chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET) {
+      return false;
+    }
     const messages = compiledChatGptWebMessages(compiled);
     const stagingEffort = capabilities.proAvailable ? "max" : "medium";
     for (const [index, text] of messages.entries()) {

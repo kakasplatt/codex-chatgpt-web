@@ -584,3 +584,51 @@ test("refuses a ChatGPT Web continuation when local previous-response state is u
   const body = await response.json() as { error: { message: string } };
   expect(body.error.message).toContain("partial Codex context");
 });
+
+test("routes native compaction under Full Context through the adapter preserving canonical compaction request", async () => {
+  const metadata = {
+    request_kind: "compaction", thread_id: "thread_full_compaction", turn_id: "turn_full_compaction",
+    compaction: { trigger: "auto", reason: "context_limit", implementation: "responses", phase: "pre_turn", strategy: "memento" },
+  };
+  const body = {
+    model: "chatgpt-web/high",
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) },
+    input: [
+      { type: "message", id: "msg_user_1", role: "user", content: [{ type: "input_text", text: "Original task requirement" }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Intermediary work" }] },
+      { type: "message", id: "msg_user_2", role: "user", content: [{ type: "input_text", text: "Summarize everything" }] },
+    ],
+  };
+  const config = defaultConfig("full");
+  config.experimentalFullContext = true;
+  let adapterRunCalled = false;
+  const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST",
+    body: JSON.stringify({ ...body, stream: false }),
+  }), config, () => ({
+    name: "full-context-compaction-adapter",
+    async runTurn(parsed, _incoming, emit) {
+      adapterRunCalled = true;
+      expect(parsed._compactionRequest).toBe(true);
+      expect(parsed.context.messages).toHaveLength(4);
+      expect(parsed.context.messages[0]!.content).toContain("Original task requirement");
+      emit({ type: "text_delta", text: summary, phase: "final_answer" });
+      emit({
+        type: "done",
+        stopReason: "stop",
+        endTurn: true,
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, estimated: true },
+      });
+    },
+  }));
+  expect(response.status).toBe(200);
+  expect(adapterRunCalled).toBe(true);
+  const result = await response.json();
+  expect(result.status).toBe("completed");
+  expect(result.output[0]).toMatchObject({
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: summary }],
+  });
+});
+

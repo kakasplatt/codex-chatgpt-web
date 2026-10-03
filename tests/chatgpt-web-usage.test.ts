@@ -220,5 +220,76 @@ test("Full Context usage accounting always reports logical canonical tokens, ign
     .toThrow("Full Context is unavailable for Luna");
 });
 
+test("Full Context usage approaching 900,000 auto-compact threshold reports canonical tokens even when resume suffix is tiny", () => {
+  const massiveCanonical: CodexParsedRequest = {
+    modelId: "gpt-5.6-sol",
+    stream: true,
+    options: { reasoning: "high" },
+    context: {
+      messages: Array.from({ length: 11 }, (_, i) => (
+        i % 2 === 0
+          ? {
+            role: "user" as const,
+            content: `Segment ${i}: ${"token ".repeat(70_000)}`,
+            timestamp: i + 1,
+          }
+          : {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: `Segment ${i}: ${"token ".repeat(70_000)}` }],
+            timestamp: i + 1,
+          }
+      )),
+    },
+  };
+  const tinyResumeSuffix: CodexParsedRequest = {
+    modelId: "gpt-5.6-sol",
+    stream: true,
+    options: { reasoning: "high" },
+    context: {
+      messages: [
+        { role: "user", content: "Please summarize the work so far.", timestamp: 12 },
+      ],
+    },
+  };
+
+  const evidence = { answer: "Compaction required.", reasoning: [] };
+  const canonicalUsage = estimateChatGptWebUsage(
+    massiveCanonical,
+    evidence,
+    capabilities,
+    false,
+    false,
+    true,
+  );
+  expect(canonicalUsage.inputTokens).toBeGreaterThan(700_000);
+  expect(canonicalUsage.inputTokens).toBeLessThan(CHATGPT_WEB_FULL_CONTEXT_WINDOW);
+
+  const suffixUsage = estimateChatGptWebUsage(
+    tinyResumeSuffix,
+    evidence,
+    capabilities,
+    false,
+    false,
+    true,
+  );
+  expect(suffixUsage.inputTokens).toBeLessThan(10_000);
+
+  const compactReq: CodexParsedRequest = {
+    ...massiveCanonical,
+    _compactionRequest: true,
+  };
+  const compactUsage = estimateChatGptWebUsage(
+    compactReq,
+    evidence,
+    capabilities,
+    false,
+    false,
+    true,
+  );
+  expect(compactUsage.inputTokens).toBeGreaterThan(700_000);
+  expect(Math.abs(compactUsage.inputTokens - canonicalUsage.inputTokens)).toBeLessThan(500);
+}, 60_000);
+
+
 
 
