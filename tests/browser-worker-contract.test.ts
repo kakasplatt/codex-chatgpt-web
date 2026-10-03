@@ -4492,6 +4492,77 @@ test("browser UI health recovers a DOM-only degradation after a successful obser
   expect(tracker.record("dom-observation-ok", 2_200)).toBeUndefined();
 });
 
+test("renderer recovery preserves an unresolved DOM degradation", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.record("renderer-unresponsive", 3_000)).toEqual({
+    previous: "responsive",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 3_000,
+  });
+  expect(tracker.record("dom-observation-timeout", 3_100)).toBeUndefined();
+  expect(tracker.current()).toBe("unresponsive");
+
+  expect(tracker.record("renderer-responsive", 3_200)).toEqual({
+    previous: "unresponsive",
+    current: "degraded",
+    reason: "renderer-responsive",
+    at: 3_200,
+  });
+  expect(tracker.current()).toBe("degraded");
+
+  expect(tracker.record("dom-observation-ok", 3_300)).toEqual({
+    previous: "degraded",
+    current: "responsive",
+    reason: "dom-observation-ok",
+    at: 3_300,
+  });
+  expect(tracker.current()).toBe("responsive");
+});
+
+test("managed browser turns report degraded UI health while MCP progress remains live", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const progress = {
+      snapshot: () => ({
+        revision: 1,
+        lastToolBatchRevision: 1,
+        activeToolCalls: 1,
+        lastProgressAt: Date.now(),
+      }),
+    };
+    const worker: any = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "managed-chrome" },
+      runBrowserTurn: async (
+        _turn: unknown,
+        _surfaceId: unknown,
+        _maintenancePage: unknown,
+        _reuseConversation: unknown,
+        _trackUsage: unknown,
+        browserUiHealth: ChatGptBrowserUiHealthTracker,
+      ) => {
+        browserUiHealth.record("dom-observation-timeout", 4_000);
+        return "ok";
+      },
+    });
+
+    await expect(worker.runExclusive({
+      traceId: "ui-health-diagnostic",
+      externalProgress: progress,
+    })).resolves.toBe("ok");
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("trace=ui-health-diagnostic");
+    expect(warnings[0]).toContain("current=degraded");
+    expect(warnings[0]).toContain("externalProgressLive=true");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("submission tool-boundary response timeout degrades shared browser UI health", async () => {
   const worker: any = Object.create(ChatGptBrowserWorker.prototype);
   worker.submissionDomState = async () => ({ responseIdentities: ["assistant:new"] });

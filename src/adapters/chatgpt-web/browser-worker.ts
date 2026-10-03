@@ -1699,35 +1699,47 @@ export interface ChatGptBrowserUiHealthTransition {
 }
 
 export class ChatGptBrowserUiHealthTracker {
-  private health: ChatGptBrowserUiHealth = "responsive";
+  private rendererHealth: "responsive" | "unresponsive" = "responsive";
+  private domHealth: "responsive" | "degraded" = "responsive";
+
+  constructor(
+    private readonly onTransition?: (transition: ChatGptBrowserUiHealthTransition) => void,
+  ) {}
+
+  private combinedHealth(): ChatGptBrowserUiHealth {
+    if (this.rendererHealth === "unresponsive") return "unresponsive";
+    if (this.domHealth === "degraded") return "degraded";
+    return "responsive";
+  }
 
   current(): ChatGptBrowserUiHealth {
-    return this.health;
+    return this.combinedHealth();
   }
 
   record(
     reason: ChatGptBrowserUiHealthReason,
     at = Date.now(),
   ): ChatGptBrowserUiHealthTransition | undefined {
-    let next = this.health;
+    const previous = this.combinedHealth();
     switch (reason) {
       case "dom-observation-timeout":
-        if (this.health === "responsive") next = "degraded";
+        this.domHealth = "degraded";
         break;
       case "dom-observation-ok":
-        if (this.health === "degraded") next = "responsive";
+        this.domHealth = "responsive";
         break;
       case "renderer-unresponsive":
-        next = "unresponsive";
+        this.rendererHealth = "unresponsive";
         break;
       case "renderer-responsive":
-        if (this.health === "unresponsive") next = "responsive";
+        this.rendererHealth = "responsive";
         break;
     }
-    if (next === this.health) return undefined;
-    const previous = this.health;
-    this.health = next;
-    return { previous, current: next, reason, at };
+    const next = this.combinedHealth();
+    if (next === previous) return undefined;
+    const transition = { previous, current: next, reason, at };
+    this.onTransition?.(transition);
+    return transition;
   }
 }
 
@@ -4809,7 +4821,20 @@ export class ChatGptBrowserWorker {
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
+    const browserUiHealth = new ChatGptBrowserUiHealthTracker(transition => {
+      const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
+        turn.externalProgress?.snapshot(),
+        Date.now(),
+      );
+      console.warn(
+        `[chatgpt-web] browser ui health trace=${turn.traceId}`
+        + ` previous=${transition.previous} current=${transition.current}`
+        + ` reason=${transition.reason} externalProgressLive=${externalProgressLive}`,
+      );
+    });
+    if (this.config.browserHost !== "launcher") {
+      return this.runBrowserTurn(turn, undefined, undefined, false, false, browserUiHealth);
+    }
 
     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
       phase: "start",
@@ -4839,7 +4864,6 @@ export class ChatGptBrowserWorker {
     let activityFinished = false;
     let lastHeartbeatFailureAt = 0;
     let activityStage: "preparing" | "sending" | "chatgpt" = "preparing";
-    const browserUiHealth = new ChatGptBrowserUiHealthTracker();
     const recordRendererHealth = (renderer: {
       rendererHealth: "responsive" | "unresponsive";
       rendererStateChangedAt: number | null;
