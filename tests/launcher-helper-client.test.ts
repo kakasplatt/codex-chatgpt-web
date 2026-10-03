@@ -34,6 +34,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       turn.onSubmitted();
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
+      turn.onCommentary?.("ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.");
       turn.onTextDelta("done");
       if (turn.captureLunaCheckpoint) turn.onLunaCheckpoint({
         answerHash: "a".repeat(64),
@@ -83,6 +84,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     useSavedChats: true,
   };
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
+  const commentary: string[] = [];
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
   const acknowledgedStages: number[] = [];
@@ -109,6 +111,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
+      onCommentary: text => commentary.push(text),
       onTextDelta: text => deltas.push(text),
       captureLunaCheckpoint: true,
       onLunaCheckpoint: checkpoint => checkpoints.push(checkpoint),
@@ -117,6 +120,9 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(reasoning).toEqual([
       { text: "Reading project", continuation: false },
       { text: " files", continuation: true },
+    ]);
+    expect(commentary).toEqual([
+      "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
     ]);
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
