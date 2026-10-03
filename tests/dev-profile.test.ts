@@ -32,25 +32,41 @@ test("DEV profile paths isolate browser, Codex, config, chat, and runtime state"
   });
 });
 
-test("Bigger Context is disabled by default and read from the isolated DEV runtime config", () => {
+test("Bigger and Full Context are disabled by default and read from the isolated DEV runtime config", () => {
   const root = mkdtempSync(join(tmpdir(), "codex-web-gpt-dev-features-"));
   try {
     const paths = resolveDevProfilePaths({
       homeDirectory: root,
       environment: { CODEX_WEB_GPT_DEV_HOME: join(root, "dev") },
     });
-    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false });
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false, fullContext: false });
     mkdirSync(paths.home, { recursive: true });
     writeFileSync(paths.configPath, JSON.stringify({
       version: 3,
       experimentalBiggerContext: true,
     }));
-    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: true });
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: true, fullContext: false });
+    writeFileSync(paths.configPath, JSON.stringify({
+      version: 3,
+      experimentalFullContext: true,
+    }));
+    expect(readDevChatExperimentalFeatures(paths)).toEqual({ biggerContext: false, fullContext: true });
     writeFileSync(paths.configPath, JSON.stringify({
       version: 3,
       experimentalBiggerContext: "yes",
     }));
     expect(() => readDevChatExperimentalFeatures(paths)).toThrow("Invalid Bigger Context preference");
+    writeFileSync(paths.configPath, JSON.stringify({
+      version: 3,
+      experimentalFullContext: "yes",
+    }));
+    expect(() => readDevChatExperimentalFeatures(paths)).toThrow("Invalid Full Context preference");
+    writeFileSync(paths.configPath, JSON.stringify({
+      version: 3,
+      experimentalBiggerContext: true,
+      experimentalFullContext: true,
+    }));
+    expect(() => readDevChatExperimentalFeatures(paths)).toThrow("Runtime configuration cannot enable both Bigger Context and Full Context");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

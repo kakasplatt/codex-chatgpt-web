@@ -68,6 +68,7 @@ export function resolveDevProfilePaths({
 
 export interface DevChatExperimentalFeatures {
   biggerContext: boolean;
+  fullContext: boolean;
 }
 
 /** Read the canonical DEV runtime setting consumed by repository chat commands. */
@@ -78,7 +79,7 @@ export function readDevChatExperimentalFeatures(
   try {
     value = JSON.parse(readFileSync(paths.configPath, "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { biggerContext: false };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { biggerContext: false, fullContext: false };
     throw new Error(
       `Could not read DEV runtime settings from ${paths.configPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -86,11 +87,18 @@ export function readDevChatExperimentalFeatures(
   if (!value || typeof value !== "object" || Array.isArray(value) || (value as { version?: unknown }).version !== 3) {
     throw new Error(`Invalid DEV runtime settings in ${paths.configPath}`);
   }
-  const enabled = (value as { experimentalBiggerContext?: unknown }).experimentalBiggerContext;
-  if (enabled !== undefined && typeof enabled !== "boolean") {
+  const bigger = (value as { experimentalBiggerContext?: unknown }).experimentalBiggerContext;
+  if (bigger !== undefined && typeof bigger !== "boolean") {
     throw new Error(`Invalid Bigger Context preference in ${paths.configPath}`);
   }
-  return { biggerContext: enabled === true };
+  const full = (value as { experimentalFullContext?: unknown }).experimentalFullContext;
+  if (full !== undefined && typeof full !== "boolean") {
+    throw new Error(`Invalid Full Context preference in ${paths.configPath}`);
+  }
+  if (bigger === true && full === true) {
+    throw new Error(`Runtime configuration cannot enable both Bigger Context and Full Context in ${paths.configPath}`);
+  }
+  return { biggerContext: bigger === true, fullContext: full === true };
 }
 
 export function activateDevProfileEnvironment(paths = resolveDevProfilePaths()): DevProfilePaths {
