@@ -417,7 +417,15 @@ export async function requestRetainedCompactionHandoff(
     recordPhase("retiring_browser");
     try {
       await withCompactionAbort(
-        browser.then(() => undefined, () => undefined),
+        browser.then(() => undefined, error => {
+          if (error instanceof ChatGptCompactionHandoffAccepted) return;
+          console.warn(`[chatgpt-web] retained_compaction_cleanup_failed ${JSON.stringify({
+            traceId,
+            phase,
+            elapsedMs: elapsedMs(),
+            reason: error instanceof Error ? error.message : String(error),
+          })}`);
+        }),
         operationSignal,
       );
       recordPhase("complete");

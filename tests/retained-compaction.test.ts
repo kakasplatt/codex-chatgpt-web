@@ -504,6 +504,42 @@ test("retained compaction commits the handoff despite bounded slow browser retir
   }
 });
 
+test.each([false, true])("retained compaction reports unexpected browser cleanup failure=%s without losing receipt", async unexpected => {
+  const sourceRequest = request(false);
+  const source = new ChatGptTurnSession({
+    mode: "read-only", browser: Promise.resolve("source complete"), physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), usageInput: sourceRequest,
+    conversationKey: chatGptConversationKey(sourceRequest, "provider")!, cancel() {},
+  });
+  const broker = {
+    beginCompactionTransaction: async () => ({
+      token: "control_11111111111111111111111111111111",
+      handoffId: "handoff_22222222222222222222222222222222",
+    }),
+    waitForCompactionHandoff: async () => "Committed despite browser rejection",
+    abortCompactionTransaction() {},
+  } as unknown as TurnBroker;
+  const diagnostics: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); };
+  try {
+    await expect(requestRetainedCompactionHandoff(
+      { run: (turn: BrowserTurn) => new Promise<string>((_resolve, reject) => {
+        turn.abortSignal!.addEventListener("abort", () => {
+          reject(unexpected ? new Error("browser cleanup failed") : turn.abortSignal!.reason);
+        }, { once: true });
+      }) } as never,
+      request(true), source, broker,
+      { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      "trace_browser_cleanup_rejection",
+    )).resolves.toBe("Committed despite browser rejection");
+    expect(diagnostics.some(line => line.startsWith("[chatgpt-web] retained_compaction_cleanup_failed "))).toBe(unexpected);
+    expect(diagnostics.some(line => line.startsWith("[chatgpt-web] retained_compaction_failed "))).toBeFalse();
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("retained compaction timeout identifies the waiting control-handoff phase", async () => {
   const sourceRequest = request(false);
   const source = new ChatGptTurnSession({
