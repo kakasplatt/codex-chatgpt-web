@@ -4590,6 +4590,22 @@ test("an accepted turn survives internal observation faults instead of being tor
   expect(worker).toContain('candidate.closest(\'[data-testid^="cot-v5"]\') !== null');
 });
 
+test("main response reconciliation records a DOM timeout before any rebind gate", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const reconciliation = worker.lastIndexOf("this.reconcileAssistantTurnBinding(");
+  const catchStart = worker.indexOf("} catch (error) {", reconciliation);
+  const nextContinue = worker.indexOf("continue;", catchStart);
+  const catchBody = worker.slice(catchStart, nextContinue);
+
+  const timeoutRecord = catchBody.indexOf('browserUiHealth.record("dom-observation-timeout")');
+  const launcherGate = catchBody.indexOf("!launcherSurfaceId");
+  const rebindBudgetGate = catchBody.indexOf("consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS");
+
+  expect(timeoutRecord).toBeGreaterThan(0);
+  expect(launcherGate).toBeGreaterThan(timeoutRecord);
+  expect(rebindBudgetGate).toBeGreaterThan(timeoutRecord);
+});
+
 test("stale MCP progress stops suppressing DOM health without penalising long active turns", () => {
   const outstanding = {
     revision: 2,

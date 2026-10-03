@@ -5070,9 +5070,6 @@ export class ChatGptBrowserWorker {
         cause: Error,
         callerSignal?: AbortSignal,
       ): Promise<void> => {
-        if (cause instanceof ChatGptBrowserObservationTimeoutError) {
-          browserUiHealth.record("dom-observation-timeout");
-        }
         if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause;
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
@@ -5139,6 +5136,7 @@ export class ChatGptBrowserWorker {
         checkpoint: "submission-page-rebound" | "assistant-page-rebound",
         abortSignal?: AbortSignal,
       ): Promise<ChatGptSubmissionObservationRecovery> => {
+        browserUiHealth.record("dom-observation-timeout");
         await rebindLauncherPage(attempt, cause, abortSignal);
         const reboundBaseline: ChatGptSubmissionBaseline = {
           ...baseline,
@@ -5645,7 +5643,9 @@ export class ChatGptBrowserWorker {
               recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
             }
           } catch (error) {
-            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
+            if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
+            browserUiHealth.record("dom-observation-timeout");
+            if (!launcherSurfaceId) throw error;
             consecutiveObservationRebinds += 1;
             if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
               throw new Error(
