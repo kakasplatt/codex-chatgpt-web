@@ -316,6 +316,7 @@ export async function requestRetainedCompactionHandoff(
   signal?: AbortSignal,
   timeoutMs = MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
   onHandoffAccepted?: () => void,
+  retainOwnershipUntil?: (settlement: Promise<void>) => void,
 ): Promise<string> {
   const conversationKey = source.conversationKey();
   if (!conversationKey) throw new Error("The completed ChatGPT source has no retained conversation identity");
@@ -391,6 +392,9 @@ export async function requestRetainedCompactionHandoff(
       onSendActivated: () => recordPhase("waiting_for_control_handoff"),
       onTextDelta: () => {},
     });
+    // Source-session retirement does not cover this purpose-built checkpoint turn.
+    // Retain its actual browser/helper settlement independently of the logical result.
+    retainOwnershipUntil?.(browser.then(() => undefined, () => undefined));
     const handoff = broker.waitForCompactionHandoff(transaction.token, operationSignal);
     const browserWithoutHandoff = browser.then<never>(() => {
       // The control handler accepts the summary before replying to ChatGPT. A fully
@@ -431,7 +435,7 @@ export async function requestRetainedCompactionHandoff(
       recordPhase("complete");
     } catch (error) {
       // Receipt commits the summary. This existing wait bound only limits cleanup;
-      // physical ownership remains with the retained-session owner until retirement.
+      // physical ownership remains with the structured-compaction owner until retirement.
       console.warn(`[chatgpt-web] retained_compaction_cleanup_incomplete ${JSON.stringify({
         traceId,
         phase,
@@ -462,7 +466,7 @@ export async function requestRetainedCompactionHandoff(
     browserAbort.abort();
     if (transaction) broker.abortCompactionTransaction(transaction.token);
     if (browser) {
-      // Logical cancellation is not physical retirement. The retained-session owner tracks
+      // Logical cancellation is not physical retirement. The structured-compaction owner tracks
       // physical settlement separately, so this helper must not turn its own deadline into an
       // unbounded wait when the worker does not acknowledge abort immediately.
       await withCompactionAbort(

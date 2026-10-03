@@ -34,6 +34,7 @@ import {
   ChatGptTurnSession,
   ChatGptTurnSessions,
   chatGptCompactionSourceExecutionKey,
+  chatGptThreadOwnershipKey,
   chatGptTurnExecutionKey,
   chatGptTurnSessions,
 } from "../src/adapters/chatgpt-web/turn-execution";
@@ -1594,7 +1595,6 @@ test.each(["timeout", "cancellation", "retirement_failure"] as const)(
       usageInput: sourceRequest, conversationKey: chatGptConversationKey(sourceRequest, namespace)!,
       releaseRetainedConversation: async () => {
         conversationReleaseAttempts += 1;
-        await physicalSettlement;
         if (cleanupOutcome === "retirement_failure") throw new Error("retained conversation release failed");
       },
       cancel() {},
@@ -1622,6 +1622,9 @@ test.each(["timeout", "cancellation", "retirement_failure"] as const)(
     console.warn = (...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); };
     let run: Promise<void> | undefined;
     let cancellation: ReturnType<typeof cancelStructuredCompactionNativeTurn> | undefined;
+    let cancellationSettled = false;
+    let successor: Promise<string> | undefined;
+    let successorStarted = false;
     try {
       const adapter = createChatGptWebAdapter(provider);
       run = adapter.runTurn!(compact, { headers: new Headers() }, event => events.push(event));
@@ -1632,10 +1635,7 @@ test.each(["timeout", "cancellation", "retirement_failure"] as const)(
         cancellation = cancelStructuredCompactionNativeTurn(
           "thread_retained_compaction", compactTurnId, new Error("operator cancelled after receipt"),
         );
-        let physicallySettled = false;
-        void cancellation.settlement.then(() => { physicallySettled = true; });
-        await Bun.sleep(5);
-        expect(physicallySettled).toBeFalse();
+        void cancellation.settlement.then(() => { cancellationSettled = true; });
       }
       await Bun.sleep(5);
       if (cleanupOutcome !== "retirement_failure") {
@@ -1645,10 +1645,32 @@ test.each(["timeout", "cancellation", "retirement_failure"] as const)(
         ]);
         expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
         expect(conversationReleaseAttempts).toBe(1);
+        if (!cancellation) {
+          cancellation = cancelStructuredCompactionNativeTurn(
+            "thread_retained_compaction", compactTurnId, new Error("wait for timed-out browser cleanup"),
+          );
+          void cancellation.settlement.then(() => { cancellationSettled = true; });
+        }
+        successor = runStructuredCompactionOnce(
+          `successor-${root}`,
+          { ownerKey: `${namespace}:${chatGptThreadOwnershipKey(compact)}`, traceIds: [`successor-${root}`] },
+          async () => { successorStarted = true; return "Successor after browser settlement"; },
+        );
+        await Bun.sleep(5);
+        // The original source and its conversation release have already settled.
+        // Only the actual checkpoint browser can keep this physical owner occupied.
+        expect(successorStarted).toBeFalse();
+        expect(cancellation.cancelled).toBe(1);
+        expect(cancellationSettled).toBeFalse();
       }
       releaseBrowser();
       await run;
       await cancellation?.settlement;
+      if (successor) {
+        await expect(successor).resolves.toBe("Successor after browser settlement");
+        expect(successorStarted).toBeTrue();
+        expect(cancellationSettled).toBeTrue();
+      }
       expect(events.filter(event => event.type === "error")).toHaveLength(0);
       expect(events.some(event => event.type === "text_delta"
         && event.text.includes("Committed adapter checkpoint"))).toBeTrue();
@@ -1667,6 +1689,7 @@ test.each(["timeout", "cancellation", "retirement_failure"] as const)(
       releaseBrowser();
       await run;
       await cancellation?.settlement;
+      await successor;
       console.warn = originalWarn;
       worker.run = originalRun;
       chatGptTurnSessions.clear();

@@ -1066,6 +1066,7 @@ export function createChatGptWebAdapter(
                         operationSignal,
                         handoffTimeoutMs,
                         onRetainedHandoffAccepted,
+                        retainOwnershipUntil,
                       );
                     } else {
                       if (source.isActive()) {
@@ -1086,6 +1087,7 @@ export function createChatGptWebAdapter(
                         operationSignal,
                         handoffTimeoutMs,
                         onRetainedHandoffAccepted,
+                        retainOwnershipUntil,
                       );
                     }
                     const summary = canonicalizeCompactionHandoff(parsed, rawSummary);
