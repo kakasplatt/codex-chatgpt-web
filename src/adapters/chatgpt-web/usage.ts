@@ -13,6 +13,7 @@ import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateComp
 import {
   CHATGPT_BIGGER_CONTEXT_PARTS,
   compileChatGptWebPrompt,
+  type ChatGptWebBiggerContextPartCount,
   type ChatGptWebMultipartPartCount,
   type CompiledChatGptWebPrompt,
   type CompileChatGptWebPromptOptions,
@@ -69,7 +70,7 @@ export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   experimentalSkillAttachments = false,
-): ChatGptWebMultipartPartCount | undefined {
+): ChatGptWebBiggerContextPartCount | undefined {
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
   }
@@ -83,7 +84,7 @@ export function resolveBiggerContextMultipartParts(
     mode.effort,
     { ...capabilities, experimentalBiggerContext: false },
   );
-  const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
+  const compile = (parts?: ChatGptWebBiggerContextPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
     { experimentalMultipartParts: parts, experimentalSkillAttachments },
   );
@@ -118,7 +119,7 @@ export function biggerContextPartCount(
   inputTokens: number,
   onePartLimit: number,
   compaction: boolean,
-): ChatGptWebMultipartPartCount | undefined {
+): ChatGptWebBiggerContextPartCount | undefined {
   if (compaction) return CHATGPT_BIGGER_CONTEXT_PARTS;
   if (inputTokens < onePartLimit) return undefined;
   if (inputTokens < onePartLimit * 2) return 2;

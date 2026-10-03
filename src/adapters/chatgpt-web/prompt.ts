@@ -36,6 +36,7 @@ export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
+  experimentalMultipartMode?: ChatGptWebMultipartContextMode;
   /**
    * Manual Zero Risk transport keeps ChatGPT model/effort selection and prompt submission under the
    * user's control. The browser bridge may open the owned tab and copy this prompt, but it never
@@ -45,16 +46,25 @@ export interface CompileChatGptWebPromptOptions {
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 6 as const;
-export type ChatGptWebMultipartPartCount = 2 | typeof CHATGPT_BIGGER_CONTEXT_PARTS;
+export const CHATGPT_FULL_CONTEXT_MAX_PARTS = 12 as const;
+export type ChatGptWebBiggerContextPartCount = 2 | typeof CHATGPT_BIGGER_CONTEXT_PARTS;
+export type ChatGptWebMultipartPartCount =
+  | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
+export type ChatGptWebMultipartContextMode = "bigger" | "full";
 export type ChatGptWebMultipartParts = readonly string[];
 
 export function isChatGptWebMultipartPartCount(value: number): value is ChatGptWebMultipartPartCount {
+  return Number.isInteger(value) && value >= 2 && value <= CHATGPT_FULL_CONTEXT_MAX_PARTS;
+}
+
+export function isChatGptWebBiggerContextPartCount(value: number): value is ChatGptWebBiggerContextPartCount {
   return value === 2 || value === CHATGPT_BIGGER_CONTEXT_PARTS;
 }
 
 export interface ChatGptWebMultipartPrompt {
   parts: ChatGptWebMultipartParts;
   commit: string;
+  contextMode?: ChatGptWebMultipartContextMode;
 }
 
 export interface ChatGptWebMultipartStage {
@@ -119,7 +129,7 @@ export function formatChatGptWebMultipartCommit(
   assertMultipartTransactionId(transactionId);
   const totalParts = multipart.parts.length;
   if (!isChatGptWebMultipartPartCount(totalParts)) {
-    throw new Error("ChatGPT multipart commit requires two or six context parts");
+    throw new Error("ChatGPT multipart commit requires between 2 and 12 context parts");
   }
   const manifest = multipart.parts.map((payload, index) => (
     `${index + 1}/${totalParts}:${createHash("sha256").update(payload).digest("hex")}`
@@ -443,6 +453,7 @@ export function compileChatGptWebPrompt(
     : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
   const multipartParts = options?.experimentalMultipartParts;
+  const multipartMode = options?.experimentalMultipartMode ?? "bigger";
   const multipartEnabled = multipartParts !== undefined;
   if (manualControl) {
     if (!capabilities.localToolsEnabled) {
@@ -452,11 +463,16 @@ export function compileChatGptWebPrompt(
       throw new Error("ChatGPT Zero Risk does not support rolling or multipart browser transport");
     }
   }
-  if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
-    throw new Error("Bigger Context requires two or six context parts");
+  if (multipartParts !== undefined) {
+    if (!isChatGptWebMultipartPartCount(multipartParts)) {
+      throw new Error("ChatGPT multipart requires between 2 and 12 context parts");
+    }
+    if (multipartMode === "bigger" && !isChatGptWebBiggerContextPartCount(multipartParts)) {
+      throw new Error("Bigger Context requires two or six context parts");
+    }
   }
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
-    throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
+    throw new Error(`${multipartMode === "full" ? "Full Context" : "Bigger Context"} is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget`);
   }
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest) {
     throw new Error("ChatGPT Luna uses rolling checkpoints and does not accept a separate compaction turn");
@@ -638,6 +654,7 @@ export function compileChatGptWebPrompt(
           answerContract,
           ...transportResume,
         ].join("\n"),
+        contextMode: multipartMode,
       };
       const imageTokens = images.reduce((sum, image) => sum + chatGptWebImageTokenReserve(image.detail), 0);
       const transactionId = `ctx_${"0".repeat(32)}`;
@@ -654,8 +671,9 @@ export function compileChatGptWebPrompt(
         const tokens = tokenLimit - estimateTokens(fixedMessage);
         const chars = (limits.browserComposerCharLimit ?? Infinity) - fixedMessage.length;
         if (tokens <= 0 || chars <= 0) {
+          const modeLabel = multipartMode === "full" ? "Full Context" : "Bigger Context";
           throw new ChatGptWebAdapterError(
-            `The Bigger Context ${final ? "final part's instructions and attachments" : "stage wrapper"} exceed the available message budget before any task history is added. Reduce those inputs before retrying.`,
+            `The ${modeLabel} ${final ? "final part's instructions and attachments" : "stage wrapper"} exceed the available message budget before any task history is added. Reduce those inputs before retrying.`,
             { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
           );
         }

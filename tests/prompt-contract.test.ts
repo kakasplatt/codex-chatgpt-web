@@ -2,6 +2,9 @@ import { expect, test } from "bun:test";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
   CHATGPT_BIGGER_CONTEXT_PARTS,
+  CHATGPT_FULL_CONTEXT_MAX_PARTS,
+  isChatGptWebMultipartPartCount,
+  isChatGptWebBiggerContextPartCount,
   chatGptPromptJsonBytes,
   chatGptReadOnlyContextWarning,
   compileChatGptWebPrompt,
@@ -198,6 +201,76 @@ test("Bigger Context uses the minimum transport and reserves six parts for compa
   ]);
   expect(formatChatGptWebMultipartCommit(compiled.multipart!, transactionId))
     .toContain("acknowledged_parts: 1/2");
+});
+
+test("generalizes multipart counts from 2 through 12 while preserving Bigger Context constraints", () => {
+  expect(CHATGPT_FULL_CONTEXT_MAX_PARTS).toBe(12);
+
+  // Counts 2..12 valid for generic multipart
+  for (let count = 2; count <= 12; count++) {
+    expect(isChatGptWebMultipartPartCount(count)).toBeTrue();
+  }
+  expect(isChatGptWebMultipartPartCount(1)).toBeFalse();
+  expect(isChatGptWebMultipartPartCount(13)).toBeFalse();
+  expect(isChatGptWebMultipartPartCount(2.5)).toBeFalse();
+
+  // Bigger Context only accepts 2 or 6
+  expect(isChatGptWebBiggerContextPartCount(2)).toBeTrue();
+  expect(isChatGptWebBiggerContextPartCount(6)).toBeTrue();
+  expect(isChatGptWebBiggerContextPartCount(3)).toBeFalse();
+  expect(isChatGptWebBiggerContextPartCount(7)).toBeFalse();
+  expect(isChatGptWebBiggerContextPartCount(12)).toBeFalse();
+
+  // Full Context mode accepts 3 parts and preserves whole JSON records
+  const parsed = request("high");
+  parsed.context.messages = [
+    { role: "user", content: "part-one-item", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "part-two-item" }], timestamp: 2 },
+    { role: "user", content: "part-three-item", timestamp: 3 },
+  ];
+  const compiledFull = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    undefined,
+    { experimentalMultipartParts: 3, experimentalMultipartMode: "full" },
+  );
+  expect(compiledFull.multipart?.parts).toHaveLength(3);
+  expect(compiledFull.multipart?.contextMode).toBe("full");
+
+  const transactionId = `ctx_${"c".repeat(32)}`;
+  const stages = compiledFull.multipart!.parts.slice(0, -1).map((part, index) => (
+    formatChatGptWebMultipartStage(part, transactionId, index + 1, 3)
+  ));
+  expect(stages).toHaveLength(2);
+  expect(stages[0]!.acknowledgement).toBe(`CODEX_MULTIPART_ACK ${transactionId} 1/3 ${stages[0]!.sha256}`);
+  expect(stages[1]!.acknowledgement).toBe(`CODEX_MULTIPART_ACK ${transactionId} 2/3 ${stages[1]!.sha256}`);
+
+  const commit = formatChatGptWebMultipartCommit(compiledFull.multipart!, transactionId);
+  expect(commit).toContain("parts: 3");
+  expect(commit).toContain("acknowledged_parts: 2/3");
+  expect(commit).toContain(`1/3:${stages[0]!.sha256}`);
+  expect(commit).toContain(`2/3:${stages[1]!.sha256}`);
+
+  // Test 7 and 12 part stage formatting
+  const stage7 = formatChatGptWebMultipartStage('{"test":true}', transactionId, 4, 7);
+  expect(stage7.acknowledgement).toBe(`CODEX_MULTIPART_ACK ${transactionId} 4/7 ${stage7.sha256}`);
+  const stage12 = formatChatGptWebMultipartStage('{"test":true}', transactionId, 11, 12);
+  expect(stage12.acknowledgement).toBe(`CODEX_MULTIPART_ACK ${transactionId} 11/12 ${stage12.sha256}`);
+
+  // Bigger Context mode defaults when mode omitted, rejecting 3 parts
+  expect(() => compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    undefined,
+    { experimentalMultipartParts: 3 },
+  )).toThrow("Bigger Context requires two or six context parts");
+
+  expect(() => compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    undefined,
+    { experimentalMultipartParts: 3, experimentalMultipartMode: "bigger" },
+  )).toThrow("Bigger Context requires two or six context parts");
 });
 
 test("browser-only Medium directs users to the full harness", () => {
