@@ -301,6 +301,26 @@ test("response DOM snapshot marks caught evaluation failures as unsuccessful obs
   expect(cache.lastObservationSucceeded).toBeFalse();
 });
 
+test("response DOM snapshot preserves caught timeout evidence for UI health", async () => {
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as {
+    responseDomSnapshot(
+      locator: { evaluate: () => Promise<unknown>; page: () => { isClosed: () => boolean } },
+      cache: { lastObservationSucceeded?: boolean; lastObservationTimedOut?: boolean },
+    ): Promise<{ responsePresent: boolean }>;
+  };
+  const cache: { lastObservationSucceeded?: boolean; lastObservationTimedOut?: boolean } = {};
+  const timeout = new Error("simulated Playwright evaluate timeout");
+  timeout.name = "TimeoutError";
+  const locator = {
+    evaluate: async () => { throw timeout; },
+    page: () => ({ isClosed: () => false }),
+  };
+
+  await expect(worker.responseDomSnapshot(locator, cache)).resolves.toMatchObject({ responsePresent: false });
+  expect(cache.lastObservationSucceeded).toBeFalse();
+  expect(cache.lastObservationTimedOut).toBeTrue();
+});
+
 test("browser turns run concurrently up to the five-tab limit", async () => {
   expect(MAX_CHATGPT_BROWSER_TABS).toBe(5);
   const releases = new Map<string, () => void>();
@@ -4760,6 +4780,55 @@ test("multipart reconciliation timeout degrades browser UI health", async () => 
     undefined,
     browserUiHealth,
   )).rejects.toBeInstanceOf(ChatGptBrowserObservationTimeoutError);
+  expect(browserUiHealth.current()).toBe("degraded");
+});
+
+test("multipart response DOM timeout degrades UI health while the bound locator remains present", async () => {
+  const bound = {
+    last() { return this; },
+    filter() { return this; },
+    locator() { return this; },
+    getByText() { return this; },
+    getByTestId() { return this; },
+    count: async () => 1,
+    isVisible: async () => false,
+  };
+  const page = { isClosed: () => false, locator: () => bound };
+  const binding = { identity: "assistant:initial", locator: bound };
+  const browserUiHealth = new ChatGptBrowserUiHealthTracker();
+  const completionTracker = {
+    needsToolBatchObservation: () => false,
+    update: () => true,
+  };
+  const observe = (ChatGptBrowserWorker.prototype as any).waitForMultipartAcknowledgement;
+
+  await expect(observe.call(
+    {
+      responseDomSnapshot: async (_locator: unknown, cache: {
+        lastObservationSucceeded?: boolean;
+        lastObservationTimedOut?: boolean;
+      }) => {
+        cache.lastObservationSucceeded = false;
+        cache.lastObservationTimedOut = true;
+        return {
+          responsePresent: false,
+          stoppedThinkingVisible: false,
+          visibleText: "",
+          fullHtml: "",
+          completionActionVisible: false,
+        };
+      },
+    },
+    page,
+    binding,
+    {},
+    { acknowledgement: "ACK" },
+    Date.now() + 1_000,
+    undefined,
+    undefined,
+    completionTracker,
+    browserUiHealth,
+  )).rejects.toThrow();
   expect(browserUiHealth.current()).toBe("degraded");
 });
 

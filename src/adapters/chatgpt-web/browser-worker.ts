@@ -1798,6 +1798,18 @@ interface ChatGptResponseDomCache {
   fullScans?: number;
   cacheHits?: number;
   lastObservationSucceeded?: boolean;
+  lastObservationTimedOut?: boolean;
+}
+
+function recordChatGptResponseDomUiHealth(
+  browserUiHealth: ChatGptBrowserUiHealthTracker,
+  cache: ChatGptResponseDomCache,
+): void {
+  if (cache.lastObservationSucceeded) {
+    browserUiHealth.record("dom-observation-ok");
+  } else if (cache.lastObservationTimedOut) {
+    browserUiHealth.record("dom-observation-timeout");
+  }
 }
 
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
@@ -3878,7 +3890,7 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-      if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
+      recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         let rebound: ChatGptAssistantTurnBinding;
         try {
@@ -3899,7 +3911,7 @@ export class ChatGptBrowserWorker {
           responseDomCache.key = undefined;
           responseDomCache.snapshot = undefined;
           snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-          if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
+          recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
         }
       }
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
@@ -4170,7 +4182,10 @@ export class ChatGptBrowserWorker {
     responseTurn: Locator,
     cache?: ChatGptResponseDomCache,
   ): Promise<ChatGptResponseDomSnapshot> {
-    if (cache) cache.lastObservationSucceeded = false;
+    if (cache) {
+      cache.lastObservationSucceeded = false;
+      cache.lastObservationTimedOut = false;
+    }
     const observed = await responseTurn.evaluate((element, options) => {
       const root = element as HTMLElement;
       type ObserverState = {
@@ -4702,7 +4717,12 @@ export class ChatGptBrowserWorker {
       stoppedThinkingLabels: [...CHATGPT_STOPPED_THINKING_LABELS],
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
-    }, { timeout: 2_000 }).catch(() => undefined);
+    }, { timeout: 2_000 }).catch(error => {
+      if (cache && error instanceof Error && error.name === "TimeoutError") {
+        cache.lastObservationTimedOut = true;
+      }
+      return undefined;
+    });
     if (!observed) {
       if (responseTurn.page().isClosed()) {
         throw chatGptBrowserTabClosedError();
@@ -5606,7 +5626,7 @@ export class ChatGptBrowserWorker {
         }
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-        if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
+        recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
         if (!snapshot.responsePresent) {
           try {
             const rebound = await withChatGptBrowserObservationTimeout(
@@ -5622,7 +5642,7 @@ export class ChatGptBrowserWorker {
               responseDomCache.key = undefined;
               responseDomCache.snapshot = undefined;
               snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-              if (responseDomCache.lastObservationSucceeded) browserUiHealth.record("dom-observation-ok");
+              recordChatGptResponseDomUiHealth(browserUiHealth, responseDomCache);
             }
           } catch (error) {
             if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
