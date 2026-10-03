@@ -368,6 +368,56 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test("browser UI health status reaches adapter commentary separately from the final answer", async () => {
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-ui-health-commentary-${Date.now()}`,
+      chatgptWeb: {
+        localToolsEnabled: false,
+        solAvailable: true,
+        extraHighAvailable: true,
+        proAvailable: true,
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const commentary = "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.";
+      const answer = "Browser turn completed.";
+      turn.onCommentary?.(commentary);
+      turn.onTextDelta(answer);
+      return answer;
+    };
+
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(
+        rawWireRequest(environmentXml),
+        { headers: new Headers() },
+        event => events.push(event),
+      );
+
+      expect(events.filter(
+        event => event.type === "text_delta"
+          && event.phase === "commentary"
+          && event.text === "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+      )).toEqual([{
+        type: "text_delta",
+        phase: "commentary",
+        text: "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+      }]);
+      expect(events.filter(
+        event => event.type === "text_delta" && event.phase === "final_answer",
+      )).toEqual([{
+        type: "text_delta",
+        phase: "final_answer",
+        text: "Browser turn completed.",
+      }]);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
+  });
+
   test.each([false, true])("sequential native messages honor fresh conversation mode=%s", async freshConversation => {
     const socketPath = brokerTestEndpoint(`cgw-retained-messages-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
