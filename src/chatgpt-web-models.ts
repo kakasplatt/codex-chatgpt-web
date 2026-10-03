@@ -80,7 +80,7 @@ export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
 export const CHATGPT_WEB_FULL_CONTEXT_WINDOW = 1_050_000;
 export const CHATGPT_WEB_FULL_CONTEXT_AUTO_COMPACT_TOKEN_LIMIT = 900_000;
 
-export function supportsChatGptWebFullContext(backendModel: ChatGptWebBackendModel): boolean {
+export function supportsChatGptWebFullContext(backendModel: ChatGptWebBackendModel | string): boolean {
   return backendModel === CHATGPT_WEB_BACKEND_MODEL;
 }
 

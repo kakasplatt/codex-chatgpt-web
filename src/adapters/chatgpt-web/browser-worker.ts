@@ -83,6 +83,7 @@ import {
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
+  supportsChatGptWebFullContext,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./model-selection";
@@ -98,6 +99,10 @@ import {
   ChatGptLunaCheckpointStream,
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
+import {
+  ChatGptFullContextCheckpointStream,
+  type CapturedChatGptFullContextCheckpoint,
+} from "./full-context-checkpoint";
 import {
   chatGptExternalProgressIsLive,
   chatGptExternalToolCallsAreInFlight,
@@ -1368,6 +1373,28 @@ export interface BrowserTurn {
   /** Require and remove the private Luna checkpoint tail from the visible Markdown stream. */
   captureLunaCheckpoint?: boolean;
   onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
+  /** Generic private checkpoint capture for Luna or Full Context recovery. */
+  checkpointCapture?: ChatGptBrowserCheckpointCapture;
+}
+
+export type ChatGptBrowserCheckpointCapture =
+  | { mode: "luna"; onCheckpoint: (captured: CapturedChatGptLunaCheckpoint) => void }
+  | { mode: "full"; onCheckpoint: (captured: CapturedChatGptFullContextCheckpoint) => void };
+
+export function resolveTurnCheckpointCapture(turn: BrowserTurn): ChatGptBrowserCheckpointCapture | undefined {
+  if (turn.checkpointCapture) {
+    if (turn.captureLunaCheckpoint !== undefined || turn.onLunaCheckpoint !== undefined) {
+      throw new Error("Cannot specify both checkpointCapture and legacy Luna checkpoint options");
+    }
+    return turn.checkpointCapture;
+  }
+  if (turn.captureLunaCheckpoint !== undefined || turn.onLunaCheckpoint !== undefined) {
+    if (!turn.captureLunaCheckpoint || !turn.onLunaCheckpoint) {
+      throw new Error("ChatGPT Luna checkpoint capture requires exactly one checkpoint callback");
+    }
+    return { mode: "luna", onCheckpoint: turn.onLunaCheckpoint };
+  }
+  return undefined;
 }
 
 interface ChatGptSubmissionBaseline {
@@ -5036,11 +5063,14 @@ export class ChatGptBrowserWorker {
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
       throw new Error("Tool-capable ChatGPT turns require both progress and terminal-fence transports");
     }
-    if ((turn.captureLunaCheckpoint === true) !== (turn.onLunaCheckpoint !== undefined)) {
-      throw new Error("ChatGPT Luna checkpoint capture requires exactly one checkpoint callback");
-    }
-    if (turn.captureLunaCheckpoint && turn.modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
-      throw new Error("Private rolling checkpoint capture is valid only for ChatGPT Luna");
+    const checkpointCapture = resolveTurnCheckpointCapture(turn);
+    if (checkpointCapture) {
+      if (checkpointCapture.mode === "luna" && turn.modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
+        throw new Error("Private rolling checkpoint capture is valid only for ChatGPT Luna");
+      }
+      if (checkpointCapture.mode === "full" && !supportsChatGptWebFullContext(turn.modelId)) {
+        throw new Error(`Private recovery checkpoint capture is not supported for model ${turn.modelId}`);
+      }
     }
     const browserCapabilities = turn.nativeConnector
       ? { ...turn.capabilities, localToolsEnabled: true }
@@ -5655,8 +5685,10 @@ export class ChatGptBrowserWorker {
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
-      const checkpointStream = turn.captureLunaCheckpoint
-        ? new ChatGptLunaCheckpointStream()
+      const checkpointStream = checkpointCapture
+        ? checkpointCapture.mode === "luna"
+          ? new ChatGptLunaCheckpointStream()
+          : new ChatGptFullContextCheckpointStream()
         : undefined;
       const emitMarkdownDelta = (delta: string): void => {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
@@ -5881,11 +5913,15 @@ export class ChatGptBrowserWorker {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
             if (final.delta) emitMarkdownDelta(final.delta);
-            if (checkpointStream) {
+            if (checkpointStream && checkpointCapture) {
               const completed = checkpointStream.finishOptional(snapshot.visibleText);
               if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
-              if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
-              else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
+              if (completed.captured) checkpointCapture.onCheckpoint(completed.captured as any);
+              else {
+                console.warn(
+                  `[chatgpt-web] browser turn ${turn.traceId} completed without a ${checkpointCapture.mode === "luna" ? "Luna rolling" : "Full Context recovery"} checkpoint; preserving full native history`,
+                );
+              }
               finalText = completed.answer;
             } else {
               finalText = final.markdown;

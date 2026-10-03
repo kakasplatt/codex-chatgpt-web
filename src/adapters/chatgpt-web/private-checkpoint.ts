@@ -72,6 +72,10 @@ export class ChatGptPrivateCheckpointStream<TCheckpoint> {
     this.visibleMarkerReserveChars = policy.marker.length + 16;
   }
 
+  get visibleAnswerText(): string {
+    return canonicalAnswer(this.visibleAnswer + (this.markerSeen ? "" : this.pending));
+  }
+
   push(delta: string): string {
     if (!delta) return "";
     if (this.markerSeen) {

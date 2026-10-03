@@ -720,3 +720,33 @@ test("keeps large contexts intact in the inline text envelope", () => {
   expect(compiled.text).not.toContain("sha256");
   expect(compiled.text).not.toContain("SHA-256");
 });
+
+test("prompt compilation formats Full Context recovery checkpoint instructions with generic capture", () => {
+  const parsed = request("high");
+  parsed.modelId = CHATGPT_WEB_MODEL_ID;
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const full = compileChatGptWebPrompt(parsed, capabilities, undefined, { captureCheckpoint: "full" });
+  expect(full.text).toContain("CODEXFULLPRIVATECHECKPOINTV1A7F3C9D2");
+  expect(full.text).toContain("16,000 tokens");
+  expect(full.text).toContain("Do not write JSON");
+  expect(full.text).toContain("never permit an empty checkpoint");
+  expect(full.text).toContain("Objective:");
+  expect(full.text).toContain("State:");
+  expect(full.text).toContain("Evidence:");
+  expect(full.text).toContain("Decisions:");
+  expect(full.text).toContain("Pending:");
+  expect(full.text).toContain("then the required private checkpoint tail.");
+  expect(full.text).not.toContain("CODEXLUNAPRIVATECHECKPOINTV1A7F3C9D2");
+
+  const lunaParsed = request("low");
+  lunaParsed.modelId = CHATGPT_WEB_LUNA_MODEL_ID;
+  const lunaCapabilities = { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false };
+  const lunaGeneric = compileChatGptWebPrompt(lunaParsed, lunaCapabilities, undefined, { captureCheckpoint: "luna" });
+  expect(lunaGeneric.text).toContain("CODEXLUNAPRIVATECHECKPOINTV1A7F3C9D2");
+  expect(lunaGeneric.text).toContain("4,000 tokens");
+  expect(lunaGeneric.text).not.toContain("CODEXFULLPRIVATECHECKPOINTV1A7F3C9D2");
+
+  const lunaLegacy = compileChatGptWebPrompt(lunaParsed, lunaCapabilities, undefined, { captureLunaCheckpoint: true });
+  expect(lunaLegacy.text).toBe(lunaGeneric.text);
+});
+

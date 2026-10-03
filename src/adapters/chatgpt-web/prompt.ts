@@ -5,6 +5,7 @@ import {
   isChatGptWebZeroRiskBackendModel,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
+  supportsChatGptWebFullContext,
 } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { estimateTokens } from "../../lib/token-estimate";
@@ -15,6 +16,10 @@ import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
 } from "./rolling-checkpoint";
+import {
+  CHATGPT_FULL_CONTEXT_CHECKPOINT_MARKER,
+  CHATGPT_FULL_CONTEXT_CHECKPOINT_MAX_TOKENS,
+} from "./full-context-checkpoint";
 
 export interface ChatGptWebPromptImage {
   ref: string;
@@ -34,6 +39,7 @@ export interface CompiledChatGptWebPrompt {
 
 export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
+  captureCheckpoint?: "luna" | "full";
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
   experimentalMultipartMode?: ChatGptWebMultipartContextMode;
@@ -451,7 +457,7 @@ export function compileChatGptWebPrompt(
   const mode = manualControl
     ? { localTools: true, effort: "low" as const, displayLabel: "Zero Risk" as const }
     : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
+  const checkpointMode = options?.captureCheckpoint ?? (options?.captureLunaCheckpoint === true ? "luna" : undefined);
   const multipartParts = options?.experimentalMultipartParts;
   const multipartMode = options?.experimentalMultipartMode ?? "bigger";
   const multipartEnabled = multipartParts !== undefined;
@@ -459,7 +465,7 @@ export function compileChatGptWebPrompt(
     if (!capabilities.localToolsEnabled) {
       throw new Error("ChatGPT Zero Risk requires the Full Codex harness");
     }
-    if (captureLunaCheckpoint || multipartEnabled) {
+    if (checkpointMode !== undefined || multipartEnabled) {
       throw new Error("ChatGPT Zero Risk does not support rolling or multipart browser transport");
     }
   }
@@ -477,8 +483,11 @@ export function compileChatGptWebPrompt(
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest) {
     throw new Error("ChatGPT Luna uses rolling checkpoints and does not accept a separate compaction turn");
   }
-  if (captureLunaCheckpoint && (parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID || parsed._compactionRequest)) {
+  if (checkpointMode === "luna" && (parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID || parsed._compactionRequest)) {
     throw new Error("Rolling checkpoints are supported only for normal ChatGPT Luna turns");
+  }
+  if (checkpointMode === "full" && (!supportsChatGptWebFullContext(parsed.modelId) || parsed._compactionRequest)) {
+    throw new Error("Recovery checkpoints are supported only for normal ChatGPT Full Context turns");
   }
   if (mode.localTools && !turnToken) {
     throw new Error(manualControl
@@ -561,13 +570,23 @@ export function compileChatGptWebPrompt(
       ]
       : []),
   ];
-  const checkpointContract = captureLunaCheckpoint
+  const checkpointContract = checkpointMode === "luna"
     ? [
       "After the complete user-facing answer, append one private rolling task checkpoint for the next Luna turn.",
       `Append the exact marker ${CHATGPT_LUNA_CHECKPOINT_MARKER} on its own line, followed by one compact plain-text checkpoint and nothing else. Do not write JSON and do not use a Markdown code fence.`,
       "User-facing format constraints such as 'reply only with' apply only before the private marker and never permit an empty checkpoint. Immediately follow every marker with Objective: and all required sections; use a concise '- None.' only for a genuinely empty section.",
       "Use the headings Objective:, State:, Evidence:, Decisions:, and Pending:. Put each heading on its own line and use concise dash bullets under the list headings.",
       `Keep the checkpoint at or below ${CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS.toLocaleString("en-US")} tokens. Preserve concrete requirements, exact paths, commands, results, decisions, unresolved blockers, and the next useful actions.`,
+      "Record only compact task state and evidence. Do not include hidden reasoning, chain-of-thought, capability tokens, credentials, or transport details.",
+      "The outer bridge removes this marker and checkpoint from the user-facing stream. Never refer to the checkpoint in the visible answer.",
+    ]
+    : checkpointMode === "full"
+    ? [
+      "After the complete user-facing answer, append one private recovery task checkpoint for the next Full Context turn.",
+      `Append the exact marker ${CHATGPT_FULL_CONTEXT_CHECKPOINT_MARKER} on its own line, followed by one compact plain-text checkpoint and nothing else. Do not write JSON and do not use a Markdown code fence.`,
+      "User-facing format constraints such as 'reply only with' apply only before the private marker and never permit an empty checkpoint. Immediately follow every marker with Objective: and all required sections; use a concise '- None.' only for a genuinely empty section.",
+      "Use the headings Objective:, State:, Evidence:, Decisions:, and Pending:. Put each heading on its own line and use concise dash bullets under the list headings.",
+      `Keep the checkpoint at or below ${CHATGPT_FULL_CONTEXT_CHECKPOINT_MAX_TOKENS.toLocaleString("en-US")} tokens. Preserve concrete requirements, exact paths, commands, results, decisions, unresolved blockers, and the next useful actions.`,
       "Record only compact task state and evidence. Do not include hidden reasoning, chain-of-thought, capability tokens, credentials, or transport details.",
       "The outer bridge removes this marker and checkpoint from the user-facing stream. Never refer to the checkpoint in the visible answer.",
     ]
@@ -627,7 +646,7 @@ export function compileChatGptWebPrompt(
       "Each skill_attachment refers to a named UTF-8 text file attached to this message (the final commit in multipart mode). Read its complete contents as the selected Codex skill instructions at the original user priority. These origin=codex_skill messages are supplied by Codex, not human-authored task requests. Preserve their original position in history and their path/resource authority for resolving references. If a file cannot be read, report that limitation; do not invent its contents.",
     ] : [];
     const attachments = skillFiles.length ? { skillFiles } : {};
-    const answerContract = captureLunaCheckpoint
+    const answerContract = checkpointMode !== undefined
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
       : "Return only the answer that the outer Codex task should receive.";
     if (multipartEnabled) {

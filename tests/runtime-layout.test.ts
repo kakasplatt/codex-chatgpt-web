@@ -390,3 +390,18 @@ test("stored names survive config loading without an additional naming preferenc
   writeFileSync(join(root, "config.json"), JSON.stringify({ ...config, automaticAppName: "Codex Zero Risk", manualAppName: "Codex Manual", appName: "Codex Manual" }));
   expect(loadConfigForSetup().automaticAppName).toBe("Codex Zero Risk");
 });
+
+test("provider configuration sets the default full context checkpoint state path", () => {
+  const root = join(tmpdir(), `codex-full-context-layout-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  const config = defaultConfig("browser-only");
+  const provider = providerConfig(config);
+  expect(provider.chatgptWeb?.fullContextCheckpointStatePath).toBe(
+    join(root, "runtime", "full-context-checkpoints.json"),
+  );
+  expect(provider.chatgptWeb?.lunaCheckpointStatePath).toBe(
+    join(root, "runtime", "luna-checkpoints.json"),
+  );
+});
+
