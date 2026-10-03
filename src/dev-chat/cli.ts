@@ -362,10 +362,12 @@ export async function runDevCommand(args: string[]): Promise<void> {
     if (freshConversation && retainedConversation) {
       throw new Error("Choose --fresh-conversation or --retained-conversation");
     }
+    const fullContext = takeFlag(args, "--full-context");
     const biggerContext = takeFlag(args, "--bigger-context");
     const standardContext = takeFlag(args, "--standard-context");
-    if (biggerContext && standardContext) {
-      throw new Error("Choose at most one context mode: --bigger-context or --standard-context");
+    const contextFlagsCount = Number(fullContext) + Number(biggerContext) + Number(standardContext);
+    if (contextFlagsCount > 1) {
+      throw new Error("Choose at most one context mode: --full-context, --bigger-context, or --standard-context");
     }
     if (args.length > 0) throw new Error(`Unknown DEV setup arguments: ${args.join(" ")}`);
     const result = await setupDevProfile({
@@ -377,7 +379,9 @@ export async function runDevCommand(args: string[]): Promise<void> {
       ...(automaticBrowserInteraction || manualBrowserInteraction
         ? { browserInteractionMode: manualBrowserInteraction ? "manual" : "automatic" }
         : {}),
-      ...(biggerContext || standardContext ? { experimentalBiggerContext: biggerContext } : {}),
+      ...(fullContext ? { experimentalFullContext: true, experimentalBiggerContext: false } : {}),
+      ...(biggerContext ? { experimentalBiggerContext: true, experimentalFullContext: false } : {}),
+      ...(standardContext ? { experimentalBiggerContext: false, experimentalFullContext: false } : {}),
       ...(skillAttachments || inlineSkills ? { experimentalSkillAttachments: skillAttachments } : {}),
       ...(freshConversation || retainedConversation ? { experimentalFreshConversationPerTurn: freshConversation } : {}),
       ...(savedChats || temporaryChats ? { useSavedChats: savedChats } : {}),

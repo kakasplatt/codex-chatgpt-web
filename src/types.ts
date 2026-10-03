@@ -308,6 +308,8 @@ export interface CodexProviderConfig {
     autoApproveToolCalls?: boolean;
     /** Experimental transport: adapt one context across one, two, or six ChatGPT messages. */
     experimentalBiggerContext?: boolean;
+    /** Experimental transport: 1.05M logical context with 2..12 parts and recovery checkpoints. */
+    experimentalFullContext?: boolean;
     experimentalSkillAttachments?: boolean;
     /** Explicitly rebuild each automatic turn in a fresh browser conversation. */
     experimentalFreshConversationPerTurn?: boolean;

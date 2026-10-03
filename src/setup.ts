@@ -54,6 +54,7 @@ export interface SetupOptions {
   forceLogin?: boolean;
   autoApproveToolCalls?: boolean;
   experimentalBiggerContext?: boolean;
+  experimentalFullContext?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalFreshConversationPerTurn?: boolean;
   useSavedChats?: boolean;
@@ -148,6 +149,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     extraHighAvailable: before.extraHighAvailable,
     proAvailable: before.proAvailable,
     experimentalBiggerContext: before.experimentalBiggerContext,
+    experimentalFullContext: before.experimentalFullContext,
     experimentalSkillAttachments: before.experimentalSkillAttachments,
     experimentalFreshConversationPerTurn: before.experimentalFreshConversationPerTurn,
     useSavedChats: before.useSavedChats,
@@ -179,6 +181,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     extraHighAvailable: after.extraHighAvailable,
     proAvailable: after.proAvailable,
     experimentalBiggerContext: after.experimentalBiggerContext,
+    experimentalFullContext: after.experimentalFullContext,
     experimentalSkillAttachments: after.experimentalSkillAttachments,
     experimentalFreshConversationPerTurn: after.experimentalFreshConversationPerTurn,
     useSavedChats: after.useSavedChats,
@@ -289,6 +292,9 @@ function baseConfig(
   if (options.experimentalBiggerContext !== undefined) {
     config.experimentalBiggerContext = options.experimentalBiggerContext;
   }
+  if (options.experimentalFullContext !== undefined) {
+    config.experimentalFullContext = options.experimentalFullContext;
+  }
   if (options.zeroRiskProEnabled !== undefined) {
     if (config.browserInteractionMode !== "manual") {
       throw new Error("Zero Risk Pro can be configured only with --zero-risk-browser-interaction");
@@ -311,6 +317,9 @@ function baseConfig(
     if (options.experimentalBiggerContext === true) {
       throw new Error("Zero Risk does not support Bigger Context");
     }
+    if (options.experimentalFullContext === true) {
+      throw new Error("Zero Risk does not support Full Context");
+    }
     if (config.mode !== "full") {
       throw new Error("Zero Risk requires --full so Codex Zero Risk can signal start, tools, and completion");
     }
@@ -318,6 +327,7 @@ function baseConfig(
       throw new Error("Zero Risk requires the Launcher; pass --browser-host-descriptor from the running Launcher");
     }
     config.experimentalBiggerContext = false;
+    config.experimentalFullContext = false;
     config.experimentalSkillAttachments = false;
   }
   if (options.acknowledgedUnofficial) config.acknowledgedUnofficialAt = new Date().toISOString();

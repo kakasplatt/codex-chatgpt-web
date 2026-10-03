@@ -178,6 +178,48 @@ test("manual setup rejects capability refresh and Bigger Context", async () => {
   }
 }, 20_000);
 
+test("setup context flags support --full-context, --standard-context, and reject conflicting modes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-context-mode-"));
+  try {
+    const env = {
+      ...process.env,
+      CODEX_HOME: join(root, "codex"),
+      CODEX_CHATGPT_WEB_HOME: join(root, "app"),
+    };
+    const conflict = await runCli([
+      "setup",
+      "--browser-only",
+      "--full-context",
+      "--bigger-context",
+      "--acknowledge-unofficial",
+    ], env);
+    expect(conflict.exitCode).toBe(1);
+    expect(conflict.stderr).toContain("Choose at most one context mode");
+
+    const conflictStandard = await runCli([
+      "setup",
+      "--browser-only",
+      "--full-context",
+      "--standard-context",
+      "--acknowledge-unofficial",
+    ], env);
+    expect(conflictStandard.exitCode).toBe(1);
+    expect(conflictStandard.stderr).toContain("Choose at most one context mode");
+
+    const manualFull = await runCli([
+      "setup",
+      "--browser-only",
+      "--zero-risk-browser-interaction",
+      "--full-context",
+      "--acknowledge-unofficial",
+    ], env);
+    expect(manualFull.exitCode).toBe(1);
+    expect(manualFull.stderr).toContain("Zero Risk does not support Full Context");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 20_000);
+
 test("passkey capture cannot be invoked outside the live Launcher control channel", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-passkey-auth-"));
   try {
