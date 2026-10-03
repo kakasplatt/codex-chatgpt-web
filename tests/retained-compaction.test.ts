@@ -445,7 +445,7 @@ test("a checkpoint submitted before browser completion wins the terminal respons
   }
 });
 
-test("retained compaction deadline bounds browser settlement after the control handoff succeeds", async () => {
+test("retained compaction commits the handoff despite bounded slow browser retirement", async () => {
   const sourceRequest = request(false);
   const source = new ChatGptTurnSession({
     mode: "read-only",
@@ -466,21 +466,42 @@ test("retained compaction deadline bounds browser settlement after the control h
     waitForCompactionHandoff: async () => "Already submitted checkpoint",
     abortCompactionTransaction: () => { transactionAborted = true; },
   } as unknown as TurnBroker;
+  let captured: BrowserTurn | undefined;
+  let cleanupAttempts = 0;
+  let releaseBrowser!: () => void;
+  let physicallyRetired = false;
+  const retirement = new Promise<string>(resolve => {
+    releaseBrowser = () => { physicallyRetired = true; resolve("retired"); };
+  });
   const worker = {
-    run: async () => new Promise<string>(() => {}),
+    run: (turn: BrowserTurn) => {
+      captured = turn;
+      turn.abortSignal!.addEventListener("abort", () => { cleanupAttempts += 1; });
+      return retirement;
+    },
   };
 
-  await expect(requestRetainedCompactionHandoff(
-    worker as never,
-    request(true),
-    source,
-    broker,
-    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
-    "trace_deadline",
-    undefined,
-    25,
-  )).rejects.toThrow("timed out after 25ms");
-  expect(transactionAborted).toBeTrue();
+  const startedAt = performance.now();
+  try {
+    await expect(requestRetainedCompactionHandoff(
+      worker as never,
+      request(true),
+      source,
+      broker,
+      { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      "trace_deadline",
+      undefined,
+      25,
+    )).resolves.toBe("Already submitted checkpoint");
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(cleanupAttempts).toBe(1);
+    expect(captured?.abortSignal?.reason).toBeInstanceOf(ChatGptCompactionHandoffAccepted);
+    expect(physicallyRetired).toBeFalse();
+    expect(transactionAborted).toBeTrue();
+  } finally {
+    releaseBrowser();
+    await retirement;
+  }
 });
 
 test("retained compaction timeout identifies the waiting control-handoff phase", async () => {
@@ -759,7 +780,7 @@ for (const browserHost of ["managed-chrome", "launcher"] as const) {
   });
 }
 
-test("retained compaction records handoff accepted before stalled browser retirement times out", async () => {
+test("retained compaction reports stalled retirement separately from its accepted handoff", async () => {
   const sourceRequest = request(false);
   const source = new ChatGptTurnSession({
     mode: "read-only",
@@ -790,7 +811,9 @@ test("retained compaction records handoff accepted before stalled browser retire
   };
   const diagnostics: string[] = [];
   const originalInfo = console.info;
+  const originalWarn = console.warn;
   console.info = (...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); };
+  console.warn = (...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); };
   try {
     await expect(requestRetainedCompactionHandoff(
       worker as never,
@@ -801,13 +824,17 @@ test("retained compaction records handoff accepted before stalled browser retire
       "trace_handoff_accepted_cleanup_stall",
       undefined,
       20,
-    )).rejects.toThrow("timed out after 20ms");
+    )).resolves.toBe("Committed checkpoint");
   } finally {
     console.info = originalInfo;
+    console.warn = originalWarn;
   }
 
   expect(diagnostics.some(line => line.includes('"traceId":"trace_handoff_accepted_cleanup_stall"')
     && line.includes('"phase":"handoff_accepted"'))).toBeTrue();
+  expect(diagnostics.some(line => line.startsWith("[chatgpt-web] retained_compaction_cleanup_timeout "))).toBeTrue();
+  expect(diagnostics.some(line => line.startsWith("[chatgpt-web] retained_compaction_timeout "))).toBeFalse();
+  expect(diagnostics.some(line => line.includes('"phase":"complete"'))).toBeFalse();
 });
 
 test("a rejected exact compaction run is evicted while a successful run remains replayable", async () => {

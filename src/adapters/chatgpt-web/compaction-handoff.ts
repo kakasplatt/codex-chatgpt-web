@@ -321,6 +321,7 @@ export async function requestRetainedCompactionHandoff(
   const operationTimeoutMs = boundedCompactionTimeout(timeoutMs);
   const startedAt = Date.now();
   let phase: RetainedCompactionPhase = "source_settling";
+  let committed = false;
   const elapsedMs = (): number => Math.max(0, Date.now() - startedAt);
   const recordPhase = (next: RetainedCompactionPhase): void => {
     if (phase === next && next !== "source_settling") return;
@@ -336,7 +337,8 @@ export async function requestRetainedCompactionHandoff(
   const deadlineTimer = setTimeout(
     () => {
       const elapsed = elapsedMs();
-      console.warn(`[chatgpt-web] retained_compaction_timeout ${JSON.stringify({
+      const diagnostic = committed ? "retained_compaction_cleanup_timeout" : "retained_compaction_timeout";
+      console.warn(`[chatgpt-web] ${diagnostic} ${JSON.stringify({
         traceId,
         phase,
         timeoutMs: operationTimeoutMs,
@@ -404,17 +406,29 @@ export async function requestRetainedCompactionHandoff(
       ]),
       operationSignal,
     );
+    committed = true;
     recordPhase("handoff_accepted");
     // The one-shot control submission is the terminal event for this purpose-built response.
     // ChatGPT may render no assistant text after a tool-only response, and therefore no Copy
     // action. End our owned turn explicitly and wait for the launcher/helper cleanup handshake.
     browserAbort.abort(new ChatGptCompactionHandoffAccepted());
     recordPhase("retiring_browser");
-    await withCompactionAbort(
-      browser.then(() => undefined, () => undefined),
-      operationSignal,
-    );
-    recordPhase("complete");
+    try {
+      await withCompactionAbort(
+        browser.then(() => undefined, () => undefined),
+        operationSignal,
+      );
+      recordPhase("complete");
+    } catch (error) {
+      // Receipt commits the summary. This existing wait bound only limits cleanup;
+      // physical ownership remains with the retained-session owner until retirement.
+      console.warn(`[chatgpt-web] retained_compaction_cleanup_incomplete ${JSON.stringify({
+        traceId,
+        phase,
+        elapsedMs: elapsedMs(),
+        reason: error instanceof Error ? error.message : String(error),
+      })}`);
+    }
     return summary;
   } catch (error) {
     if (error instanceof RetainedCompactionHandoffTimeoutError) throw error;
