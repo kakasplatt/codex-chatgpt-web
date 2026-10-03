@@ -4546,6 +4546,25 @@ test("browser UI health ignores stale or untimestamped renderer samples after ne
   expect(tracker.current()).toBe("responsive");
 });
 
+test("browser UI health accepts renderer recovery with the same native timestamp", () => {
+  const tracker = new ChatGptBrowserUiHealthTracker();
+
+  expect(tracker.record("renderer-unresponsive", 7_000)).toEqual({
+    previous: "responsive",
+    current: "unresponsive",
+    reason: "renderer-unresponsive",
+    at: 7_000,
+  });
+
+  expect(tracker.record("renderer-responsive", 7_000)).toEqual({
+    previous: "unresponsive",
+    current: "responsive",
+    reason: "renderer-responsive",
+    at: 7_000,
+  });
+  expect(tracker.current()).toBe("responsive");
+});
+
 test("submission observation timeout degrades browser UI health when page recovery is unavailable", async () => {
   const worker: any = Object.create(ChatGptBrowserWorker.prototype);
   const timeout = new ChatGptBrowserObservationTimeoutError(5_000);

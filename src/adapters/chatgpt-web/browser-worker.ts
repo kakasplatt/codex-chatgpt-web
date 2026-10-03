@@ -1724,7 +1724,7 @@ export class ChatGptBrowserUiHealthTracker {
     const rendererSample = reason === "renderer-unresponsive" || reason === "renderer-responsive";
     if (rendererSample) {
       if (this.lastRendererStateChangedAt !== undefined) {
-        if (at === undefined || at <= this.lastRendererStateChangedAt) return undefined;
+        if (at === undefined || at < this.lastRendererStateChangedAt) return undefined;
       }
       if (at !== undefined) this.lastRendererStateChangedAt = at;
     }
