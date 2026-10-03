@@ -805,6 +805,7 @@ for (const browserHost of ["managed-chrome", "launcher"] as const) {
       else expect(frames).toEqual(["run", "prepared_selected_ack"]);
       expect(phases).toEqual([
         "source_settling", "retained_turn_started", "compaction_instruction_delivered",
+        "retiring_browser", "complete",
       ]);
       expect(caught).toMatchObject({
         code: "compaction_handoff_timeout",
@@ -816,6 +817,40 @@ for (const browserHost of ["managed-chrome", "launcher"] as const) {
     }
   });
 }
+
+test("retained cleanup never invokes an owner handle arriving after its independent deadline", async () => {
+  const source = new ChatGptTurnSession({
+    mode: "read-only", browser: Promise.resolve("source"), physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
+    conversationKey: "a".repeat(64), cancel() {},
+  });
+  let captured!: BrowserTurn;
+  let settle!: (value: string) => void;
+  const browser = new Promise<string>(resolve => { settle = resolve; });
+  const broker = {
+    beginCompactionTransaction: async () => ({ token: "control_fixture", handoffId: "handoff_fixture" }),
+    waitForCompactionHandoff: async () => "Committed checkpoint", abortCompactionTransaction() {},
+  } as unknown as TurnBroker;
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const result = requestRetainedCompactionHandoff(
+      { run: (turn: BrowserTurn) => { captured = turn; return browser; } } as never,
+      request(true), source, broker,
+      { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      "trace_late_retirement_owner",
+    );
+    await Bun.sleep(0);
+    mock.timers.tick(15_000);
+    await expect(result).resolves.toBe("Committed checkpoint");
+    let retireCalls = 0;
+    captured.onBrowserRetirementAvailable!(async () => { retireCalls += 1; });
+    await Bun.sleep(0);
+    expect(retireCalls).toBe(0);
+  } finally {
+    settle("settled");
+    mock.timers.reset();
+  }
+});
 
 test("retained compaction reports stalled retirement separately from its accepted handoff", async () => {
   const sourceRequest = request(false);

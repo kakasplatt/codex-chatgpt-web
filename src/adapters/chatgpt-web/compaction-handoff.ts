@@ -129,6 +129,7 @@ function currentToolResults(
 }
 
 export const MAX_COMPACTION_HANDOFF_TIMEOUT_MS = 5 * 60_000;
+export const RETAINED_COMPACTION_BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 
 export type RetainedCompactionPhase =
   | "source_settling"
@@ -358,6 +359,55 @@ export async function requestRetainedCompactionHandoff(
   const abortBrowser = () => browserAbort.abort(operationSignal.reason);
   let transaction: CompactionTransactionHandle | undefined;
   let browser: Promise<string> | undefined;
+  let publishRetirement!: (retire: (signal: AbortSignal) => Promise<void>) => void;
+  const retirementAvailable = new Promise<(signal: AbortSignal) => Promise<void>>(resolve => {
+    publishRetirement = resolve;
+  });
+  let cleanup: Promise<void> | undefined;
+  const retireBrowser = (): Promise<void> => {
+    if (cleanup) return cleanup;
+    if (!browser) return Promise.resolve();
+    recordPhase("retiring_browser");
+    const cleanupDeadline = new AbortController();
+    const timer = setTimeout(() => {
+      console.warn(`[chatgpt-web] retained_compaction_cleanup_timeout ${JSON.stringify({
+        traceId, phase, timeoutMs: RETAINED_COMPACTION_BROWSER_CLEANUP_TIMEOUT_MS, elapsedMs: elapsedMs(),
+      })}`);
+      cleanupDeadline.abort(new Error(`Retained browser cleanup timed out after ${RETAINED_COMPACTION_BROWSER_CLEANUP_TIMEOUT_MS}ms`));
+    }, RETAINED_COMPACTION_BROWSER_CLEANUP_TIMEOUT_MS);
+    timer.unref?.();
+    const settlement = browser.then(() => undefined, error => {
+      if (error instanceof ChatGptCompactionHandoffAccepted || !committed) return;
+      console.warn(`[chatgpt-web] retained_compaction_cleanup_failed ${JSON.stringify({
+        traceId, phase, elapsedMs: elapsedMs(), reason: error instanceof Error ? error.message : String(error),
+      })}`);
+    });
+    // Give cooperative abort a chance to settle. Otherwise the acquired exact owner can end
+    // its tab while a browser/CDP operation is stuck. Both waits share this one fresh budget.
+    cleanup = withCompactionAbort((async () => {
+      const retire = await withCompactionAbort(
+        Promise.race([settlement.then(() => undefined), retirementAvailable]), cleanupDeadline.signal,
+      );
+      cleanupDeadline.signal.throwIfAborted();
+      if (retire) {
+        await retire(cleanupDeadline.signal);
+        console.info(`[chatgpt-web] retained_compaction_tab_retired ${JSON.stringify({ traceId, elapsedMs: elapsedMs() })}`);
+      }
+      await settlement;
+      recordPhase("complete");
+    })(), cleanupDeadline.signal).catch(error => {
+      console.warn(`[chatgpt-web] retained_compaction_cleanup_incomplete ${JSON.stringify({
+        traceId, phase, elapsedMs: elapsedMs(), reason: error instanceof Error ? error.message : String(error),
+      })}`);
+    }).finally(() => {
+      cleanupDeadline.abort();
+      clearTimeout(timer);
+    });
+    // A pending control request must also settle before this trace can be reused. This
+    // supplements, rather than replaces, the actual browser/helper settlement below.
+    retainOwnershipUntil?.(cleanup);
+    return cleanup;
+  };
   if (operationSignal.aborted) abortBrowser();
   else operationSignal.addEventListener("abort", abortBrowser, { once: true });
   try {
@@ -387,6 +437,7 @@ export async function requestRetainedCompactionHandoff(
       conversationKey,
       requireRetainedConversation: true,
       abortSignal: browserAbort.signal,
+      onBrowserRetirementAvailable: publishRetirement,
       // Selection precedes prompt preparation on both managed and helper browser hosts.
       onPreparedSelected: () => recordPhase("retained_turn_started"),
       onSendActivated: () => recordPhase("waiting_for_control_handoff"),
@@ -418,21 +469,10 @@ export async function requestRetainedCompactionHandoff(
     // ChatGPT may render no assistant text after a tool-only response, and therefore no Copy
     // action. End our owned turn explicitly and wait for the launcher/helper cleanup handshake.
     browserAbort.abort(new ChatGptCompactionHandoffAccepted());
-    recordPhase("retiring_browser");
     try {
-      await withCompactionAbort(
-        browser.then(() => undefined, error => {
-          if (error instanceof ChatGptCompactionHandoffAccepted) return;
-          console.warn(`[chatgpt-web] retained_compaction_cleanup_failed ${JSON.stringify({
-            traceId,
-            phase,
-            elapsedMs: elapsedMs(),
-            reason: error instanceof Error ? error.message : String(error),
-          })}`);
-        }),
-        operationSignal,
-      );
-      recordPhase("complete");
+      // This is only the logical observer's wait. Physical cleanup continues on its own
+      // independent deadline even if the protocol/caller signal is already aborted.
+      await withCompactionAbort(retireBrowser(), operationSignal);
     } catch (error) {
       // Receipt commits the summary. This existing wait bound only limits cleanup;
       // physical ownership remains with the structured-compaction owner until retirement.
@@ -470,7 +510,7 @@ export async function requestRetainedCompactionHandoff(
       // physical settlement separately, so this helper must not turn its own deadline into an
       // unbounded wait when the worker does not acknowledge abort immediately.
       await withCompactionAbort(
-        browser.then(() => undefined, () => undefined),
+        retireBrowser(),
         operationSignal,
       ).catch(() => {});
     }

@@ -1323,6 +1323,8 @@ export interface BrowserTurn {
   requireRetainedConversation?: boolean;
   conversationKey?: string;
   onPreparedSelected?: (reused: boolean) => void | Promise<void>;
+  /** Exact acquired owner; retirement does not settle the browser/helper operation. */
+  onBrowserRetirementAvailable?: (retire: (signal: AbortSignal) => Promise<void>) => void;
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
   /** Send activation is the ambiguity boundary after which a fresh surface must not replay this prompt. */
@@ -4872,6 +4874,15 @@ export class ChatGptBrowserWorker {
       throw error;
     });
     const surfaceId = lease.surfaceId;
+    let activityFinished = false;
+    const retirementOwner = { traceId: turn.traceId, helperPid: process.pid };
+    turn.onBrowserRetirementAvailable?.(async signal => {
+      signal.throwIfAborted();
+      if (activityFinished) return;
+      await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+        phase: "end", ...retirementOwner, status: "aborted",
+      }, undefined, signal);
+    });
     const reused = lease.reused === true;
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
@@ -4879,7 +4890,6 @@ export class ChatGptBrowserWorker {
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     let heartbeatInFlight = false;
     let heartbeatPending = false;
-    let activityFinished = false;
     let lastHeartbeatFailureAt = 0;
     let activityStage: "preparing" | "sending" | "chatgpt" = "preparing";
     const recordRendererHealth = (renderer: {
