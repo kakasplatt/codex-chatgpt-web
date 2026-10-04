@@ -333,4 +333,3 @@ test("Luna checkpoint store prunes oldest entries beyond 512 max entries", () =>
   ]);
   expect(store.apply(latestNext).applied).toBeTrue();
 });
-

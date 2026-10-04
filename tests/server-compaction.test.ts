@@ -631,4 +631,3 @@ test("routes native compaction under Full Context through the adapter preserving
     content: [{ type: "output_text", text: summary }],
   });
 });
-

@@ -749,4 +749,3 @@ test("prompt compilation formats Full Context recovery checkpoint instructions w
   const lunaLegacy = compileChatGptWebPrompt(lunaParsed, lunaCapabilities, undefined, { captureLunaCheckpoint: true });
   expect(lunaLegacy.text).toBe(lunaGeneric.text);
 });
-

@@ -6259,4 +6259,3 @@ test("resolveTurnCheckpointCapture handles legacy Luna options and new generic c
   // 4. Undefined
   expect(resolveTurnCheckpointCapture({} as any)).toBeUndefined();
 });
-

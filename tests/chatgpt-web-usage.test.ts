@@ -357,7 +357,3 @@ test("Full Context usage approaching 900,000 auto-compact threshold reports cano
   expect(compactUsage.inputTokens).toBeGreaterThan(700_000);
   expect(Math.abs(compactUsage.inputTokens - canonicalUsage.inputTokens)).toBeLessThan(500);
 }, 60_000);
-
-
-
-

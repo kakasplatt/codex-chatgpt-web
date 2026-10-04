@@ -571,4 +571,3 @@ The feature is complete when all of the following are true:
 8. Luna, Bigger Context, Standard mode, Zero Risk, tool rounds, and retained structured compaction retain their existing tested behavior.
 9. Focused tests, the full root test suite, launcher tests, both typechecks, and diff checks pass, with any baseline/environmental failure reported separately.
 10. Live smoke evidence covers inline, >240K multipart, high-context retained continuation, checkpoint recovery, canonical fallback, compaction, and cancellation.
-

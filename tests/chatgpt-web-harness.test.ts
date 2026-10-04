@@ -4415,4 +4415,3 @@ describe("adapter liveness covers every path through a turn", () => {
     }
   });
 });
-
