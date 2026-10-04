@@ -210,7 +210,13 @@ export function resolveFullContextMultipartPlan(
   }
 
   const inline = compile();
-  const inputTokens = estimateCompiledChatGptWebInputTokens(inline, parsed.modelId);
+  const canonicalInline = includeFullCheckpoint
+    ? compileChatGptWebPrompt(parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined, {
+      experimentalMultipartMode: "full",
+      experimentalSkillAttachments,
+    })
+    : inline;
+  const inputTokens = estimateCompiledChatGptWebInputTokens(canonicalInline, parsed.modelId);
   if (inputTokens >= CHATGPT_WEB_FULL_CONTEXT_WINDOW) {
     throw new ChatGptWebAdapterError(
       `This Full Context transaction is estimated at ${inputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${CHATGPT_WEB_FULL_CONTEXT_WINDOW.toLocaleString("en-US")}-token ceiling. Run /compact, then retry.`,

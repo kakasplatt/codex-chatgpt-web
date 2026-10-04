@@ -253,6 +253,18 @@ test("Full Context checkpoint overhead promotes a physical two-part plan to thre
   )).not.toThrow();
 }, 30_000);
 
+test("Full Context checkpoint overhead does not reduce the canonical 1,050,000-token ceiling", () => {
+  const parsed = request("");
+  parsed.context.messages = Array.from({ length: 11 }, (_, index) => ({
+    role: "user" as const,
+    content: "word ".repeat(94_550),
+    timestamp: index + 1,
+  }));
+
+  expect(resolveFullContextMultipartPlan(parsed, capabilities)).toBe(11);
+  expect(resolveFullContextMultipartPlan(parsed, capabilities, false, true)).toBe(11);
+}, 30_000);
+
 test("Full Context usage accounting always reports logical canonical tokens, ignoring smaller physical resume/recovery input", () => {
   const largeCanonical = request("word ".repeat(50_000));
   const smallSuffix = request("word ".repeat(100));
