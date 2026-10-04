@@ -23,7 +23,7 @@ import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, RemoteTurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
-import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
+import { CHATGPT_WEB_AGENT_WAIT_POLL_MS, CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -2910,7 +2910,11 @@ describe("ChatGPT outer-native harness v4", () => {
         justification: "May the local fixture command run outside the sandbox?",
         prefix_rule: ["pwd"],
       })))).toBe(true);
-      expect(execRequests.some(request => request.input?.includes(JSON.stringify({ cmd: "git status --short", workdir: tempRoot })))).toBe(true);
+      expect(execRequests.some(request => request.input?.includes(JSON.stringify({
+        cmd: "git status --short",
+        workdir: tempRoot,
+        yield_time_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      })))).toBe(true);
       for (const request of execRequests) {
         expect(request.input).toContain("ALL_TOOLS");
         expect(request.input).toContain('"exec_command"');
@@ -3337,6 +3341,23 @@ describe("ChatGPT outer-native harness v4", () => {
       broker.completeTool(token, writeRequest!.callId, toolResult({ output: "continued" }));
       expect((await write).structuredContent).toEqual({ output: "continued" });
 
+      const longWrite = call("codex_write_stdin", {
+        turn_token: token,
+        session_id: 42,
+        yield_time_ms: 300_000,
+      });
+      const [longWriteRequest] = await broker.nextToolBatch(token);
+      expect(longWriteRequest).toEqual(expect.objectContaining({
+        wireName: "write_stdin",
+        freeform: false,
+        arguments: {
+          session_id: 42,
+          yield_time_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+        },
+      }));
+      broker.completeTool(token, longWriteRequest!.callId, toolResult({ output: "still running", session_id: 42 }));
+      expect((await longWrite).structuredContent).toMatchObject({ session_id: 42 });
+
       const patch = "*** Begin Patch\n*** Add File: direct-token.txt\n+ok\n*** End Patch";
       const apply = call("codex_apply_patch", { turn_token: token, patch });
       const [applyRequest] = await broker.nextToolBatch(token);
@@ -3471,7 +3492,11 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(execRequest?.input).toContain("ALL_TOOLS");
       expect(execRequest?.input).toContain('"exec_command"');
       expect(execRequest?.input).toContain('"shell_command"');
-      expect(execRequest?.input).toContain(JSON.stringify({ cmd: "pwd", workdir: tempRoot }));
+      expect(execRequest?.input).toContain(JSON.stringify({
+        cmd: "pwd",
+        workdir: tempRoot,
+        yield_time_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      }));
       broker.completeTool(token, execRequest!.callId, toolResult({ output: tempRoot, exit_code: 0 }));
       expect((await execPromise).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
     } finally {
