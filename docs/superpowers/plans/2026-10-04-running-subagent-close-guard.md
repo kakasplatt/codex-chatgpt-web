@@ -23,10 +23,20 @@
 - [x] Apply the same gate to deferred/gateway close tools and block `close_agent` from raw `exec`, which cannot share the structured terminal-state ledger.
 - [x] Add behavior coverage for direct V1, deferred V2, timeout, successful terminal close, repeated close, and raw-exec bypass attempts.
 
+## Task 3: Invalidate stale terminal observations after reactivation
+
+- [x] RED: prove that `wait_agent` terminal evidence remained reusable after `send_input` reactivated the same agent.
+- [x] Invalidate a target's terminal observation before structured `send_input`, `resume_agent`, or `followup_task` dispatch.
+- [x] Restore the observation only when that structured reactivation returns an explicit tool error.
+- [x] Require deferred lifecycle reactivation tools to use structured arguments so the target can always be tracked.
+- [x] Clear all terminal observations before raw `exec`, since arbitrary nested lifecycle mutations cannot update the structured ledger; keep raw `close_agent` blocked.
+- [x] Cover V1 `send_input`, V1 `resume_agent`, V2/collaboration `followup_task`, freeform mutation rejection, raw-exec reactivation, and re-wait-before-close behavior.
+
 ## Review focus
 
 - A wait timeout must never be described as proof that the worker is stalled.
 - The policy must cover `multi_agent_v1__close_agent` and future equivalent close-agent namespaces without changing native tool arguments.
 - Terminal agents must remain closable so completed agents do not consume concurrency slots.
 - A target that has not been returned by structured `wait_agent` as terminal must fail closed because the current native schema supplies no verifiable stall evidence.
+- Terminal evidence must be invalidated whenever the same agent is reactivated and must be earned again with a later terminal `wait_agent` result.
 - Raw `exec` must not provide an enforcement escape hatch.

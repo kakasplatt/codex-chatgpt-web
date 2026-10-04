@@ -3271,6 +3271,23 @@ describe("ChatGPT outer-native harness v4", () => {
           properties: { target: { type: "string" } }, required: ["target"],
         },
       },
+      {
+        name: "send_input", namespace: "multi_agent_v1", description: "Send follow-up work to an agent.",
+        parameters: {
+          type: "object", additionalProperties: false,
+          properties: {
+            target: { type: "string" }, message: { type: "string" }, interrupt: { type: "boolean" },
+          },
+          required: ["target", "message", "interrupt"],
+        },
+      },
+      {
+        name: "resume_agent", namespace: "multi_agent_v1", description: "Resume an agent.",
+        parameters: {
+          type: "object", additionalProperties: false,
+          properties: { id: { type: "string" } }, required: ["id"],
+        },
+      },
     ];
     const token = await broker.register(environment, 60_000);
     const transport = new StdioClientTransport({
@@ -3325,6 +3342,57 @@ describe("ChatGPT outer-native harness v4", () => {
       }));
       await terminalWait;
 
+      const followUp = call("multi_agent_v1__send_input", {
+        target: "agent_test", message: "Do one more step.", interrupt: false,
+      });
+      const [followUpRequest] = await broker.nextToolBatch(token);
+      expect(followUpRequest).toMatchObject({
+        wireName: "multi_agent_v1__send_input",
+        arguments: { target: "agent_test", message: "Do one more step.", interrupt: false },
+      });
+      broker.completeTool(token, followUpRequest!.callId, toolResult({ accepted: true }));
+      await followUp;
+
+      const closeAfterFollowUp = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_test" },
+      );
+      expect(closeAfterFollowUp.isError).toBe(true);
+      expect(JSON.stringify(closeAfterFollowUp.content)).toContain("terminal status");
+
+      const terminalWaitAfterFollowUp = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_test"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [terminalWaitAfterFollowUpRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, terminalWaitAfterFollowUpRequest!.callId, toolResult({
+        status: { agent_test: { completed: "done again" } }, timed_out: false,
+      }));
+      await terminalWaitAfterFollowUp;
+
+      const resumed = call("multi_agent_v1__resume_agent", { id: "agent_test" });
+      const [resumeRequest] = await broker.nextToolBatch(token);
+      expect(resumeRequest).toMatchObject({
+        wireName: "multi_agent_v1__resume_agent",
+        arguments: { id: "agent_test" },
+      });
+      broker.completeTool(token, resumeRequest!.callId, toolResult({ status: "running" }));
+      await resumed;
+
+      const closeAfterResume = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_test" },
+      );
+      expect(closeAfterResume.isError).toBe(true);
+
+      const terminalWaitAfterResume = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_test"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [terminalWaitAfterResumeRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, terminalWaitAfterResumeRequest!.callId, toolResult({
+        status: { agent_test: { completed: "done after resume" } }, timed_out: false,
+      }));
+      await terminalWaitAfterResume;
+
       const allowedClose = call("multi_agent_v1__close_agent", { target: "agent_test" });
       const [closeRequest] = await broker.nextToolBatch(token);
       expect(closeRequest).toMatchObject({
@@ -3370,6 +3438,49 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       await deferredTerminalWait;
 
+      const deferredFollowUp = call("collaboration__followup_task", {
+        target: "agent_v2", message: "Do another V2 step.",
+      });
+      const [deferredFollowUpRequest] = await broker.nextToolBatch(token);
+      const deferredFollowUpCalls: GatewayProgramCall[] = [];
+      await executeGatewayProgram(
+        deferredFollowUpRequest!.input!,
+        ["collaboration__followup_task"],
+        deferredFollowUpCalls,
+      );
+      expect(deferredFollowUpCalls).toEqual([{
+        name: "collaboration__followup_task",
+        input: { target: "agent_v2", message: "Do another V2 step." },
+      }]);
+      broker.completeTool(token, deferredFollowUpRequest!.callId, toolResult({ accepted: true }));
+      await deferredFollowUp;
+
+      const freeformFollowUp = await client.callTool({
+        name: "codex_tool_call",
+        arguments: {
+          turn_token: token,
+          wire_name: "collaboration__followup_task",
+          input: JSON.stringify({ target: "agent_v2", message: "bypass" }),
+        },
+      });
+      expect(freeformFollowUp.isError).toBe(true);
+      expect(JSON.stringify(freeformFollowUp.content)).toContain("structured arguments");
+
+      const deferredCloseAfterFollowUp = await callExpectedLocalRejection(
+        "multi_agent_v2__close_agent",
+        { target: "agent_v2" },
+      );
+      expect(deferredCloseAfterFollowUp.isError).toBe(true);
+
+      const deferredTerminalWaitAgain = call("multi_agent_v2__wait_agent", {
+        targets: [{ agent_id: "agent_v2" }], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [deferredTerminalWaitAgainRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, deferredTerminalWaitAgainRequest!.callId, toolResult({
+        statuses: { agent_v2: { completed: "done again" } }, timed_out: false,
+      }));
+      await deferredTerminalWaitAgain;
+
       const deferredAllowedClose = call("multi_agent_v2__close_agent", { target: "agent_v2" });
       const [deferredCloseRequest] = await broker.nextToolBatch(token);
       const deferredCloseCalls: GatewayProgramCall[] = [];
@@ -3407,6 +3518,44 @@ describe("ChatGPT outer-native harness v4", () => {
         isError: true,
       });
       expect((await rawClose).isError).toBe(true);
+
+      const rawTerminalWait = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_raw"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [rawTerminalWaitRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, rawTerminalWaitRequest!.callId, toolResult({
+        status: { agent_raw: { completed: "done" } }, timed_out: false,
+      }));
+      await rawTerminalWait;
+
+      const rawReactivation = client.callTool({
+        name: "codex_tool_call",
+        arguments: {
+          turn_token: token,
+          wire_name: "exec",
+          input: "await tools.multi_agent_v1__send_input({ target: 'agent_raw', message: 'again', interrupt: false });",
+        },
+      });
+      const [rawReactivationRequest] = await broker.nextToolBatch(token);
+      const rawReactivationCalls: GatewayProgramCall[] = [];
+      await executeGatewayProgram(
+        rawReactivationRequest!.input!,
+        ["multi_agent_v1__send_input"],
+        rawReactivationCalls,
+        true,
+      );
+      expect(rawReactivationCalls).toEqual([{
+        name: "multi_agent_v1__send_input",
+        input: { target: "agent_raw", message: "again", interrupt: false },
+      }]);
+      broker.completeTool(token, rawReactivationRequest!.callId, toolResult({ accepted: true }));
+      expect((await rawReactivation).isError).not.toBe(true);
+
+      const closeAfterRawReactivation = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_raw" },
+      );
+      expect(closeAfterRawReactivation.isError).toBe(true);
     } finally {
       await client.close().catch(() => {});
       broker.revoke(token);
