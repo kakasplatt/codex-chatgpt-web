@@ -817,7 +817,7 @@ test("authenticated targeted cancellation aborts a shared structured compaction 
       trace_id: traceId,
       cancelled_compaction_runs: 1,
     });
-    await expect(run).rejects.toThrow("The ChatGPT browser tab was closed");
+    await expect(run).rejects.toThrow("Conversation interrupted: worker interrupted");
     expect(aborted).toBeTrue();
   } finally {
     await server.stop(true);
@@ -894,7 +894,7 @@ test("a Codex retry after tab cancellation receives terminal HTTP 400 without a 
 
   try {
     expect(await chatGptTurnSessions.cancelTrace(traceId)).toBe(1);
-    expect(chatGptTurnSessions.cancelledError(traceId)?.message).toContain("Codex turn was cancelled");
+    expect(chatGptTurnSessions.cancelledError(traceId)?.message).toContain("Conversation interrupted: worker interrupted");
     let adapterConstructions = 0;
     const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
       method: "POST",
@@ -910,7 +910,7 @@ test("a Codex retry after tab cancellation receives terminal HTTP 400 without a 
       error: {
         type: "client_closed_request",
         code: "client_cancelled",
-        message: "The ChatGPT browser tab was closed, so the Codex turn was cancelled.",
+        message: "Conversation interrupted: worker interrupted because the ChatGPT browser tab was closed.",
       },
     });
     expect(adapterConstructions).toBe(0);

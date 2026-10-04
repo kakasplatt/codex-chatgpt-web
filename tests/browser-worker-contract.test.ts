@@ -1859,7 +1859,7 @@ test("closing the launcher page is an immediate terminal turn error", async () =
     code: "client_cancelled",
     retryable: false,
   });
-  expect((error as Error).message).toContain("turn was cancelled");
+  expect((error as Error).message).toContain("Conversation interrupted: worker interrupted");
 });
 
 test("active composer resolution waits for exactly one visible editor", async () => {
@@ -5086,7 +5086,7 @@ test("managed browser turns report degraded UI health while MCP progress remains
     })).resolves.toBe("ok");
 
     expect(commentary).toEqual([
-      "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.",
+      "Browser UI degraded (non-terminal): Codex/MCP activity may still be running.",
     ]);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("trace=ui-health-diagnostic");
@@ -5127,8 +5127,8 @@ test("managed browser UI health commentary deduplicates degradation and recovery
     })).resolves.toBe("ok");
 
     expect(commentary).toEqual([
-      "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.",
-      "ChatGPT browser UI became responsive again.",
+      "Browser UI degraded (non-terminal): Codex/MCP activity may still be running.",
+      "Browser UI responsive again.",
     ]);
     expect(warnings).toHaveLength(2);
   } finally {
@@ -5155,7 +5155,7 @@ test("managed browser UI health commentary waits for native recovery from render
         browserUiHealth.record("renderer-unresponsive", 4_000);
         browserUiHealth.record("dom-observation-ok", 4_001);
         expect(commentary).toEqual([
-          "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+          "Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.",
         ]);
         browserUiHealth.record("renderer-responsive", 4_002);
         return "ok";
@@ -5168,8 +5168,8 @@ test("managed browser UI health commentary waits for native recovery from render
     })).resolves.toBe("ok");
 
     expect(commentary).toEqual([
-      "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
-      "ChatGPT browser UI became responsive again.",
+      "Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.",
+      "Browser UI responsive again.",
     ]);
     expect(warnings).toHaveLength(2);
   } finally {
