@@ -310,7 +310,7 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
   return new ChatGptWebAdapterError(
     ambiguous
       ? "ChatGPT did not confirm that the prompt was sent. Check the ChatGPT tab before continuing."
-      : "Conversation interrupted: browser worker stopped responding after the task started. Check the ChatGPT tab before continuing.",
+      : "Conversation interrupted: turn failed after submission. Check the ChatGPT tab before continuing.",
     {
       status: 502,
       errorType: "server_error",

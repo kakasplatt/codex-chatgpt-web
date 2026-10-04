@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { chatGptBrowserTabClosedError } from "../src/adapters/chatgpt-web/adapter-error";
 import { bridgeToResponsesSSE } from "../src/bridge";
 import { defaultConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
@@ -28,14 +29,15 @@ mkdirSync(codexHome, { recursive: true });
 writeFileSync(join(root, "models.json"), `${JSON.stringify(catalog)}\n`);
 
 let responseRequests = 0;
+const cancellation = chatGptBrowserTabClosedError();
 async function* cancelledStream(): AsyncGenerator<AdapterEvent> {
   yield {
     type: "error",
-    message: "The ChatGPT browser tab was closed, so the Codex turn was cancelled.",
-    status: 499,
-    errorType: "client_closed_request",
-    code: "client_cancelled",
-    retryable: false,
+    message: cancellation.message,
+    status: cancellation.status,
+    errorType: cancellation.errorType,
+    code: cancellation.code,
+    retryable: cancellation.retryable,
   };
 }
 
@@ -57,9 +59,9 @@ const server = Bun.serve({
     }
     return Response.json({
       error: {
-        type: "client_closed_request",
-        code: "client_cancelled",
-        message: "The ChatGPT browser tab was closed, so the Codex turn was cancelled.",
+        type: cancellation.errorType,
+        code: cancellation.code,
+        message: cancellation.message,
       },
     }, { status: 400 });
   },

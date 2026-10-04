@@ -4343,7 +4343,9 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(events.at(-1)).toMatchObject({
         type: "error",
         code: timedOut ? "codex_tool_timeout" : "chatgpt_submitted_turn_failed",
-        ...(timedOut ? { message: expect.stringContaining("Conversation interrupted: tool timeout") } : {}),
+        message: expect.stringContaining(timedOut
+          ? "Conversation interrupted: tool timeout"
+          : "Conversation interrupted: turn failed after submission"),
       });
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
