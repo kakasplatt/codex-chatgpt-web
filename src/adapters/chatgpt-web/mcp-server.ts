@@ -45,7 +45,8 @@ const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
 const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly ${CHATGPT_WEB_AGENT_WAIT_POLL_MS / 1_000} seconds per call, matching the Codex default, then release the MCP channel so spawned Web agents can use their own tools. A wait timeout is not task completion; check agent progress and wait again if needed. Keep the native tool's declared arguments.`;
-const AGENT_CLOSE_ORCHESTRATION_RULE = "ChatGPT Web orchestration rule: do not call close_agent for a worker whose latest observed status is still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint with the available non-interrupting message or follow-up tool (send_input in Compatibility V1), then wait again. Close it only after a terminal status or explicit no-progress/stall evidence.";
+const AGENT_CLOSE_ORCHESTRATION_RULE = "ChatGPT Web orchestration rule: do not call close_agent for a worker whose latest observed status is still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint with the available non-interrupting message or follow-up tool (send_input in Compatibility V1), then wait again. The current native close schema exposes no verifiable stall-evidence field, so this bridge forwards structured close_agent only after a structured wait_agent result has returned that target in a terminal-status map. Raw exec close_agent is blocked because it cannot share that verified state.";
+const MAX_AGENT_TERMINAL_STATE_BINDINGS = 64;
 // Native command calls share a transport with the two-minute MCP tunnel. Keep each command/session
 // poll bounded so a long-running process yields a session_id instead of occupying the invocation
 // until the 90-second local deadline retires the whole turn binding.
@@ -179,6 +180,52 @@ function isAgentCloseTool(tool: CodexTool): boolean {
 
 function isGatewayAgentCloseTool(name: string): boolean {
   return GATEWAY_AGENT_CLOSE_TOOL_NAMES.has(name) || name.endsWith("__close_agent");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function terminalAgentIdsFromResult(value: unknown): string[] {
+  const ids = new Set<string>();
+  const inspect = (candidate: unknown, depth: number): void => {
+    if (depth > 6 || candidate === null || candidate === undefined) return;
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return;
+      try {
+        inspect(JSON.parse(trimmed), depth + 1);
+      } catch {
+        // Ordinary tool text is not structured status evidence.
+      }
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) inspect(item, depth + 1);
+      return;
+    }
+    if (!isRecord(candidate)) return;
+
+    for (const key of ["status", "statuses"] as const) {
+      const statuses = candidate[key];
+      if (!isRecord(statuses)) continue;
+      for (const agentId of Object.keys(statuses)) {
+        if (agentId.length > 0) ids.add(agentId);
+      }
+    }
+    if ("structuredContent" in candidate) inspect(candidate.structuredContent, depth + 1);
+    if ("content" in candidate) inspect(candidate.content, depth + 1);
+    if (candidate.type === "text" && typeof candidate.text === "string") {
+      inspect(candidate.text, depth + 1);
+    }
+  };
+  inspect(value, 0);
+  return [...ids];
+}
+
+function closeAgentTarget(argumentsValue: Record<string, unknown>): string | undefined {
+  const target = argumentsValue.target;
+  return typeof target === "string" && target.length > 0 ? target : undefined;
 }
 
 function browserToolDescription(tool: CodexTool): string {
@@ -407,8 +454,8 @@ function execGatewayProgram(
 
 /**
  * Preserve the native freeform exec surface while applying the same wait_agent deadline contract
- * as direct calls. The model still owns its JavaScript; only the tool registry it receives is a
- * transparent proxy whose native wait functions validate their transport-bound argument before dispatch.
+ * as direct calls. Raw exec cannot persist verified terminal-agent state across MCP calls, so it
+ * also blocks close_agent rather than providing an escape hatch around the structured close guard.
  */
 function transportBoundRawExecProgram(input: string, blockedExecName: string): string {
   return [
@@ -417,6 +464,7 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
     "})((() => {",
     "  const source = tools;",
     `  const waitNames = new Set(${JSON.stringify([...GATEWAY_AGENT_WAIT_TOOL_NAMES])});`,
+    `  const closeNames = new Set(${JSON.stringify([...GATEWAY_AGENT_CLOSE_TOOL_NAMES])});`,
     `  const blockedExecName = ${JSON.stringify(blockedExecName)};`,
     `  const pollMs = ${CHATGPT_WEB_AGENT_WAIT_POLL_MS};`,
     "  const registryNames = new Set(Reflect.ownKeys(source));",
@@ -430,6 +478,8 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
     "    let exposed = value;",
     "    if (typeof value === \"function\" && name === blockedExecName) {",
     "      exposed = () => { throw new Error(\"Nested raw exec is unavailable inside ChatGPT Web exec\"); };",
+    "    } else if (typeof value === \"function\" && typeof name === \"string\" && (closeNames.has(name) || name.endsWith(\"__close_agent\"))) {",
+    "      exposed = () => { throw new Error(\"ChatGPT Web close_agent requires structured terminal-state verification and is unavailable inside raw exec\"); };",
     "    } else if (typeof value === \"function\" && typeof name === \"string\" && waitNames.has(name)) {",
     "      exposed = args => {",
     "        if (!args || typeof args !== \"object\" || Array.isArray(args) || args.timeout_ms !== pollMs) {",
@@ -496,6 +546,59 @@ export async function runChatGptMcpServer(options: {
     { name: contract === "safe" ? "codex-safe" : "codex-native", version: VERSION },
     contract === "safe" ? { instructions: ZERO_RISK_MCP_INSTRUCTIONS } : undefined,
   );
+  const terminalAgentsByBinding = new Map<string, Set<string>>();
+
+  const terminalAgentsForBinding = (bindingId: string): Set<string> => {
+    const existing = terminalAgentsByBinding.get(bindingId);
+    if (existing) return existing;
+    if (terminalAgentsByBinding.size >= MAX_AGENT_TERMINAL_STATE_BINDINGS) {
+      const oldestBinding = terminalAgentsByBinding.keys().next().value;
+      if (typeof oldestBinding === "string") terminalAgentsByBinding.delete(oldestBinding);
+    }
+    const created = new Set<string>();
+    terminalAgentsByBinding.set(bindingId, created);
+    return created;
+  };
+
+  const rememberTerminalAgents = (bindingId: string, toolResult: unknown): void => {
+    const terminalAgentIds = terminalAgentIdsFromResult(toolResult);
+    if (terminalAgentIds.length === 0) return;
+    const state = terminalAgentsForBinding(bindingId);
+    for (const agentId of terminalAgentIds) state.add(agentId);
+  };
+
+  const consumeAgentCloseAuthorization = (
+    bindingId: string,
+    toolName: string,
+    invocationArguments: Record<string, unknown>,
+  ): string | undefined => {
+    if (!isGatewayAgentCloseTool(toolName)) return undefined;
+    const target = closeAgentTarget(invocationArguments);
+    if (!target) {
+      throw new Error("ChatGPT Web close_agent requires a non-empty target for terminal-state verification");
+    }
+    const terminalAgents = terminalAgentsByBinding.get(bindingId);
+    if (!terminalAgents?.has(target)) {
+      throw new Error(
+        "ChatGPT Web close_agent requires an observed terminal status for the target in this turn. "
+        + "A wait timeout or empty status is not stall evidence; request a checkpoint if useful and wait again.",
+      );
+    }
+    // Consume before dispatch so concurrent close attempts cannot reuse the same terminal observation.
+    terminalAgents.delete(target);
+    return target;
+  };
+
+  const recordAgentLifecycleResult = (
+    bindingId: string,
+    toolName: string,
+    toolResult: { structuredContent?: unknown; content?: unknown[]; isError?: boolean },
+  ): void => {
+    if (toolResult.isError) return;
+    if (isGatewayAgentWaitTool(toolName)) {
+      rememberTerminalAgents(bindingId, toolResult);
+    }
+  };
 
   const claimTurn = async (
     toolName: string,
@@ -980,11 +1083,15 @@ export async function runChatGptMcpServer(options: {
           }
           const invocationArguments = args ?? {};
           assertGatewayToolArguments(wire_name, invocationArguments);
-          return invoke(claimed.bindingId, bound, gateway, {
+          const closeTarget = consumeAgentCloseAuthorization(claimed.bindingId, wire_name, invocationArguments);
+          const response = await invoke(claimed.bindingId, bound, gateway, {
             input: execGatewayProgram(wire_name, input !== undefined, {
               ...(input !== undefined ? { input } : { arguments: invocationArguments }),
             }, bound.tools.map(wireName)),
           }, extra.signal);
+          recordAgentLifecycleResult(claimed.bindingId, wire_name, response);
+          if (closeTarget && response.isError) terminalAgentsForBinding(claimed.bindingId).add(closeTarget);
+          return response;
         }
         if (tool.freeform) {
           if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
@@ -996,7 +1103,11 @@ export async function runChatGptMcpServer(options: {
         if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
         const invocationArguments = args ?? {};
         assertBrowserToolArguments(tool, invocationArguments);
-        return invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
+        const closeTarget = consumeAgentCloseAuthorization(claimed.bindingId, wire_name, invocationArguments);
+        const response = await invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
+        recordAgentLifecycleResult(claimed.bindingId, wire_name, response);
+        if (closeTarget && response.isError) terminalAgentsForBinding(claimed.bindingId).add(closeTarget);
+        return response;
       });
     },
   );

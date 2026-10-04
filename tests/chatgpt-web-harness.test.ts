@@ -3247,6 +3247,173 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   }, 30_000);
 
+  test("close_agent requires observed terminal status and raw exec cannot bypass the guard", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-agent-close-guard-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    environment.tools = [
+      { name: "exec", description: "Run nested Codex tools", parameters: {}, freeform: true },
+      {
+        name: "wait_agent", namespace: "multi_agent_v1", description: "Wait for agents to reach a final status.",
+        parameters: {
+          type: "object", additionalProperties: false,
+          properties: {
+            targets: { type: "array", items: { type: "string" } },
+            timeout_ms: { type: "number" },
+          },
+          required: ["targets", "timeout_ms"],
+        },
+      },
+      {
+        name: "close_agent", namespace: "multi_agent_v1", description: "Close an agent.",
+        parameters: {
+          type: "object", additionalProperties: false,
+          properties: { target: { type: "string" } }, required: ["target"],
+        },
+      },
+    ];
+    const token = await broker.register(environment, 60_000);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "codex-agent-close-guard-test", version: "1.0.0" });
+    const call = (wire_name: string, args: Record<string, unknown>) => client.callTool({
+      name: "codex_tool_call",
+      arguments: { turn_token: token, wire_name, arguments: args },
+    });
+    const callExpectedLocalRejection = async (wire_name: string, args: Record<string, unknown>) => {
+      const response = await Promise.race([
+        call(wire_name, args),
+        new Promise<"dispatched">(resolve => setTimeout(() => resolve("dispatched"), 1_000)),
+      ]);
+      expect(response).not.toBe("dispatched");
+      return response as Awaited<ReturnType<typeof call>>;
+    };
+
+    try {
+      await client.connect(transport);
+
+      const closeWithoutTerminal = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_test" },
+      );
+      expect(closeWithoutTerminal).toMatchObject({ isError: true });
+      expect(JSON.stringify(closeWithoutTerminal)).toContain("terminal status");
+
+      const timedOutWait = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_test"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [timedOutWaitRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, timedOutWaitRequest!.callId, toolResult({ status: {}, timed_out: true }));
+      await timedOutWait;
+      const closeAfterTimeout = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_test" },
+      );
+      expect(closeAfterTimeout.isError).toBe(true);
+      expect(JSON.stringify(closeAfterTimeout.content)).toContain("terminal status");
+
+      const terminalWait = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_test"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [terminalWaitRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, terminalWaitRequest!.callId, toolResult({
+        status: { agent_test: { completed: "done" } }, timed_out: false,
+      }));
+      await terminalWait;
+
+      const allowedClose = call("multi_agent_v1__close_agent", { target: "agent_test" });
+      const [closeRequest] = await broker.nextToolBatch(token);
+      expect(closeRequest).toMatchObject({
+        wireName: "multi_agent_v1__close_agent",
+        arguments: { target: "agent_test" },
+      });
+      broker.completeTool(token, closeRequest!.callId, toolResult({ status: "closed" }));
+      expect((await allowedClose).isError).not.toBe(true);
+
+      const repeatedClose = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_test" },
+      );
+      expect(repeatedClose.isError).toBe(true);
+      expect(JSON.stringify(repeatedClose.content)).toContain("terminal status");
+
+      const deferredCloseWithoutTerminal = await callExpectedLocalRejection(
+        "multi_agent_v2__close_agent",
+        { target: "agent_v2" },
+      );
+      expect(deferredCloseWithoutTerminal.isError).toBe(true);
+      expect(JSON.stringify(deferredCloseWithoutTerminal.content)).toContain("terminal status");
+
+      const deferredTerminalWait = call("multi_agent_v2__wait_agent", {
+        targets: [{ agent_id: "agent_v2" }], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [deferredTerminalWaitRequest] = await broker.nextToolBatch(token);
+      const deferredWaitCalls: GatewayProgramCall[] = [];
+      await executeGatewayProgram(
+        deferredTerminalWaitRequest!.input!,
+        ["multi_agent_v2__wait_agent"],
+        deferredWaitCalls,
+      );
+      expect(deferredWaitCalls).toEqual([{
+        name: "multi_agent_v2__wait_agent",
+        input: { targets: [{ agent_id: "agent_v2" }], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS },
+      }]);
+      broker.completeTool(token, deferredTerminalWaitRequest!.callId, {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ statuses: { agent_v2: { completed: "done" } }, timed_out: false }),
+        }],
+      });
+      await deferredTerminalWait;
+
+      const deferredAllowedClose = call("multi_agent_v2__close_agent", { target: "agent_v2" });
+      const [deferredCloseRequest] = await broker.nextToolBatch(token);
+      const deferredCloseCalls: GatewayProgramCall[] = [];
+      await executeGatewayProgram(
+        deferredCloseRequest!.input!,
+        ["multi_agent_v2__close_agent"],
+        deferredCloseCalls,
+      );
+      expect(deferredCloseCalls).toEqual([{
+        name: "multi_agent_v2__close_agent",
+        input: { target: "agent_v2" },
+      }]);
+      broker.completeTool(token, deferredCloseRequest!.callId, toolResult({ status: "closed" }));
+      expect((await deferredAllowedClose).isError).not.toBe(true);
+
+      const rawClose = client.callTool({
+        name: "codex_tool_call",
+        arguments: {
+          turn_token: token,
+          wire_name: "exec",
+          input: "await tools.multi_agent_v1__close_agent({ target: 'agent_test' });",
+        },
+      });
+      const [rawCloseRequest] = await broker.nextToolBatch(token);
+      const nestedCalls: GatewayProgramCall[] = [];
+      await expect(executeGatewayProgram(
+        rawCloseRequest!.input!,
+        ["multi_agent_v1__close_agent"],
+        nestedCalls,
+        true,
+      )).rejects.toThrow("close_agent");
+      expect(nestedCalls).toEqual([]);
+      broker.completeTool(token, rawCloseRequest!.callId, {
+        content: [{ type: "text", text: "close_agent requires structured terminal-state verification" }],
+        isError: true,
+      });
+      expect((await rawClose).isError).toBe(true);
+    } finally {
+      await client.close().catch(() => {});
+      broker.revoke(token);
+      await broker.close();
+    }
+  }, 10_000);
+
   test("dedicated commands preserve native approval requests and reject unsupported permission fields", async () => {
     const socketPath = brokerTestEndpoint(`cgw-permissions-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
