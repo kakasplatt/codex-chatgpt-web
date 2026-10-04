@@ -876,7 +876,7 @@ export async function runChatGptMcpServer(options: {
           tool: toolName,
           timeout_ms: timeoutMs,
           retryable: false,
-          message: `Codex tool ${toolName} did not complete before the MCP transport deadline. The current turn binding was retired; do not retry it in this ChatGPT response.`,
+          message: `Conversation interrupted: tool timeout. Codex tool ${toolName} did not complete before the MCP transport deadline. The current turn binding was retired; do not retry it in this ChatGPT response.`,
         }, true);
       }
       throw error;

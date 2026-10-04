@@ -390,7 +390,7 @@ describe("ChatGPT outer-native harness v4", () => {
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
-      const commentary = "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.";
+      const commentary = "Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.";
       const answer = "Browser turn completed.";
       turn.onCommentary?.(commentary);
       turn.onTextDelta(answer);
@@ -408,11 +408,11 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(events.filter(
         event => event.type === "text_delta"
           && event.phase === "commentary"
-          && event.text === "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+          && event.text === "Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.",
       )).toEqual([{
         type: "text_delta",
         phase: "commentary",
-        text: "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+        text: "Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.",
       }]);
       expect(events.filter(
         event => event.type === "text_delta" && event.phase === "final_answer",
@@ -4343,6 +4343,9 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(events.at(-1)).toMatchObject({
         type: "error",
         code: timedOut ? "codex_tool_timeout" : "chatgpt_submitted_turn_failed",
+        message: expect.stringContaining(timedOut
+          ? "Conversation interrupted: tool timeout"
+          : "Conversation interrupted: turn failed after submission"),
       });
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;

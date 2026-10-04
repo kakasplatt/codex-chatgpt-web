@@ -34,7 +34,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       turn.onSubmitted();
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
-      turn.onCommentary?.("ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.");
+      turn.onCommentary?.("Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.");
       turn.onTextDelta("done");
       if (turn.captureLunaCheckpoint) turn.onLunaCheckpoint({
         answerHash: "a".repeat(64),
@@ -122,7 +122,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       { text: " files", continuation: true },
     ]);
     expect(commentary).toEqual([
-      "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.",
+      "Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.",
     ]);
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);

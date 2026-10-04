@@ -1748,12 +1748,12 @@ function formatChatGptBrowserUiHealthStatus(
   transition: ChatGptBrowserUiHealthTransition,
 ): string {
   if (transition.current === "degraded") {
-    return "ChatGPT browser UI is degraded; Codex/MCP activity may still be running.";
+    return "Browser UI degraded (non-terminal): Codex/MCP activity may still be running.";
   }
   if (transition.current === "unresponsive") {
-    return "ChatGPT browser UI is unresponsive; Codex/MCP activity may still be running.";
+    return "Browser UI unresponsive (non-terminal): Codex/MCP activity may still be running.";
   }
-  return "ChatGPT browser UI became responsive again.";
+  return "Browser UI responsive again.";
 }
 
 export class ChatGptBrowserUiHealthTracker {
