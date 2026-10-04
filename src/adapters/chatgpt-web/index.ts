@@ -498,6 +498,7 @@ export function createChatGptWebAdapter(
           input,
           turnCapabilities,
           experimentalSkillAttachments,
+          shouldCaptureFullCheckpoint,
         );
         return {
           experimentalMultipartMode: "full" as const,

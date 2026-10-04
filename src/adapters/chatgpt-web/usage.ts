@@ -149,6 +149,7 @@ export function resolveFullContextMultipartPlan(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   experimentalSkillAttachments = false,
+  includeFullCheckpoint = false,
 ): ChatGptWebMultipartPartCount | undefined {
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
     throw new Error("Full Context is unavailable for ChatGPT Zero Risk");
@@ -169,6 +170,7 @@ export function resolveFullContextMultipartPlan(
       experimentalMultipartParts: parts,
       experimentalMultipartMode: "full",
       experimentalSkillAttachments,
+      captureCheckpoint: includeFullCheckpoint ? "full" : undefined,
     },
   );
 

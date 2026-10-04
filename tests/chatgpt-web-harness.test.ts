@@ -4157,6 +4157,84 @@ describe("adapter liveness covers every path through a turn", () => {
     expect(heartbeats.at(-1)).toBeGreaterThan(heartbeats[0]!);
   }, 40_000);
 
+  test("Full Context physical preparation includes checkpoint overhead when choosing multipart parts", async () => {
+    const checkpointPath = join(tempRoot, `full-context-checkpoint-overhead-${process.pid}-${Date.now()}.json`);
+    const plusCapabilities = {
+      localToolsEnabled: false,
+      solAvailable: true,
+      extraHighAvailable: false,
+      proAvailable: false,
+    };
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-full-context-checkpoint-overhead-${Date.now()}`,
+      chatgptWeb: {
+        ...plusCapabilities,
+        experimentalFullContext: true,
+        fullContextCheckpointStatePath: checkpointPath,
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let preparedPartCount: number | undefined;
+    let checkpointMode: BrowserTurn["checkpointCapture"] extends infer T
+      ? T extends { mode: infer M } ? M : undefined
+      : undefined;
+
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      checkpointMode = turn.checkpointCapture?.mode;
+      const prepared = await turn.prepare();
+      preparedPartCount = prepared.multipart?.parts.length;
+      prepared.release();
+      turn.onTextDelta("Boundary answer");
+      return "Boundary answer";
+    };
+
+    const req = parsed();
+    const threadId = `thread_fc_boundary_${Date.now()}`;
+    const turnId = "turn_fc_boundary";
+    req.context.tools = undefined;
+    req.context.messages = [
+      { role: "user", content: "intro ".repeat(1_000), timestamp: 1 },
+      { role: "user", content: "word ".repeat(80_600), timestamp: 2 },
+    ];
+    req._rawBody = {
+      model: CHATGPT_WEB_MODEL_ID,
+      prompt_cache_key: threadId,
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: turnId }),
+      },
+      input: req.context.messages.map(message => ({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message.content as string }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      })),
+    };
+
+    const events: AdapterEvent[] = [];
+    try {
+      const expectedCanonicalInputTokens = estimateChatGptWebUsage(
+        req,
+        { answer: "Boundary answer", reasoning: [] },
+        plusCapabilities,
+        false,
+        false,
+        true,
+      ).inputTokens;
+
+      const adapter = createChatGptWebAdapter(provider);
+      await adapter.runTurn!(req, { headers: new Headers() }, event => events.push(event));
+
+      expect(checkpointMode).toBe("full");
+      expect(preparedPartCount).toBe(3);
+      const done = events.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(done.usage!.inputTokens).toBe(expectedCanonicalInputTokens);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
+  }, 30_000);
+
   test("Full Context integrates canonical, retained-resume, and recovery input selection with canonical usage accounting", async () => {
     const socketPath = brokerTestEndpoint(`cgw-full-selection-${process.pid}-${Date.now()}`);
     const checkpointPath = join(tempRoot, `full-context-selection-${process.pid}-${Date.now()}.json`);

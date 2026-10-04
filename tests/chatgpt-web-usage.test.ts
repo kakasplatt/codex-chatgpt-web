@@ -124,6 +124,7 @@ test("Full Context planner evaluates inline first, selects smallest safe count u
     { role: "assistant", content: [{ type: "text", text: "word ".repeat(45_000) }], timestamp: 2 },
   ];
   expect(resolveFullContextMultipartPlan(moderate, plus)).toBe(2);
+  expect(resolveFullContextMultipartPlan(moderate, plus, false, true)).toBe(2);
 
   // 3. Payload requiring more than 6 but at most 12 parts
   const large = request("");
@@ -183,7 +184,74 @@ test("Full Context planner evaluates inline first, selects smallest safe count u
   const atomicTooManyChars = request("x".repeat(1_300_000));
   expect(() => resolveFullContextMultipartPlan(atomicTooManyChars, plus))
     .toThrow("The bridge will not split an individual Codex message or JSON record");
+
+  // 7. Checkpoint-aware planning fails before Send when 13 near-limit atomic records cannot fit through 12 parts.
+  const tooManyPhysicalParts = request("");
+  tooManyPhysicalParts.context.messages = Array.from({ length: 13 }, (_, i) => ({
+    role: "user" as const,
+    content: `chunk ${i}: ${"word ".repeat(79_000)}`,
+    timestamp: i + 1,
+  }));
+  expect(() => resolveFullContextMultipartPlan(tooManyPhysicalParts, plus, false, true))
+    .toThrow("maximum allowed 12 parts");
 }, 60_000);
+
+test("Full Context checkpoint overhead promotes a physical two-part plan to three parts", () => {
+  const plus = {
+    localToolsEnabled: false,
+    solAvailable: true,
+    extraHighAvailable: false,
+    proAvailable: false,
+  };
+  const parsed = request("");
+  const small = request("small inline request");
+  expect(resolveFullContextMultipartPlan(small, plus)).toBeUndefined();
+
+  parsed.context.messages = [
+    { role: "user", content: "intro ".repeat(1_000), timestamp: 1 },
+    { role: "user", content: "word ".repeat(80_600), timestamp: 2 },
+  ];
+
+  expect(resolveFullContextMultipartPlan(parsed, plus)).toBe(2);
+  const checkpointAwareParts = resolveFullContextMultipartPlan(parsed, plus, false, true);
+  expect(checkpointAwareParts).toBe(3);
+
+  const compiled = compileChatGptWebPrompt(parsed, plus, undefined, {
+    experimentalMultipartParts: checkpointAwareParts,
+    experimentalMultipartMode: "full",
+    captureCheckpoint: "full",
+  });
+  const messages = compiledChatGptWebMessages(compiled);
+  const tokens = messages.map(text => estimateTokens(text, parsed.modelId));
+  const chars = messages.map(text => text.length);
+  const maxStageMessageTokens = Math.max(...tokens.slice(0, -1));
+  const maxStageChars = Math.max(...chars.slice(0, -1));
+  const stage = resolveChatGptWebMultipartStagingMode(
+    parsed.modelId,
+    plus,
+    maxStageMessageTokens,
+    maxStageChars,
+  );
+
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId),
+    Math.max(...tokens),
+    parsed.modelId,
+    "high",
+    plus,
+    Math.max(...chars),
+    checkpointAwareParts!,
+    {
+      stagingEffort: stage.effort,
+      maxStageMessageTokens,
+      maxStageChars,
+      finalMessageTokens: tokens.at(-1)!,
+      finalMessageChars: chars.at(-1)!,
+      finalImageTokens: estimateChatGptWebImageTokens(compiled),
+    },
+    "full",
+  )).not.toThrow();
+}, 30_000);
 
 test("Full Context usage accounting always reports logical canonical tokens, ignoring smaller physical resume/recovery input", () => {
   const largeCanonical = request("word ".repeat(50_000));
