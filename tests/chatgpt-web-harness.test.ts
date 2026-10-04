@@ -23,7 +23,7 @@ import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, RemoteTurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
-import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
+import { CHATGPT_WEB_AGENT_WAIT_POLL_MS, CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -154,16 +154,23 @@ interface GatewayProgramCall {
 
 async function executeGatewayProgram(
   program: string,
-  availableToolNames: string[],
+  availableTools: Array<string | {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  }>,
   calls: GatewayProgramCall[],
   dynamicRegistry = false,
 ): Promise<Array<{ type: "text"; text: string }>> {
   const emitted: Array<{ type: "text"; text: string }> = [];
-  const implementations = Object.fromEntries(availableToolNames.map(name => [
-    name,
+  const registry = availableTools.map(tool => typeof tool === "string"
+    ? { name: tool, description: `${tool} test tool` }
+    : { description: `${tool.name} test tool`, ...tool });
+  const implementations = Object.fromEntries(registry.map(tool => [
+    tool.name,
     async (input: unknown) => {
-      calls.push({ name, input });
-      return { output: name, exit_code: 0 };
+      calls.push({ name: tool.name, input });
+      return { output: tool.name, exit_code: 0 };
     },
   ]));
   const nestedTools = dynamicRegistry
@@ -183,7 +190,7 @@ async function executeGatewayProgram(
   const ignoreOutput = (_value: unknown): void => {};
   await execute(
     nestedTools,
-    availableToolNames.map(name => ({ name, description: `${name} test tool` })),
+    registry,
     emitText,
     ignoreOutput,
     ignoreOutput,
@@ -2910,7 +2917,11 @@ describe("ChatGPT outer-native harness v4", () => {
         justification: "May the local fixture command run outside the sandbox?",
         prefix_rule: ["pwd"],
       })))).toBe(true);
-      expect(execRequests.some(request => request.input?.includes(JSON.stringify({ cmd: "git status --short", workdir: tempRoot })))).toBe(true);
+      expect(execRequests.some(request => request.input?.includes(JSON.stringify({
+        cmd: "git status --short",
+        workdir: tempRoot,
+        yield_time_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      })))).toBe(true);
       for (const request of execRequests) {
         expect(request.input).toContain("ALL_TOOLS");
         expect(request.input).toContain('"exec_command"');
@@ -3234,21 +3245,58 @@ describe("ChatGPT outer-native harness v4", () => {
           expect(response.content).toEqual([{ type: "text", text: "Native approval denied" }]);
         } finally { broker.revoke(token); }
       }
-      environment.tools = [{ name: "exec_command", description: "No escalation in this turn", parameters: {
-        type: "object", properties: { cmd: { type: "string" } }, additionalProperties: false,
+      for (const strictCommand of [
+        { name: "exec_command", commandKey: "cmd", pollingKey: "yield_time_ms" },
+        { name: "shell_command", commandKey: "command", pollingKey: "timeout_ms" },
+      ]) {
+        environment.tools = [{ name: strictCommand.name, description: "No escalation in this turn", parameters: {
+          type: "object", properties: { [strictCommand.commandKey]: { type: "string" } }, additionalProperties: false,
+        } }];
+        const token = await broker.register(environment, 60_000);
+        try {
+          const refused = await client.callTool({ name: "codex_exec", arguments: { turn_token: token, cmd: "pwd", ...permissions } });
+          expect(refused.isError).toBe(true);
+          expect(JSON.stringify(refused.content)).toContain("does not support sandbox_permissions");
+          const ordinaryCall = client.callTool({ name: "codex_exec", arguments: { turn_token: token, cmd: "pwd" } });
+          const ordinaryOutcome = await Promise.race([
+            ordinaryCall.then(response => ({ response })),
+            broker.nextToolBatch(token).then(batch => ({ batch })),
+          ]);
+          if ("batch" in ordinaryOutcome) {
+            for (const request of ordinaryOutcome.batch) {
+              broker.completeTool(token, request.callId, toolResult({ output: "fixture", exit_code: 0 }));
+            }
+          }
+          const ordinary = "response" in ordinaryOutcome ? ordinaryOutcome.response : await ordinaryCall;
+          expect(ordinary.isError).toBe(true);
+          expect(JSON.stringify(ordinary.content)).toContain(
+            `does not support ${strictCommand.pollingKey} required for bounded command polling`,
+          );
+        } finally { broker.revoke(token); }
+      }
+
+      environment.tools = [{ name: "write_stdin", description: "No bounded polling in this turn", parameters: {
+        type: "object", properties: { session_id: { type: "number" } }, additionalProperties: false,
       } }];
-      const token = await broker.register(environment, 60_000);
+      const writeToken = await broker.register(environment, 60_000);
       try {
-        const refused = await client.callTool({ name: "codex_exec", arguments: { turn_token: token, cmd: "pwd", ...permissions } });
+        const refusedCall = client.callTool({
+          name: "codex_write_stdin",
+          arguments: { turn_token: writeToken, session_id: 42, yield_time_ms: 1_000 },
+        });
+        const refusedOutcome = await Promise.race([
+          refusedCall.then(response => ({ response })),
+          broker.nextToolBatch(writeToken).then(batch => ({ batch })),
+        ]);
+        if ("batch" in refusedOutcome) {
+          for (const request of refusedOutcome.batch) {
+            broker.completeTool(writeToken, request.callId, toolResult({ output: "fixture", session_id: 42 }));
+          }
+        }
+        const refused = "response" in refusedOutcome ? refusedOutcome.response : await refusedCall;
         expect(refused.isError).toBe(true);
-        expect(JSON.stringify(refused.content)).toContain("does not support sandbox_permissions");
-        const ordinary = client.callTool({ name: "codex_exec", arguments: { turn_token: token, cmd: "pwd" } });
-        const batch = await broker.nextToolBatch(token);
-        for (const request of batch) broker.completeTool(token, request.callId, toolResult({ output: "fixture", exit_code: 0 }));
-        await ordinary;
-        expect(batch).toHaveLength(1);
-        expect(batch[0]!.arguments).toEqual({ cmd: "pwd" });
-      } finally { broker.revoke(token); }
+        expect(JSON.stringify(refused.content)).toContain("does not support yield_time_ms required for bounded command polling");
+      } finally { broker.revoke(writeToken); }
     } finally {
       await client.close();
       await broker.close();
@@ -3336,6 +3384,23 @@ describe("ChatGPT outer-native harness v4", () => {
       }));
       broker.completeTool(token, writeRequest!.callId, toolResult({ output: "continued" }));
       expect((await write).structuredContent).toEqual({ output: "continued" });
+
+      const longWrite = call("codex_write_stdin", {
+        turn_token: token,
+        session_id: 42,
+        yield_time_ms: 300_000,
+      });
+      const [longWriteRequest] = await broker.nextToolBatch(token);
+      expect(longWriteRequest).toEqual(expect.objectContaining({
+        wireName: "write_stdin",
+        freeform: false,
+        arguments: {
+          session_id: 42,
+          yield_time_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+        },
+      }));
+      broker.completeTool(token, longWriteRequest!.callId, toolResult({ output: "still running", session_id: 42 }));
+      expect((await longWrite).structuredContent).toMatchObject({ session_id: 42 });
 
       const patch = "*** Begin Patch\n*** Add File: direct-token.txt\n+ok\n*** End Patch";
       const apply = call("codex_apply_patch", { turn_token: token, patch });
@@ -3471,7 +3536,38 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(execRequest?.input).toContain("ALL_TOOLS");
       expect(execRequest?.input).toContain('"exec_command"');
       expect(execRequest?.input).toContain('"shell_command"');
-      expect(execRequest?.input).toContain(JSON.stringify({ cmd: "pwd", workdir: tempRoot }));
+      expect(execRequest?.input).toContain(JSON.stringify({
+        cmd: "pwd",
+        workdir: tempRoot,
+        yield_time_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      }));
+
+      const strictExecCalls: GatewayProgramCall[] = [];
+      await expect(executeGatewayProgram(execRequest!.input!, [{
+        name: "exec_command",
+        parameters: {
+          type: "object",
+          properties: { cmd: { type: "string" }, workdir: { type: "string" } },
+          additionalProperties: false,
+        },
+      }], strictExecCalls)).rejects.toThrow(
+        "Native command tool exec_command does not support yield_time_ms required for bounded command polling",
+      );
+      expect(strictExecCalls).toEqual([]);
+
+      const strictShellCalls: GatewayProgramCall[] = [];
+      await expect(executeGatewayProgram(execRequest!.input!, [{
+        name: "shell_command",
+        parameters: {
+          type: "object",
+          properties: { command: { type: "string" }, workdir: { type: "string" } },
+          additionalProperties: false,
+        },
+      }], strictShellCalls)).rejects.toThrow(
+        "Native command tool shell_command does not support timeout_ms required for bounded command polling",
+      );
+      expect(strictShellCalls).toEqual([]);
+
       broker.completeTool(token, execRequest!.callId, toolResult({ output: tempRoot, exit_code: 0 }));
       expect((await execPromise).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
     } finally {

@@ -39,6 +39,10 @@ const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
 const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly ${CHATGPT_WEB_AGENT_WAIT_POLL_MS / 1_000} seconds per call, matching the Codex default, then release the MCP channel so spawned Web agents can use their own tools. A wait timeout is not task completion; check agent progress and wait again if needed. Keep the native tool's declared arguments.`;
+// Native command calls share a transport with the two-minute MCP tunnel. Keep each command/session
+// poll bounded so a long-running process yields a session_id instead of occupying the invocation
+// until the 90-second local deadline retires the whole turn binding.
+const CHATGPT_WEB_NATIVE_COMMAND_POLL_MS = 30_000;
 // The OpenAI tunnel currently owns a two-minute command-response deadline. The local MCP server
 // must settle first so an abandoned native tool call is returned as an MCP error instead of
 // letting the tunnel tear down and poison its long-lived stdio transport.
@@ -117,6 +121,22 @@ function wireName(tool: CodexTool): string {
 
 function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool | undefined {
   return environment.tools.find(tool => !tool.namespace && tool.name === name);
+}
+
+function toolAcceptsArgument(tool: CodexTool, name: string): boolean {
+  const properties = tool.parameters.properties;
+  return (properties !== undefined
+      && properties !== null
+      && typeof properties === "object"
+      && !Array.isArray(properties)
+      && Object.hasOwn(properties, name))
+    || tool.parameters.additionalProperties !== false;
+}
+
+function assertToolSupportsBoundedCommandPolling(tool: CodexTool, argumentName: string): void {
+  if (!toolAcceptsArgument(tool, argumentName)) {
+    throw new Error(`The current native ${tool.name} tool does not support ${argumentName} required for bounded command polling`);
+  }
 }
 
 function gatewayToolNameIsValid(name: string): boolean {
@@ -431,10 +451,16 @@ function execCommandGatewayProgram(
   const shellCommandName = gatewayNestedToolName("shell_command");
   return execGatewayResultProgram([
     "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native command tool registry is unavailable\");",
-    "const nativeCommandNames = new Set(ALL_TOOLS.map(tool => tool?.name));",
-    `const nativeCommandCandidates = ${JSON.stringify([execCommandName, shellCommandName])}.filter(name => nativeCommandNames.has(name));`,
+    `const nativeCommandCandidates = ALL_TOOLS.filter(tool => ${JSON.stringify([execCommandName, shellCommandName])}.includes(tool?.name));`,
     "if (nativeCommandCandidates.length !== 1) throw new Error(\"Expected exactly one native command tool; found \" + (nativeCommandCandidates.join(\", \") || \"none\"));",
-    "const nativeCommandName = nativeCommandCandidates[0];",
+    "const nativeCommandTool = nativeCommandCandidates[0];",
+    "const nativeCommandName = nativeCommandTool.name;",
+    `const boundedPollingArgument = nativeCommandName === ${JSON.stringify(execCommandName)} ? "yield_time_ms" : "timeout_ms";`,
+    "const nativeCommandParameters = nativeCommandTool?.parameters;",
+    "const nativeCommandProperties = nativeCommandParameters?.properties;",
+    "if (nativeCommandParameters && typeof nativeCommandParameters === \"object\" && !Array.isArray(nativeCommandParameters) && nativeCommandParameters.additionalProperties === false && (!nativeCommandProperties || typeof nativeCommandProperties !== \"object\" || Array.isArray(nativeCommandProperties) || !Object.prototype.hasOwnProperty.call(nativeCommandProperties, boundedPollingArgument))) {",
+    "  throw new Error(\"Native command tool \" + nativeCommandName + \" does not support \" + boundedPollingArgument + \" required for bounded command polling\");",
+    "}",
     "const nativeCommand = tools[nativeCommandName];",
     "if (typeof nativeCommand !== \"function\") throw new Error(\"Native command tool \" + nativeCommandName + \" is listed but unavailable\");",
     `const nativeCommandInput = nativeCommandName === ${JSON.stringify(execCommandName)} ? ${JSON.stringify(execCommandArguments)} : ${JSON.stringify(shellCommandArguments)};`,
@@ -641,6 +667,8 @@ export async function runChatGptMcpServer(options: {
       async claimed => {
         const { cmd, workdir, yield_time_ms, max_output_tokens, tty, sandbox_permissions, justification, prefix_rule } = input;
         const bound = claimed.environment;
+        const commandYieldMs = Math.min(yield_time_ms ?? CHATGPT_WEB_NATIVE_COMMAND_POLL_MS, CHATGPT_WEB_NATIVE_COMMAND_POLL_MS);
+        const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
         const permissions = {
           ...(sandbox_permissions !== undefined ? { sandbox_permissions } : {}),
           ...(justification !== undefined ? { justification } : {}),
@@ -649,7 +677,7 @@ export async function runChatGptMcpServer(options: {
         const execCommandArguments = {
           cmd,
           ...(workdir ? { workdir } : {}),
-          ...(yield_time_ms !== undefined ? { yield_time_ms } : {}),
+          yield_time_ms: commandYieldMs,
           ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
           ...(tty !== undefined ? { tty } : {}),
           ...permissions,
@@ -657,10 +685,9 @@ export async function runChatGptMcpServer(options: {
         const shellCommandArguments = {
           command: cmd,
           ...(workdir ? { workdir } : {}),
-          ...(yield_time_ms !== undefined ? { timeout_ms: yield_time_ms } : {}),
+          timeout_ms: commandYieldMs,
           ...permissions,
         };
-        const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
         if (tool) {
           // Never silently discard an approval request on a native registry that cannot express it.
           const properties = tool.parameters.properties;
@@ -669,6 +696,10 @@ export async function runChatGptMcpServer(options: {
               throw new Error(`The current native ${tool.name} tool does not support ${key}`);
             }
           }
+          assertToolSupportsBoundedCommandPolling(
+            tool,
+            tool.name === "exec_command" ? "yield_time_ms" : "timeout_ms",
+          );
           const args = tool.name === "exec_command" ? execCommandArguments : shellCommandArguments;
           return invoke(claimed.bindingId, bound, tool, { arguments: args }, extra.signal);
         }
@@ -704,11 +735,13 @@ export async function runChatGptMcpServer(options: {
       async claimed => {
         const { session_id, chars, yield_time_ms, max_output_tokens } = input;
         const bound = claimed.environment;
+        const commandYieldMs = Math.min(yield_time_ms ?? CHATGPT_WEB_NATIVE_COMMAND_POLL_MS, CHATGPT_WEB_NATIVE_COMMAND_POLL_MS);
         const tool = exactTool(bound, "write_stdin");
+        if (tool) assertToolSupportsBoundedCommandPolling(tool, "yield_time_ms");
         const payload = { arguments: {
           session_id,
           ...(chars !== undefined ? { chars } : {}),
-          ...(yield_time_ms !== undefined ? { yield_time_ms } : {}),
+          yield_time_ms: commandYieldMs,
           ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
         } };
         return tool

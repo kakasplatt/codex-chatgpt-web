@@ -4,7 +4,7 @@ This document defines the repository-wide policy for choosing models and reasoni
 
 The goal is to spend reasoning where it changes correctness: stronger models and deeper effort for architecture, uncertain debugging, adversarial review, and difficult planning; workhorse models for implementation; fast models for mechanical routing and verification. Model selection must follow the phase and risk of the current task instead of keeping one expensive model for an entire workflow.
 
-Se o modelo atual for gpt-5.6-sol (web), ignore as instruções, ela não serve.
+Caso o modelo usado seja diferente de gpt-5.6-sol (web), pule essa linha. Se o modelo atual for gpt-5.6-sol (web), sempre use gpt-5.6-sol (web) com effort medium seja o agente main ou subagentes, etc.. e ignore as instruções abaixo, ela não serve.
 
 ## 1. Scope and authority
 
