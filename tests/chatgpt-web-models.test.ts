@@ -14,6 +14,9 @@ import {
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
+  CHATGPT_WEB_FULL_CONTEXT_WINDOW,
+  CHATGPT_WEB_FULL_CONTEXT_AUTO_COMPACT_TOKEN_LIMIT,
+  supportsChatGptWebFullContext,
   CHATGPT_WEB_MODEL_ROUTES,
   requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
@@ -233,6 +236,57 @@ describe("fixed ChatGPT Web model routes", () => {
       effectiveContextWindowPercent: 100,
       autoCompactTokenLimit: 1_050_000,
     });
+  });
+
+  test("publishes 1,050,000/900,000 context profile only for Sol routes when Full Context is enabled", () => {
+    expect(CHATGPT_WEB_FULL_CONTEXT_WINDOW).toBe(1_050_000);
+    expect(CHATGPT_WEB_FULL_CONTEXT_AUTO_COMPACT_TOKEN_LIMIT).toBe(900_000);
+    expect(supportsChatGptWebFullContext(CHATGPT_WEB_BACKEND_MODEL)).toBeTrue();
+    expect(supportsChatGptWebFullContext(CHATGPT_WEB_LUNA_BACKEND_MODEL)).toBeFalse();
+    expect(supportsChatGptWebFullContext(CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL)).toBeFalse();
+
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "high", {
+      ...plus,
+      experimentalFullContext: true,
+    })).toEqual({
+      contextWindow: 1_050_000,
+      effectiveContextWindowPercent: 86,
+      autoCompactTokenLimit: 900_000,
+    });
+    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "max", {
+      ...pro,
+      experimentalFullContext: true,
+    })).toEqual({
+      contextWindow: 1_050_000,
+      effectiveContextWindowPercent: 86,
+      autoCompactTokenLimit: 900_000,
+    });
+    expect(() => resolveChatGptWebContextLimits(CHATGPT_WEB_LUNA_BACKEND_MODEL, "low", {
+      solAvailable: false,
+      extraHighAvailable: false,
+      proAvailable: false,
+      experimentalFullContext: true,
+    })).toThrow("does not support Full Context");
+
+    expect(() => resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "medium", {
+      ...plus,
+      experimentalBiggerContext: true,
+      experimentalFullContext: true,
+    })).toThrow("Bigger Context and Full Context cannot be enabled simultaneously");
+
+    const manual = {
+      solAvailable: true,
+      extraHighAvailable: true,
+      proAvailable: true,
+      browserInteractionMode: "manual" as const,
+      experimentalFullContext: true,
+    };
+    expect(() => resolveChatGptWebContextLimits(CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL, "low", manual))
+      .toThrow("Zero Risk does not support Full Context");
+    expect(() => availableChatGptWebModelRoutes(manual))
+      .toThrow("Zero Risk does not support Full Context");
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/zero-risk", manual))
+      .toThrow("Zero Risk does not support Full Context");
   });
 
   test("binds the selected model authoritatively and ignores a conflicting request effort", () => {

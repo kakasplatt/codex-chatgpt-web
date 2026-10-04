@@ -111,6 +111,19 @@ describe("native /models augmentation", () => {
     expect(pro.auto_compact_token_limit).toBe(285_000);
   });
 
+  test("publishes Full Context limits in the Codex model catalog", () => {
+    const config = defaultConfig("full");
+    config.extraHighAvailable = true;
+    config.proAvailable = true;
+    config.experimentalFullContext = true;
+    const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
+    const sol = models.find(model => model.slug === "chatgpt-web/gpt-5.6-sol")!;
+    expect(sol.context_window).toBe(1_050_000);
+    expect(sol.max_context_window).toBe(1_050_000);
+    expect(sol.auto_compact_token_limit).toBe(900_000);
+    expect(sol.effective_context_window_percent).toBe(86);
+  });
+
   test("keeps native Sol selectable in the bounded Compatibility V1 registry", () => {
     const config = defaultConfig("full");
     config.subagentProtocol = "compatibility-v1";

@@ -262,6 +262,44 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
   await Promise.all([normal.close(), bigger.close(), luna.close()]);
 });
 
+test("Full Context expands the DEV compaction window to 900K and fails closed for Luna", async () => {
+  const root = scratch("cgw-dev-full-context");
+  const config = {
+    ...defaultConfig("browser-only"),
+    purpose: "dev-harness" as const,
+    solAvailable: true,
+    extraHighAvailable: true, proAvailable: true,
+  };
+  const factory = (): ProviderAdapter => ({
+    name: "dev-full-context-test",
+    async runTurn(_parsed, _incoming, emit) {
+      emit({ type: "text_delta", text: "unused", phase: "final_answer" });
+      emit({
+        type: "done", stopReason: "stop", endTurn: true,
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimated: true },
+      });
+    },
+  });
+  const store = new DevChatStore(join(root, "chats"));
+  const fullConfig = { ...config, experimentalFullContext: true };
+  const full = new DevChatDriver(fullConfig, store, factory, root, { biggerContext: false, fullContext: true });
+  const fullState = full.open("full-window", "chatgpt-web/high").state;
+  const fullStatus = full.status(fullState);
+  expect(fullStatus).toMatchObject({
+    autoCompactTokenLimit: 900_000,
+    contextWindow: 1_050_000,
+  });
+  expect(fullStatus.percent).toBe(Math.round((fullStatus.inputTokens / 900_000) * 1_000) / 10);
+  const luna = new DevChatDriver({
+    ...fullConfig,
+    solAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
+  }, store, factory, root, { biggerContext: false, fullContext: true });
+  expect(() => luna.open("luna-window", "chatgpt-web/luna")).toThrow("unavailable for Luna");
+  expect(() => luna.open("think-window", "chatgpt-web/think")).toThrow("unavailable for Luna");
+  await Promise.all([full.close(), luna.close()]);
+});
+
 test("browser-only DEV driver runs real turns without advertising simulated tools", async () => {
   const root = scratch("cgw-dev-browser-only");
   const config = {

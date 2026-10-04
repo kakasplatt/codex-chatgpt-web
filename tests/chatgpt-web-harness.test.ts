@@ -17,6 +17,7 @@ import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import {
   CODEX_ACTIVE_COMPACTION_REQUEST_MARKER,
 } from "../src/adapters/chatgpt-web/native-compaction-control";
+import { hashChatGptFullContextAnswer } from "../src/adapters/chatgpt-web/full-context-checkpoint";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/chatgpt-web/prompt";
 import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-policy";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
@@ -27,7 +28,7 @@ import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
-import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
+import type { AdapterEvent, CodexMessage, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
 const tempRoot = join(tmpdir(), `codex-chatgpt-web-harness-${process.pid}-${Date.now()}`);
 mkdirSync(tempRoot, { recursive: true });
@@ -4155,4 +4156,262 @@ describe("adapter liveness covers every path through a turn", () => {
     // Verify continued liveness, not millisecond-exact OS timer scheduling.
     expect(heartbeats.at(-1)).toBeGreaterThan(heartbeats[0]!);
   }, 40_000);
+
+  test("Full Context physical preparation includes checkpoint overhead when choosing multipart parts", async () => {
+    const checkpointPath = join(tempRoot, `full-context-checkpoint-overhead-${process.pid}-${Date.now()}.json`);
+    const plusCapabilities = {
+      localToolsEnabled: false,
+      solAvailable: true,
+      extraHighAvailable: false,
+      proAvailable: false,
+    };
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-full-context-checkpoint-overhead-${Date.now()}`,
+      chatgptWeb: {
+        ...plusCapabilities,
+        experimentalFullContext: true,
+        fullContextCheckpointStatePath: checkpointPath,
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let preparedPartCount: number | undefined;
+    let checkpointMode: BrowserTurn["checkpointCapture"] extends infer T
+      ? T extends { mode: infer M } ? M : undefined
+      : undefined;
+
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      checkpointMode = turn.checkpointCapture?.mode;
+      const prepared = await turn.prepare();
+      preparedPartCount = prepared.multipart?.parts.length;
+      prepared.release();
+      turn.onTextDelta("Boundary answer");
+      return "Boundary answer";
+    };
+
+    const req = parsed();
+    const threadId = `thread_fc_boundary_${Date.now()}`;
+    const turnId = "turn_fc_boundary";
+    req.context.tools = undefined;
+    req.context.messages = [
+      { role: "user", content: "intro ".repeat(1_000), timestamp: 1 },
+      { role: "user", content: "word ".repeat(80_600), timestamp: 2 },
+    ];
+    req._rawBody = {
+      model: CHATGPT_WEB_MODEL_ID,
+      prompt_cache_key: threadId,
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: turnId }),
+      },
+      input: req.context.messages.map(message => ({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message.content as string }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      })),
+    };
+
+    const events: AdapterEvent[] = [];
+    try {
+      const expectedCanonicalInputTokens = estimateChatGptWebUsage(
+        req,
+        { answer: "Boundary answer", reasoning: [] },
+        plusCapabilities,
+        false,
+        false,
+        true,
+      ).inputTokens;
+
+      const adapter = createChatGptWebAdapter(provider);
+      await adapter.runTurn!(req, { headers: new Headers() }, event => events.push(event));
+
+      expect(checkpointMode).toBe("full");
+      expect(preparedPartCount).toBe(3);
+      const done = events.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(done.usage!.inputTokens).toBe(expectedCanonicalInputTokens);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
+  }, 30_000);
+
+  test("Full Context integrates canonical, retained-resume, and recovery input selection with canonical usage accounting", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-full-selection-${process.pid}-${Date.now()}`);
+    const checkpointPath = join(tempRoot, `full-context-selection-${process.pid}-${Date.now()}.json`);
+    const descriptorPath = join(tempRoot, `full-context-launcher-${process.pid}-${Date.now()}.json`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-full-context-${Date.now()}`,
+      chatgptWeb: {
+        browserHost: "launcher",
+        browserHostDescriptorPath: descriptorPath,
+        brokerSocketPath: socketPath,
+        turnTimeoutMs: 30_000,
+        localToolsEnabled: true,
+        solAvailable: true,
+        extraHighAvailable: true,
+        proAvailable: true,
+        experimentalFullContext: true,
+        fullContextCheckpointStatePath: checkpointPath,
+      },
+    };
+
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let turnCount = 0;
+    let lastPreparedText = "";
+    let resumeWasCalled = false;
+    let freshWasCalled = false;
+    let simulateRetainedLoss = false;
+    let lastPreparedMultipartParts: readonly string[] | undefined;
+
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      turnCount += 1;
+      let prepared;
+      if (turn.prepareResume && !simulateRetainedLoss) {
+        resumeWasCalled = true;
+        prepared = await turn.prepareResume();
+      } else {
+        freshWasCalled = true;
+        prepared = await turn.prepare();
+      }
+      lastPreparedText = prepared.text;
+      lastPreparedMultipartParts = prepared.multipart?.parts;
+      prepared.release();
+
+      const answer = `Answer for turn ${turnCount}`;
+      turn.onTextDelta(answer);
+
+      if (turn.checkpointCapture?.mode === "full") {
+        turn.checkpointCapture.onCheckpoint({
+          answerHash: hashChatGptFullContextAnswer(answer),
+          checkpoint: {
+            version: 2,
+            summary: `Summary of turn ${turnCount}`,
+          },
+        });
+      }
+      return answer;
+    };
+
+    const adapter = createChatGptWebAdapter(provider);
+    try {
+      const threadId = `thread_fc_${Date.now()}`;
+
+      const buildRequest = (
+        turnId: string,
+        turns: Array<{ turnId: string; userText: string; assistantText?: string }>,
+        customThreadId = threadId,
+      ): CodexParsedRequest => {
+        const req = parsed();
+        req.modelId = CHATGPT_WEB_MODEL_ID;
+        const allMessages: Array<{ role: "user" | "assistant"; text: string; turnId: string }> = [];
+        for (const t of turns) {
+          allMessages.push({ role: "user", text: environmentXml, turnId: t.turnId });
+          allMessages.push({ role: "user", text: t.userText, turnId: t.turnId });
+          if (t.assistantText) {
+            allMessages.push({ role: "assistant", text: t.assistantText, turnId: t.turnId });
+          }
+        }
+        req._rawBody = {
+          model: CHATGPT_WEB_MODEL_ID,
+          prompt_cache_key: customThreadId,
+          client_metadata: {
+            "x-codex-turn-metadata": JSON.stringify({ thread_id: customThreadId, turn_id: turnId }),
+          },
+          input: allMessages.map(m => ({
+            type: "message",
+            role: m.role,
+            content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: m.text }],
+            internal_chat_message_metadata_passthrough: { turn_id: m.turnId },
+          })),
+        };
+        req.context.messages = allMessages.map((m, idx): CodexMessage => (
+          m.role === "assistant"
+            ? { role: "assistant", content: [{ type: "text", text: m.text }], timestamp: idx + 1 }
+            : { role: "user", content: m.text, timestamp: idx + 1 }
+        ));
+        return req;
+      };
+
+      // 1. Initial turn: fresh conversation requiring Full multipart
+      const turn1Req = buildRequest("turn_1", [
+        { turnId: "turn_1", userText: `Initial requirement part 1: ${"context ".repeat(45_000)}` },
+        { turnId: "turn_1", userText: `Initial requirement part 2: ${"context ".repeat(45_000)}` },
+      ]);
+      const turn1Events: AdapterEvent[] = [];
+      await adapter.runTurn!(turn1Req, { headers: new Headers() }, event => turn1Events.push(event));
+
+      expect(turnCount).toBe(1);
+      expect(freshWasCalled).toBe(true);
+      expect(lastPreparedMultipartParts).toBeDefined();
+      expect(lastPreparedMultipartParts?.join("\n")).toContain("Initial requirement part 1");
+      expect(lastPreparedText).toContain("CODEXFULLPRIVATECHECKPOINTV1A7F3C9D2");
+      const turn1Done = turn1Events.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(turn1Done.usage!.inputTokens).toBeGreaterThan(80_000);
+
+      // 2. Retained reuse: Turn 2 prepares ONLY the suffix and does not substitute a checkpoint
+      freshWasCalled = false;
+      resumeWasCalled = false;
+      const turn2Req = buildRequest("turn_2", [
+        { turnId: "turn_1", userText: `Initial requirement part 1: ${"context ".repeat(45_000)}` },
+        { turnId: "turn_1", userText: `Initial requirement part 2: ${"context ".repeat(45_000)}`, assistantText: "Answer for turn 1" },
+        { turnId: "turn_2", userText: "Turn 2 new suffix question" },
+      ]);
+      const turn2Events: AdapterEvent[] = [];
+      await adapter.runTurn!(turn2Req, { headers: new Headers() }, event => turn2Events.push(event));
+
+      expect(turnCount).toBe(2);
+      expect(resumeWasCalled).toBe(true);
+      expect(freshWasCalled).toBe(false);
+      expect(lastPreparedText).toContain("Turn 2 new suffix question");
+      expect(lastPreparedText).not.toContain("Initial requirement part 1");
+      expect(lastPreparedText).not.toContain("Summary of turn 1");
+      const turn2Done = turn2Events.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(turn2Done.usage!.inputTokens).toBeGreaterThan(80_000);
+
+      // 3. Retained loss: Turn 3 simulates retained conversation lost; fresh prepare() uses exact-parent recovery checkpoint
+      freshWasCalled = false;
+      resumeWasCalled = false;
+      simulateRetainedLoss = true;
+      const turn3Req = buildRequest("turn_3", [
+        { turnId: "turn_1", userText: `Initial requirement part 1: ${"context ".repeat(45_000)}` },
+        { turnId: "turn_1", userText: `Initial requirement part 2: ${"context ".repeat(45_000)}`, assistantText: "Answer for turn 1" },
+        { turnId: "turn_2", userText: "Turn 2 new suffix question", assistantText: "Answer for turn 2" },
+        { turnId: "turn_3", userText: "Turn 3 recovery question" },
+      ]);
+      const turn3Events: AdapterEvent[] = [];
+      await adapter.runTurn!(turn3Req, { headers: new Headers() }, event => turn3Events.push(event));
+
+      expect(turnCount).toBe(3);
+      expect(freshWasCalled).toBe(true);
+      expect(resumeWasCalled).toBe(false);
+      expect(lastPreparedText).toContain("[Compressed Full Context task history");
+      expect(lastPreparedText).toContain("Summary of turn 2");
+      expect(lastPreparedText).toContain("Turn 3 recovery question");
+      expect(lastPreparedText).not.toContain("Initial requirement part 1");
+      const turn3Done = turn3Events.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      expect(turn3Done.usage!.inputTokens).toBeGreaterThan(80_000);
+
+      // 4. Fresh conversation without checkpoint prepares canonical input
+      freshWasCalled = false;
+      resumeWasCalled = false;
+      simulateRetainedLoss = false;
+      const freshReq = buildRequest(
+        "turn_fresh",
+        [{ turnId: "turn_fresh", userText: "Fresh question without checkpoint" }],
+        `thread_fresh_${Date.now()}`,
+      );
+      const freshEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(freshReq, { headers: new Headers() }, event => freshEvents.push(event));
+
+      expect(turnCount).toBe(4);
+      expect(freshWasCalled).toBe(true);
+      expect(lastPreparedText).toContain("Fresh question without checkpoint");
+      expect(lastPreparedText).not.toContain("[Compressed Full Context task history");
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
 });

@@ -295,7 +295,7 @@ test.each([
       // Context ingestion cannot mistake tool activity for acknowledgement of a part.
       expect(args[4]).toBe(stage === "send" ? progress : undefined);
       const lifecycle = args[5] as { onSendActivated(): Promise<void>; onSubmitted?: () => void };
-      if (stage !== "send") expect(lifecycle.onSubmitted).toBeUndefined();
+      expect(typeof lifecycle.onSubmitted).toBe("function");
       await lifecycle.onSendActivated();
       if (cancellationCase || (sizeRejected && stage === "multipart_stage_2_send")) {
         // An observed size rejection must not replace the user's explicit tab-close verdict.
@@ -563,13 +563,20 @@ test("incident regression: degraded UI with active MCP followed by timed-out ret
     })).rejects.toThrow("compaction control token is invalid, expired, or consumed");
 
     // 8. The owned browser turn is retired within the cleanup deadline.
-    // Advance timer by cleanup deadline (15,000ms)
-    mock.timers.tick(15_000);
-    await Bun.sleep(0);
-
+    // Publishing the exact retirement owner is asynchronous. Give that real I/O/microtask
+    // handshake a chance to complete before advancing the fake cleanup deadline; otherwise the
+    // test races the retirement callback against the timeout at the exact same 15,000ms tick.
+    for (let attempt = 0; attempt < 100 && host.turnTabs.has(retained.id); attempt++) {
+      await Bun.sleep(5);
+    }
     expect(host.turnTabs.has(retained.id)).toBeFalse();
     expect(closed).toContain(retained.id);
     expect(host.turnTabs.has(unrelated.id)).toBeTrue();
+
+    // Advance the independent cleanup budget after physical retirement so pending helper
+    // settlement cannot leak into later tests.
+    mock.timers.tick(15_000);
+    await Bun.sleep(0);
 
     // Assert no long-lived heartbeat stream remains after cleanup
     await expect(notifyLauncherTurn(descriptorPath, { phase: "heartbeat", traceId: retainedTraceId, helperPid: retainedHelperPid }))

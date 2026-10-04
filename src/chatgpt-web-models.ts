@@ -77,6 +77,12 @@ export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
  */
 export const CHATGPT_WEB_LUNA_CONTEXT_WINDOW = 1_050_000;
 export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
+export const CHATGPT_WEB_FULL_CONTEXT_WINDOW = 1_050_000;
+export const CHATGPT_WEB_FULL_CONTEXT_AUTO_COMPACT_TOKEN_LIMIT = 900_000;
+
+export function supportsChatGptWebFullContext(backendModel: ChatGptWebBackendModel | string): boolean {
+  return backendModel === CHATGPT_WEB_BACKEND_MODEL;
+}
 
 export interface ChatGptWebContextLimits {
   contextWindow: number;
@@ -115,9 +121,15 @@ export function resolveChatGptWebContextLimits(
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
 ): ChatGptWebContextLimits {
+  if (capabilities.experimentalBiggerContext && capabilities.experimentalFullContext) {
+    throw new Error("Bigger Context and Full Context cannot be enabled simultaneously");
+  }
   if (isChatGptWebZeroRiskBackendModel(backendModel)) {
     if (capabilities.experimentalBiggerContext) {
       throw new Error("Zero Risk does not support Bigger Context");
+    }
+    if (capabilities.experimentalFullContext) {
+      throw new Error("Zero Risk does not support Full Context");
     }
     if (backendModel === CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL) {
       return contextLimits(
@@ -128,6 +140,15 @@ export function resolveChatGptWebContextLimits(
     return contextLimits(
       CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
       CHATGPT_WEB_ZERO_RISK_AUTO_COMPACT_TOKEN_LIMIT,
+    );
+  }
+  if (capabilities.experimentalFullContext) {
+    if (!supportsChatGptWebFullContext(backendModel)) {
+      throw new Error(`Backend model ${backendModel} does not support Full Context`);
+    }
+    return contextLimits(
+      CHATGPT_WEB_FULL_CONTEXT_WINDOW,
+      CHATGPT_WEB_FULL_CONTEXT_AUTO_COMPACT_TOKEN_LIMIT,
     );
   }
   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
@@ -212,7 +233,7 @@ export function resolveChatGptWebMessageTokenBudget(
   imageTokens = 0,
 ): number {
   const { contextWindow } = resolveChatGptWebContextLimits(
-    backendModel, effort, { ...capabilities, experimentalBiggerContext: false },
+    backendModel, effort, { ...capabilities, experimentalBiggerContext: false, experimentalFullContext: false },
   );
   const { browserMessageTokenLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
   return Math.max(0, Math.min(
@@ -257,6 +278,7 @@ export interface ChatGptWebAccountCapabilities {
   extraHighAvailable?: boolean;
   proAvailable: boolean;
   experimentalBiggerContext?: boolean;
+  experimentalFullContext?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
 }
@@ -465,6 +487,9 @@ export function availableChatGptWebModelRoutes(
     if (capabilities.experimentalBiggerContext) {
       throw new Error("Zero Risk does not support Bigger Context");
     }
+    if (capabilities.experimentalFullContext) {
+      throw new Error("Zero Risk does not support Full Context");
+    }
     return capabilities.zeroRiskProEnabled
       ? [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE, CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE]
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
@@ -493,8 +518,13 @@ export function requireChatGptWebModelRoute(
   capabilities: ChatGptWebAccountCapabilities,
   reasoning?: string,
 ): ChatGptWebModelRoute {
-  if (capabilities.browserInteractionMode === "manual" && capabilities.experimentalBiggerContext) {
-    throw new Error("Zero Risk does not support Bigger Context");
+  if (capabilities.browserInteractionMode === "manual") {
+    if (capabilities.experimentalBiggerContext) {
+      throw new Error("Zero Risk does not support Bigger Context");
+    }
+    if (capabilities.experimentalFullContext) {
+      throw new Error("Zero Risk does not support Full Context");
+    }
   }
   const route = routesBySlug.get(modelId);
   if (!route) throw new Error(`ChatGPT web model is not enabled: ${modelId}`);

@@ -174,6 +174,80 @@ effort and attachment references remain unchanged. Large transactions use up to 
 the advertised context and compaction thresholds remain three times the base limits. More parts
 reduce message size, not the amount of history retained.
 
+### Full Context Hybrid Transport
+
+Full Context provides a 1,050,000-token logical context window with an automatic compaction
+threshold at 900,000 tokens on supported Plus and Pro routes (`chatgpt-web/high`,
+`chatgpt-web/extra-high`, `chatgpt-web/deep`, `chatgpt-web/pro`, `chatgpt-web/fast`,
+`chatgpt-web/light`). It is mutually exclusive with Bigger Context: enabling one atomically
+disables the other. Switching to Zero Risk (manual) mode automatically disables Full Context
+and forces standard context limits. Luna models (`chatgpt-web/luna`, `chatgpt-web/think`) fail
+closed and remain strictly pinned to their 128,000-token context window and 28,000-token rolling
+checkpoint compaction budget.
+
+**Separation of Logical Context and Physical Transport:**
+The physical browser limits (~70,000–95,000 token composer budget and ~100,000 character safe
+envelope) remain completely unaltered. Full Context does not attempt to send oversized physical
+prompts to ChatGPT Web. Instead, it decouples the logical conversation model from the physical
+browser transport across three complementary mechanisms:
+
+1. **Inline Transport:** Small turns whose complete canonical history fits within single-message
+   browser limits are sent as a single ordinary message without multi-stage overhead.
+2. **Adaptive Multipart Staging (2..12 parts):** When canonical input exceeds single-message
+   ceilings, `resolveFullContextMultipartPlan` computes the minimum safe part count from 2 up
+   to 12 stages. Each stage is formed by complete semantic records (atomic messages/tools) without
+   slicing JSON structures mid-record. Inert preliminary stages carry bounded staging text and
+   must receive an exact SHA-256 transaction-bound acknowledgement before the next stage is sent.
+   The final stage carries skill attachments, system instructions, tool definitions, and live
+   connectors.
+3. **Three-Way Input Selection and Conversation Lifecycle:**
+   - **Retained Suffix (`resumeInput`):** Primary conversation continuity reuses the active browser
+     conversation tab and transmits only the newly appended turn suffix, avoiding physical resending
+     of earlier turns.
+   - **Exact-Parent Recovery Checkpoint (`recoveryInput`):** If a retained conversation tab is
+     closed, lost, or refreshed, the engine inspects its private checkpoint store
+     (`full-context-checkpoints.json`). If a verified checkpoint matching the exact parent turn ID
+     exists, it is loaded (strictly bounded at 16,000 tokens with the sentinel marker
+     `CODEXFULLPRIVATECHECKPOINTV1A7F3C9D2`) as the initial state of a fresh chat, restoring
+     effective continuity without a multi-part transcript replay.
+   - **Canonical Multipart Fallback (`canonicalInput`):** If a recovery checkpoint is missing,
+     stale, or invalid, the engine falls back safely to full canonical multipart staging across 2..12
+     stages.
+
+**Canonical Usage Accounting:**
+Turn token usage (`input_tokens`, `output_tokens`, `total_tokens`) and downstream pricing metrics
+are always calculated from the canonical request items (`parsed._canonicalItems ?? parsed.items`).
+Neither multi-stage transport packaging nor recovery checkpoint compression distorts the recorded
+canonical context size or billing metrics.
+
+**Native Compaction Routing:**
+When canonical usage reaches 900,000 tokens, native auto-compaction is triggered. In Full/MCP mode,
+retained conversation handoff is used whenever possible. If the retained source is unavailable, a
+fresh canonical multipart summarization chat is created with recovery checkpoint lookup bypassed to
+prevent circular compaction state loops.
+
+**Accepted-Stage No-Resend Safety:**
+In `browser-worker.ts`, physical stage submission and semantic acceptance are decoupled from turn
+accounting. Once an inert multipart stage is accepted by the browser, it is permanently recorded as
+submitted. Subsequent DOM disruptions, observation losses, or network reconnects within that turn
+will never physically re-send an accepted stage.
+
+### Live Verification Smoke Matrix
+
+The following matrix defines the end-to-end verification checklist for live ChatGPT Web validation:
+
+| Test Case | Target Input Tokens | Transport Mode | Expected Stages | Verification Criteria |
+|---|---|---|---|---|
+| **1. Small Inline** | < 50,000 | Inline Full Context | 1 physical message | Direct single-turn submission; 1.05M window reported. |
+| **2. Moderate Multipart** | ~200,000 | Adaptive Multipart | 2–3 stages | Inert stages return SHA-256 hashes; final stage commits turn. |
+| **3. Extended Full Context** | 350,000–500,000 | Adaptive Multipart | 4–6 stages | Exceeds old 240K Bigger Context boundary; no stage exceeds 95K tokens. |
+| **4. Maximum Pre-Compaction** | 800,000–850,000 | Adaptive Multipart | 8–11 stages | Approaching 900K threshold; valid staged delivery and response. |
+| **5. Retained Turn Continuity** | Suffix only (~5,000) | Retained Suffix | 1 message (suffix) | Reuses active chat; does not re-stage prior turns. |
+| **6. Checkpoint Recovery** | Closed tab recovery | Recovery Checkpoint | 1 message (<=16K) | Restores from parent checkpoint; marker verified; fast restart. |
+| **7. Checkpoint Fallback** | Tampered checkpoint | Canonical Fallback | 2..12 stages | Invalid checkpoint rejected; clean fallback to canonical multipart. |
+| **8. Native Compaction** | ~900,000 | Native Compaction | Compaction turn | Reaches 900K boundary; triggers handoff; resets next epoch. |
+| **9. Observation Disruption** | Intermediate stage | Stage Idempotency | No physical re-send | Simulating DOM disruption after stage acceptance avoids re-sending. |
+
 In Full mode, routed compaction v1/v2 uses the exact retained source agent and a one-shot MCP control
 capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary Codex tool
 environment. Zero Risk always advertises a fixed three-times compaction interval without enabling

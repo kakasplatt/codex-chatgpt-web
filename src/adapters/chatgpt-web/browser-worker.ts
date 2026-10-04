@@ -42,8 +42,10 @@ import {
   CHATGPT_MAX_INPUT_IMAGES,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
+  isChatGptWebBiggerContextPartCount,
   isChatGptWebMultipartPartCount,
   type CompiledChatGptWebPrompt,
+  type ChatGptWebMultipartContextMode,
   type ChatGptWebPromptImage,
   type ChatGptWebMultipartStage,
 } from "./prompt";
@@ -77,9 +79,11 @@ import {
 } from "../../launcher-browser-host";
 import {
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
+  CHATGPT_WEB_FULL_CONTEXT_WINDOW,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
+  supportsChatGptWebFullContext,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./model-selection";
@@ -95,6 +99,10 @@ import {
   ChatGptLunaCheckpointStream,
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
+import {
+  ChatGptFullContextCheckpointStream,
+  type CapturedChatGptFullContextCheckpoint,
+} from "./full-context-checkpoint";
 import {
   chatGptExternalProgressIsLive,
   chatGptExternalToolCallsAreInFlight,
@@ -1037,23 +1045,30 @@ export function assertChatGptWebMultipartInputWithinLimits(
     finalMessageChars: number;
     finalImageTokens?: number;
   },
+  contextMode: ChatGptWebMultipartContextMode = "bigger",
 ): void {
   if (!isChatGptWebMultipartPartCount(partCount)) {
+    throw new Error(contextMode === "full"
+      ? "Full Context requires between 2 and 12 context parts"
+      : "Bigger Context requires two or six context parts");
+  }
+  if (contextMode === "bigger" && !isChatGptWebBiggerContextPartCount(partCount)) {
     throw new Error("Bigger Context requires two or six context parts");
   }
+  const modeLabel = contextMode === "full" ? "Full Context" : "Bigger Context";
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new ChatGptWebAdapterError(
-      "Bigger Context is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.",
+      `${modeLabel} is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
-    throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
+    throw new Error(`ChatGPT ${modeLabel} limit is not defined for model: ${modelId}`);
   }
   const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
     modelId,
     effort,
-    { ...capabilities, experimentalBiggerContext: false },
+    { ...capabilities, experimentalBiggerContext: false, experimentalFullContext: false },
   );
   const assertMessageBoundary = (
     label: "stage" | "final part",
@@ -1069,20 +1084,20 @@ export function assertChatGptWebMultipartInputWithinLimits(
     );
     if (browserComposerCharLimit !== undefined && messageChars > browserComposerCharLimit) {
       throw new ChatGptWebAdapterError(
-        `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        `A ${modeLabel} ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
         { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
       );
     }
     if (browserMessageTokenLimit !== undefined && messageTokens > browserMessageTokenLimit) {
       throw new ChatGptWebAdapterError(
-        `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        `A ${modeLabel} ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
         { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
       );
     }
     const messageBudget = resolveChatGptWebMessageTokenBudget(modelId, messageEffort, capabilities, imageTokens);
     if (messageTokens > messageBudget) {
       throw new ChatGptWebAdapterError(
-        `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds its ${messageBudget.toLocaleString("en-US")}-token input budget after reserving space for ChatGPT and attachments. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        `A ${modeLabel} ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds its ${messageBudget.toLocaleString("en-US")}-token input budget after reserving space for ChatGPT and attachments. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
         { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
       );
     }
@@ -1103,6 +1118,13 @@ export function assertChatGptWebMultipartInputWithinLimits(
     );
   } else {
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
+  }
+  if (contextMode === "full") {
+    if (estimatedInputTokens < CHATGPT_WEB_FULL_CONTEXT_WINDOW) return;
+    throw new ChatGptWebAdapterError(
+      `This Full Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${CHATGPT_WEB_FULL_CONTEXT_WINDOW.toLocaleString("en-US")}-token ceiling. Run /compact, then retry.`,
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
   }
   // More transport messages do not enlarge the model's advertised context window.
   const experimentalContextWindow = baseContextWindow * Math.min(partCount, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
@@ -1331,7 +1353,7 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void | Promise<void>;
-  /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
+  /** One inert multipart stage completed its exact acknowledgement boundary. */
   onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
   onReasoningSummary?: (text: string, continuation?: boolean) => void;
@@ -1351,6 +1373,28 @@ export interface BrowserTurn {
   /** Require and remove the private Luna checkpoint tail from the visible Markdown stream. */
   captureLunaCheckpoint?: boolean;
   onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
+  /** Generic private checkpoint capture for Luna or Full Context recovery. */
+  checkpointCapture?: ChatGptBrowserCheckpointCapture;
+}
+
+export type ChatGptBrowserCheckpointCapture =
+  | { mode: "luna"; onCheckpoint: (captured: CapturedChatGptLunaCheckpoint) => void }
+  | { mode: "full"; onCheckpoint: (captured: CapturedChatGptFullContextCheckpoint) => void };
+
+export function resolveTurnCheckpointCapture(turn: BrowserTurn): ChatGptBrowserCheckpointCapture | undefined {
+  if (turn.checkpointCapture) {
+    if (turn.captureLunaCheckpoint !== undefined || turn.onLunaCheckpoint !== undefined) {
+      throw new Error("Cannot specify both checkpointCapture and legacy Luna checkpoint options");
+    }
+    return turn.checkpointCapture;
+  }
+  if (turn.captureLunaCheckpoint !== undefined || turn.onLunaCheckpoint !== undefined) {
+    if (!turn.captureLunaCheckpoint || !turn.onLunaCheckpoint) {
+      throw new Error("ChatGPT Luna checkpoint capture requires exactly one checkpoint callback");
+    }
+    return { mode: "luna", onCheckpoint: turn.onLunaCheckpoint };
+  }
+  return undefined;
 }
 
 interface ChatGptSubmissionBaseline {
@@ -3936,7 +3980,7 @@ export class ChatGptBrowserWorker {
         throw new DOMException("ChatGPT multipart stage aborted", "AbortError");
       }
       if (deadline !== undefined && Date.now() >= deadline) {
-        throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
+        throw new Error("ChatGPT multipart transaction timed out while awaiting a stage acknowledgement");
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
@@ -5019,11 +5063,14 @@ export class ChatGptBrowserWorker {
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
       throw new Error("Tool-capable ChatGPT turns require both progress and terminal-fence transports");
     }
-    if ((turn.captureLunaCheckpoint === true) !== (turn.onLunaCheckpoint !== undefined)) {
-      throw new Error("ChatGPT Luna checkpoint capture requires exactly one checkpoint callback");
-    }
-    if (turn.captureLunaCheckpoint && turn.modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
-      throw new Error("Private rolling checkpoint capture is valid only for ChatGPT Luna");
+    const checkpointCapture = resolveTurnCheckpointCapture(turn);
+    if (checkpointCapture) {
+      if (checkpointCapture.mode === "luna" && turn.modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
+        throw new Error("Private rolling checkpoint capture is valid only for ChatGPT Luna");
+      }
+      if (checkpointCapture.mode === "full" && !supportsChatGptWebFullContext(turn.modelId)) {
+        throw new Error(`Private recovery checkpoint capture is not supported for model ${turn.modelId}`);
+      }
     }
     const browserCapabilities = turn.nativeConnector
       ? { ...turn.capabilities, localToolsEnabled: true }
@@ -5107,6 +5154,7 @@ export class ChatGptBrowserWorker {
             finalMessageChars: multipartFinalPrompt.length,
             finalImageTokens: estimateChatGptWebImageTokens(prepared),
           } : undefined,
+          prepared.multipart.contextMode ?? "bigger",
         );
       } else {
         assertChatGptWebInputWithinLimits(
@@ -5377,7 +5425,7 @@ export class ChatGptBrowserWorker {
                   checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
                   turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
                   undefined,
-                  { onSubmitted: recordStageUsage ? () => { stageSubmitted = true; } : undefined, onSendActivated: async () => {
+                  { onSubmitted: () => { stageSubmitted = true; }, onSendActivated: async () => {
                     await this.assertSelectedEffort(page, mode);
                     submissionRejection.begin(page);
                     sendActivated = true;
@@ -5461,6 +5509,7 @@ export class ChatGptBrowserWorker {
                 stagingEffort = nextStagingEffort;
                 submissionRejection.reset();
                 resetRejectionAbort();
+                stageSubmitted = false;
                 console.warn(
                   `[chatgpt-web] browser turn ${turn.traceId} multipart part ${index + 1}/${prepared.multipart.parts.length}`
                   + ` was rejected by ChatGPT in ${rejectedEffort} effort; retrying this part in ${nextStagingEffort}`,
@@ -5637,8 +5686,10 @@ export class ChatGptBrowserWorker {
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
-      const checkpointStream = turn.captureLunaCheckpoint
-        ? new ChatGptLunaCheckpointStream()
+      const checkpointStream = checkpointCapture
+        ? checkpointCapture.mode === "luna"
+          ? new ChatGptLunaCheckpointStream()
+          : new ChatGptFullContextCheckpointStream()
         : undefined;
       const emitMarkdownDelta = (delta: string): void => {
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
@@ -5863,11 +5914,15 @@ export class ChatGptBrowserWorker {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
             if (final.delta) emitMarkdownDelta(final.delta);
-            if (checkpointStream) {
+            if (checkpointStream && checkpointCapture) {
               const completed = checkpointStream.finishOptional(snapshot.visibleText);
               if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
-              if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
-              else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
+              if (completed.captured) checkpointCapture.onCheckpoint(completed.captured as any);
+              else {
+                console.warn(
+                  `[chatgpt-web] browser turn ${turn.traceId} completed without a ${checkpointCapture.mode === "luna" ? "Luna rolling" : "Full Context recovery"} checkpoint; preserving full native history`,
+                );
+              }
               finalText = completed.answer;
             } else {
               finalText = final.markdown;

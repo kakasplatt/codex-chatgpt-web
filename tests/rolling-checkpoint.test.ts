@@ -13,6 +13,7 @@ import {
   ChatGptLunaCheckpointStore,
   ChatGptLunaCheckpointStream,
   hashChatGptLunaAnswer,
+  parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
 } from "../src/adapters/chatgpt-web/rolling-checkpoint";
 
@@ -260,4 +261,75 @@ test("Luna checkpoint preserves the server-resolved backend model when the raw b
   expect(applied.applied).toBeTrue();
   expect(applied.parsed.modelId).toBe("gpt-5.6-luna");
   expect(applied.parsed.options.reasoning).toBe("low");
+});
+
+test("Luna checkpoint rejects payloads exceeding 4,000 tokens", () => {
+  const oversize = {
+    version: 2 as const,
+    summary: "word ".repeat(4_500),
+  };
+  expect(() => parseChatGptLunaCheckpoint(oversize)).toThrow("maximum is 4,000");
+});
+
+test("Luna checkpoint store enforces TTL and max-entry bounds", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-luna-ttl-checkpoint-"));
+  roots.push(root);
+  const path = join(root, "checkpoints.json");
+  const threadId = "thread_luna_ttl";
+
+  let nowMs = 1_000_000_000;
+  const store = new ChatGptLunaCheckpointStore(path, () => nowMs);
+
+  const sourceTurnId = "turn_source";
+  const source = request(threadId, sourceTurnId, [message("user", "Start", sourceTurnId)]);
+  const answer = "Started.";
+  store.commit(source, { checkpoint, answerHash: hashChatGptLunaAnswer(answer) }, answer);
+
+  const nextTurnId = "turn_next";
+  const next = request(threadId, nextTurnId, [
+    message("assistant", answer, sourceTurnId),
+    message("user", "Continue", nextTurnId),
+  ]);
+
+  // Valid right now
+  expect(store.apply(next).applied).toBeTrue();
+
+  // Advance time beyond 30 days TTL
+  nowMs += 31 * 24 * 60 * 60_000;
+  const expiredStore = new ChatGptLunaCheckpointStore(path, () => nowMs);
+  expect(expiredStore.apply(next).applied).toBeFalse();
+  expect(expiredStore.apply(next).reason).toContain("no checkpoint");
+});
+
+test("Luna checkpoint store prunes oldest entries beyond 512 max entries", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-luna-max-checkpoint-"));
+  roots.push(root);
+  const path = join(root, "checkpoints.json");
+
+  let nowMs = 1_000_000;
+  const store = new ChatGptLunaCheckpointStore(path, () => nowMs);
+
+  // Commit 513 distinct checkpoints
+  for (let i = 0; i <= 512; i++) {
+    nowMs += 1000;
+    const threadId = `thread_${i}`;
+    const sourceTurnId = `turn_${i}`;
+    const source = request(threadId, sourceTurnId, [message("user", `Start ${i}`, sourceTurnId)]);
+    const ans = `Answer ${i}`;
+    store.commit(source, { checkpoint, answerHash: hashChatGptLunaAnswer(ans) }, ans);
+  }
+
+  // The very first entry (thread_0) should be pruned
+  const firstNext = request("thread_0", "turn_next_0", [
+    message("assistant", "Answer 0", "turn_0"),
+    message("user", "Continue", "turn_next_0"),
+  ]);
+  expect(store.apply(firstNext).applied).toBeFalse();
+
+  // The latest entry (thread_512) should be retained
+  const latestNext = request("thread_512", "turn_next_512", [
+    message("assistant", "Answer 512", "turn_512"),
+    message("user", "Continue", "turn_next_512"),
+  ]);
+  expect(store.apply(latestNext).applied).toBeTrue();
 });

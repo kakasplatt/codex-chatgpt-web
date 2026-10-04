@@ -118,6 +118,7 @@ export interface AppConfig {
   extraHighAvailable?: boolean;
   proAvailable: boolean;
   experimentalBiggerContext: boolean;
+  experimentalFullContext: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;
@@ -250,6 +251,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     extraHighAvailable: false,
     proAvailable: false,
     experimentalBiggerContext: false,
+    experimentalFullContext: false,
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
     useSavedChats: false,
@@ -534,6 +536,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     && typeof parsed.experimentalBiggerContext !== "boolean") {
     throw new Error(`Invalid experimentalBiggerContext in ${path}`);
   }
+  if (parsed.experimentalFullContext !== undefined
+    && typeof parsed.experimentalFullContext !== "boolean") {
+    throw new Error(`Invalid experimentalFullContext in ${path}`);
+  }
   if (parsed.zeroRiskProEnabled !== undefined && typeof parsed.zeroRiskProEnabled !== "boolean") {
     throw new Error(`Invalid zeroRiskProEnabled in ${path}`);
   }
@@ -560,9 +566,16 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
+  const experimentalFullContext = parsed.experimentalFullContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
+  if (experimentalBiggerContext && experimentalFullContext) {
+    throw new Error(`Bigger Context and Full Context cannot be enabled simultaneously in ${path}`);
+  }
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
     throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
+  }
+  if (browserInteractionMode === "manual" && experimentalFullContext) {
+    throw new Error(`Zero Risk does not support Full Context in ${path}`);
   }
   if (parsed.extraHighAvailable === true && !solAvailable) {
     throw new Error(`Invalid ChatGPT account capabilities in ${path}: Extra High requires Sol`);
@@ -580,6 +593,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     solAvailable,
     proAvailable,
     experimentalBiggerContext,
+    experimentalFullContext,
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
     useSavedChats,
@@ -632,12 +646,14 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
+      fullContextCheckpointStatePath: join(getConfigDir(), "runtime", "full-context-checkpoints.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       extraHighAvailable: !manual && config.extraHighAvailable === true,
       proAvailable: manual ? false : config.proAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
+      experimentalFullContext: manual ? false : config.experimentalFullContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
       useSavedChats: config.useSavedChats === true,

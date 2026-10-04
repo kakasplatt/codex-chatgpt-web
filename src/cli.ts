@@ -78,6 +78,7 @@ Setup options:
   --login                      Refresh the stored ChatGPT login even if one exists
   --auto-approve-tool-calls    Opt in to per-call browser clicks on "Allow once" prompts
   --bigger-context             Enable experimental adaptive 1/2/6-message context
+  --full-context               Enable experimental 1.05M logical context with 2..12 parts
   --fresh-conversation         Start each automatic turn in a fresh browser chat
   --retained-conversation      Reuse the browser chat between turns (default)
   --saved-chats                Keep task conversations in ChatGPT history
@@ -318,12 +319,23 @@ async function setupCommand(args: string[]): Promise<void> {
     throw new Error("Choose --fresh-conversation or --retained-conversation");
   }
   if (freshConversation || retainedConversation) options.experimentalFreshConversationPerTurn = freshConversation;
+  const fullContext = takeFlag(args, "--full-context");
   const biggerContext = takeFlag(args, "--bigger-context");
   const standardContext = takeFlag(args, "--standard-context");
-  if (biggerContext && standardContext) {
-    throw new Error("Choose at most one context mode: --bigger-context or --standard-context");
+  const contextFlagsCount = Number(fullContext) + Number(biggerContext) + Number(standardContext);
+  if (contextFlagsCount > 1) {
+    throw new Error("Choose at most one context mode: --full-context, --bigger-context, or --standard-context");
   }
-  if (biggerContext || standardContext) options.experimentalBiggerContext = biggerContext;
+  if (fullContext) {
+    options.experimentalFullContext = true;
+    options.experimentalBiggerContext = false;
+  } else if (biggerContext) {
+    options.experimentalBiggerContext = true;
+    options.experimentalFullContext = false;
+  } else if (standardContext) {
+    options.experimentalBiggerContext = false;
+    options.experimentalFullContext = false;
+  }
   if (skillAttachments || inlineSkills) options.experimentalSkillAttachments = skillAttachments;
   const zeroRiskPro = takeFlag(args, "--zero-risk-pro");
   const zeroRiskDefault = takeFlag(args, "--zero-risk-default");

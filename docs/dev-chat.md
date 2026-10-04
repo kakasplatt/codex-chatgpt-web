@@ -98,52 +98,62 @@ An unsupported browser helper or rejected upload produces an error instead of si
 instructions. This remains experimental: moving instructions into attachments does not guarantee
 that ChatGPT will follow them more reliably.
 
-## Bigger Context experiment
+## Context Experiments (Bigger Context & Full Context)
 
-Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is disabled by
-default. The switch updates the profile's canonical runtime configuration through the normal setup
+Both launcher profiles expose **Full Context (experimental)** and **Bigger Context (experimental)**
+in Settings. They are disabled by default and mutually exclusive: enabling one atomically disables
+the other. Switching to Zero Risk (manual) mode automatically disables both context experiments and
+restores standard limits.
+
+The context preference can also be selected directly during setup or through CLI flags:
+- `--full-context`: Enables Full Context (and disables Bigger Context).
+- `--bigger-context`: Enables Bigger Context (and disables Full Context).
+- `--standard-context`: Disables both experiments, restoring standard context limits.
+
+The switch updates the profile's canonical runtime configuration through the normal setup
 transaction; it is not a launcher-only preference. Production setup also rewrites the managed
-Codex model catalog with 3x context and auto-compaction thresholds and asks you to restart Codex.
-The DEV CLI reads the same setting from its isolated runtime configuration on each command.
+Codex model catalog with the active context and auto-compaction thresholds and prompts to restart
+Codex. The DEV CLI reads the same settings from its isolated runtime configuration on each command.
 
-When enabled, a normal turn stays on the original single-message path while its estimated input
-is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
-messages; at twice that threshold it uses six messages. The final context part also commits the
-transaction and starts the task, so there is no extra request. The existing DEV compaction threshold
-remains three times the selected mode's base limit.
+### Bigger Context (3x Multiplier)
 
-Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model
-must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent.
-Images, the MCP connector, and the private `turn_token` are attached only to the final part.
-In Full/MCP mode, compaction does not replay the expanded history into an unrelated summarizer. If
-the source Web response is still waiting on a tool boundary, its canonical tool results finish that
-response first without a compaction suffix. If those results are enough for an ordinary final
-answer, that committed answer remains owned by the logical Responses turn across the physical chat
-retirement. If the Web model instead requests another tool, the broker blocks that new execution
-and tells the response to stop; the compacted continuation then resumes the unfinished work. The
-exact retained chat receives one strict checkpoint message with only the one-shot MCP control
-capability and no ordinary work capability. The checkpoint never rides in the tail of a potentially
-huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
-After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
-and waits for its physical launcher settlement before closing the old surface; the next epoch then
-starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
-action after the control-only response. If the retained private chat was already closed, the bridge
-starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
-has no retained MCP boundary and uses the six-message compaction path so its summarizer receives
-the complete expanded history.
+When Bigger Context is enabled, a normal turn stays on the original single-message path while its
+estimated input is below the selected mode's existing auto-compaction threshold. At the first
+threshold it uses two messages; at twice that threshold it uses six messages. The final context part
+also commits the transaction and starts the task, so there is no extra request. The model context
+and auto-compaction ceilings are reported as 3× while the switch is active (e.g. 285,000 auto-compact
+and 333,579 context window on Plus/Pro), but every individual stage must still fit the selected
+ChatGPT mode's measured one-message boundary (~70,000–95,000 tokens).
 
-Any missing or malformed acknowledgement fails the whole transaction. No later part or final
-commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context
-and auto-compaction ceilings are reported as 3× while the switch is active, but every individual
-stage must still fit the selected ChatGPT mode's measured one-message boundary.
+### Full Context (1.05M Logical Context & Checkpoint Recovery)
 
-Small turns use one request. Two-part turns use one inert staging request and one final request;
-six-part turns use five staging requests and one final request. Browser-only compaction also uses
-six parts. Inert stages use the fastest available mode that fits their complete messages; the final
-part uses the selected execution effort. Large turns may increase the probability of
-rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
-Luna's later requests still include the accumulated transcript inside the same measured
-28,000-token browser transport budget.
+Full Context expands the logical context window to 1,050,000 tokens with an auto-compaction
+threshold at 900,000 tokens on supported Plus/Pro routes (`chatgpt-web/high`, `chatgpt-web/extra-high`,
+`chatgpt-web/deep`, `chatgpt-web/pro`, `chatgpt-web/fast`, `chatgpt-web/light`).
+
+Full Context decouples the logical conversation context from physical browser message limits:
+- **Inline Single-Message:** For turns within single-message browser ceilings, requests are sent
+  inline in a single physical prompt.
+- **Adaptive 2..12 Multipart Staging:** For larger requests, the engine automatically selects the
+  smallest safe part count between 2 and 12 stages. Records are kept whole and atomic. Inert stages
+  require exact SHA-256 acknowledgements before subsequent stages proceed.
+- **Three-Way Input Lifecycle:**
+  1. *Retained Suffix (`resumeInput`):* Ongoing turns in an active browser tab send only newly added
+     turn records.
+  2. *Exact-Parent Recovery Checkpoint (`recoveryInput`):* If the browser tab is lost or closed,
+     an exact-parent recovery checkpoint (under 16,000 tokens, marked by
+     `CODEXFULLPRIVATECHECKPOINTV1A7F3C9D2`) is loaded to resume in a fresh chat without replaying
+     hundreds of thousands of tokens across multiple stages.
+  3. *Canonical Fallback (`canonicalInput`):* If the checkpoint is missing or invalid, the engine
+     safely falls back to full canonical multipart staging.
+- **Canonical Usage Accounting:** Token estimation and usage metrics are always calculated from the
+  canonical Codex request history, preventing transport wrappers or checkpoints from skewing usage.
+- **Accepted-Stage Idempotency:** Once a multipart stage is accepted by the browser, it is marked
+  submitted and will not be physically re-sent if observation is disrupted.
+
+Both experiments are intentionally unavailable for Luna (`chatgpt-web/luna`, `chatgpt-web/think`),
+which fails closed and stays pinned to its measured 128,000-token window and 28,000-token rolling
+checkpoint transport budget.
 
 Browser-only chats do not advertise outer tools and never claim simulated effects. Full setup keeps
 the launcher-owned DEV tunnel ready so ChatGPT can create and validate `Codex Native2 DEV` before a

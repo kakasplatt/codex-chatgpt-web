@@ -57,9 +57,10 @@ export interface DevChatTurnResult {
 
 export interface DevChatFeatures {
   biggerContext: boolean;
+  fullContext?: boolean;
 }
 
-const DEFAULT_DEV_CHAT_FEATURES: DevChatFeatures = { biggerContext: false };
+const DEFAULT_DEV_CHAT_FEATURES: DevChatFeatures = { biggerContext: false, fullContext: false };
 
 interface ResponsesEnvelope {
   id?: string;
@@ -405,6 +406,12 @@ export function createLauncherDevAdapter(
       ...(config.experimentalBiggerContext
         ? { experimentalBiggerContext: true }
         : {}),
+      ...(config.experimentalFullContext
+        ? {
+            experimentalFullContext: true,
+            fullContextCheckpointStatePath: join(runtimeStateRoot, "full-context-checkpoints.json"),
+          }
+        : {}),
     },
   }, { broker });
   return { broker, adapterFactory };
@@ -581,6 +588,11 @@ export class DevChatDriver {
     if (this.features.biggerContext && isLunaDevChatModel(model)) {
       throw new Error(
         "Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget",
+      );
+    }
+    if (this.features.fullContext && isLunaDevChatModel(model)) {
+      throw new Error(
+        "Full Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget",
       );
     }
   }

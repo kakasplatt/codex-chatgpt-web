@@ -286,6 +286,8 @@ export interface CodexProviderConfig {
     threadEnvironmentStatePath?: string;
     /** Persisted exact-parent rolling checkpoints used only by Free/Luna turns. */
     lunaCheckpointStatePath?: string;
+    /** Persisted exact-parent recovery checkpoints used by Full Context turns. */
+    fullContextCheckpointStatePath?: string;
     /** Optional explicit safety ceiling. Browser turns have no absolute deadline by default. */
     turnTimeoutMs?: number;
     /**
@@ -308,6 +310,8 @@ export interface CodexProviderConfig {
     autoApproveToolCalls?: boolean;
     /** Experimental transport: adapt one context across one, two, or six ChatGPT messages. */
     experimentalBiggerContext?: boolean;
+    /** Experimental transport: 1.05M logical context with 2..12 parts and recovery checkpoints. */
+    experimentalFullContext?: boolean;
     experimentalSkillAttachments?: boolean;
     /** Explicitly rebuild each automatic turn in a fresh browser conversation. */
     experimentalFreshConversationPerTurn?: boolean;

@@ -1761,6 +1761,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setFullContext = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setFullContext(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setSkillAttachments = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -1906,6 +1917,20 @@ function SettingsSurface({
               || snapshot.state.browserInteractionMode === "manual"
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
+          />
+        </SettingRow>
+        <SettingRow
+          body={snapshot.state.browserInteractionMode === "manual"
+            ? copy.manualFullContextUnavailable
+            : copy.fullContextBody}
+          label={copy.fullContext}
+        >
+          <Switch
+            checked={snapshot.state.experimentalFullContext}
+            disabled={busy
+              || snapshot.state.browserInteractionMode === "manual"
+              || snapshot.state.coreSetupComplete !== true}
+            onChange={(checked) => void setFullContext(checked)}
           />
         </SettingRow>
         <SettingRow body={snapshot.state.browserInteractionMode === "manual"
