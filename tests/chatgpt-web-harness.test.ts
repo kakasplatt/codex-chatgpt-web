@@ -3288,6 +3288,21 @@ describe("ChatGPT outer-native harness v4", () => {
           properties: { id: { type: "string" } }, required: ["id"],
         },
       },
+      {
+        name: "close_agent", namespace: "vendor", description: "Close an unrelated vendor resource.",
+        parameters: {
+          type: "object", additionalProperties: false,
+          properties: { target: { type: "string" } }, required: ["target"],
+        },
+      },
+      {
+        name: "send_input", namespace: "vendor", description: "Send input to an unrelated vendor resource.",
+        parameters: {
+          type: "object", additionalProperties: false,
+          properties: { target: { type: "string" }, message: { type: "string" } },
+          required: ["target", "message"],
+        },
+      },
     ];
     const token = await broker.register(environment, 60_000);
     const transport = new StdioClientTransport({
@@ -3312,6 +3327,24 @@ describe("ChatGPT outer-native harness v4", () => {
 
     try {
       await client.connect(transport);
+
+      const vendorClose = call("vendor__close_agent", { target: "vendor_resource" });
+      const [vendorCloseRequest] = await broker.nextToolBatch(token);
+      expect(vendorCloseRequest).toMatchObject({
+        wireName: "vendor__close_agent",
+        arguments: { target: "vendor_resource" },
+      });
+      broker.completeTool(token, vendorCloseRequest!.callId, toolResult({ closed: true }));
+      expect((await vendorClose).isError).not.toBe(true);
+
+      const vendorSend = call("vendor__send_input", { target: "agent_test", message: "vendor input" });
+      const [vendorSendRequest] = await broker.nextToolBatch(token);
+      expect(vendorSendRequest).toMatchObject({
+        wireName: "vendor__send_input",
+        arguments: { target: "agent_test", message: "vendor input" },
+      });
+      broker.completeTool(token, vendorSendRequest!.callId, toolResult({ accepted: true }));
+      expect((await vendorSend).isError).not.toBe(true);
 
       const closeWithoutTerminal = await callExpectedLocalRejection(
         "multi_agent_v1__close_agent",
@@ -3392,6 +3425,64 @@ describe("ChatGPT outer-native harness v4", () => {
         status: { agent_test: { completed: "done after resume" } }, timed_out: false,
       }));
       await terminalWaitAfterResume;
+
+      const vendorSendAfterTerminal = call("vendor__send_input", {
+        target: "agent_test", message: "must not mutate Codex lifecycle state",
+      });
+      const [vendorSendAfterTerminalRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, vendorSendAfterTerminalRequest!.callId, toolResult({ accepted: true }));
+      expect((await vendorSendAfterTerminal).isError).not.toBe(true);
+
+      const closeRace = call("multi_agent_v1__close_agent", { target: "agent_test" });
+      const reactivateRace = call("multi_agent_v1__send_input", {
+        target: "agent_test", message: "race close", interrupt: false,
+      });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const closeRaceBatch = await broker.nextToolBatch(token);
+      expect(closeRaceBatch).toHaveLength(1);
+      const [closeRaceRequest] = closeRaceBatch;
+      expect(["multi_agent_v1__close_agent", "multi_agent_v1__send_input"]).toContain(closeRaceRequest!.wireName);
+      broker.completeTool(token, closeRaceRequest!.callId, toolResult(
+        closeRaceRequest!.wireName === "multi_agent_v1__close_agent"
+          ? { status: "closed" }
+          : { accepted: true },
+      ));
+      const [closeRaceResult, reactivateRaceResult] = await Promise.all([closeRace, reactivateRace]);
+      expect([Boolean(closeRaceResult.isError), Boolean(reactivateRaceResult.isError)].sort()).toEqual([false, true]);
+
+      const staleWait = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_wait_race"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const reactivateDuringWait = call("multi_agent_v1__send_input", {
+        target: "agent_wait_race", message: "new generation", interrupt: false,
+      });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const staleWaitBatch = await broker.nextToolBatch(token);
+      expect(staleWaitBatch).toHaveLength(2);
+      const staleWaitRequest = staleWaitBatch.find(request => request.wireName === "multi_agent_v1__wait_agent");
+      const reactivateDuringWaitRequest = staleWaitBatch.find(request => request.wireName === "multi_agent_v1__send_input");
+      expect(staleWaitRequest).toBeDefined();
+      expect(reactivateDuringWaitRequest).toBeDefined();
+      broker.completeTool(token, reactivateDuringWaitRequest!.callId, toolResult({ accepted: true }));
+      await reactivateDuringWait;
+      broker.completeTool(token, staleWaitRequest!.callId, toolResult({
+        status: { agent_wait_race: { completed: "old generation" } }, timed_out: false,
+      }));
+      await staleWait;
+      const closeAfterStaleWait = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_wait_race" },
+      );
+      expect(closeAfterStaleWait.isError).toBe(true);
+
+      const terminalWaitForAllowedClose = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_test"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [terminalWaitForAllowedCloseRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, terminalWaitForAllowedCloseRequest!.callId, toolResult({
+        status: { agent_test: { completed: "done after close race" } }, timed_out: false,
+      }));
+      await terminalWaitForAllowedClose;
 
       const allowedClose = call("multi_agent_v1__close_agent", { target: "agent_test" });
       const [closeRequest] = await broker.nextToolBatch(token);
@@ -3519,6 +3610,60 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       expect((await rawClose).isError).toBe(true);
 
+      const rawVendorClose = client.callTool({
+        name: "codex_tool_call",
+        arguments: {
+          turn_token: token,
+          wire_name: "exec",
+          input: "await tools.vendor__close_agent({ target: 'vendor_raw_resource' });",
+        },
+      });
+      const [rawVendorCloseRequest] = await broker.nextToolBatch(token);
+      const rawVendorCalls: GatewayProgramCall[] = [];
+      await executeGatewayProgram(
+        rawVendorCloseRequest!.input!,
+        ["vendor__close_agent"],
+        rawVendorCalls,
+        true,
+      );
+      expect(rawVendorCalls).toEqual([{
+        name: "vendor__close_agent",
+        input: { target: "vendor_raw_resource" },
+      }]);
+      broker.completeTool(token, rawVendorCloseRequest!.callId, toolResult({ closed: true }));
+      expect((await rawVendorClose).isError).not.toBe(true);
+
+      const rawCloseRaceWait = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_raw_close_race"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const [rawCloseRaceWaitRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, rawCloseRaceWaitRequest!.callId, toolResult({
+        status: { agent_raw_close_race: { completed: "done" } }, timed_out: false,
+      }));
+      await rawCloseRaceWait;
+
+      const rawCloseRace = call("multi_agent_v1__close_agent", { target: "agent_raw_close_race" });
+      const rawExecRace = client.callTool({
+        name: "codex_tool_call",
+        arguments: {
+          turn_token: token,
+          wire_name: "exec",
+          input: "await tools.multi_agent_v1__send_input({ target: 'agent_raw_close_race', message: 'race raw', interrupt: false });",
+        },
+      });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const rawCloseRaceBatch = await broker.nextToolBatch(token);
+      expect(rawCloseRaceBatch).toHaveLength(1);
+      const [rawCloseRaceRequest] = rawCloseRaceBatch;
+      expect(["multi_agent_v1__close_agent", "exec"]).toContain(rawCloseRaceRequest!.wireName);
+      broker.completeTool(token, rawCloseRaceRequest!.callId, toolResult(
+        rawCloseRaceRequest!.wireName === "multi_agent_v1__close_agent"
+          ? { status: "closed" }
+          : { accepted: true },
+      ));
+      const [rawCloseRaceResult, rawExecRaceResult] = await Promise.all([rawCloseRace, rawExecRace]);
+      expect([Boolean(rawCloseRaceResult.isError), Boolean(rawExecRaceResult.isError)].sort()).toEqual([false, true]);
+
       const rawTerminalWait = call("multi_agent_v1__wait_agent", {
         targets: ["agent_raw"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
       });
@@ -3556,6 +3701,36 @@ describe("ChatGPT outer-native harness v4", () => {
         { target: "agent_raw" },
       );
       expect(closeAfterRawReactivation.isError).toBe(true);
+
+      const rawRaceWait = call("multi_agent_v1__wait_agent", {
+        targets: ["agent_raw_race"], timeout_ms: CHATGPT_WEB_AGENT_WAIT_POLL_MS,
+      });
+      const rawRaceMutation = client.callTool({
+        name: "codex_tool_call",
+        arguments: {
+          turn_token: token,
+          wire_name: "exec",
+          input: "await tools.multi_agent_v1__send_input({ target: 'agent_raw_race', message: 'new work', interrupt: false });",
+        },
+      });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const rawRaceBatch = await broker.nextToolBatch(token);
+      expect(rawRaceBatch).toHaveLength(2);
+      const rawRaceWaitRequest = rawRaceBatch.find(request => request.wireName === "multi_agent_v1__wait_agent");
+      const rawRaceMutationRequest = rawRaceBatch.find(request => request.wireName === "exec");
+      expect(rawRaceWaitRequest).toBeDefined();
+      expect(rawRaceMutationRequest).toBeDefined();
+      broker.completeTool(token, rawRaceMutationRequest!.callId, toolResult({ accepted: true }));
+      await rawRaceMutation;
+      broker.completeTool(token, rawRaceWaitRequest!.callId, toolResult({
+        status: { agent_raw_race: { completed: "stale old generation" } }, timed_out: false,
+      }));
+      await rawRaceWait;
+      const closeAfterRawRace = await callExpectedLocalRejection(
+        "multi_agent_v1__close_agent",
+        { target: "agent_raw_race" },
+      );
+      expect(closeAfterRawRace.isError).toBe(true);
     } finally {
       await client.close().catch(() => {});
       broker.revoke(token);

@@ -27,10 +27,26 @@
 
 - [x] RED: prove that `wait_agent` terminal evidence remained reusable after `send_input` reactivated the same agent.
 - [x] Invalidate a target's terminal observation before structured `send_input`, `resume_agent`, or `followup_task` dispatch.
-- [x] Restore the observation only when that structured reactivation returns an explicit tool error.
+- [x] Treat every attempted structured reactivation as a new causal generation; even an explicit tool error requires a new terminal `wait_agent` before close.
 - [x] Require deferred lifecycle reactivation tools to use structured arguments so the target can always be tracked.
 - [x] Clear all terminal observations before raw `exec`, since arbitrary nested lifecycle mutations cannot update the structured ledger; keep raw `close_agent` blocked.
 - [x] Cover V1 `send_input`, V1 `resume_agent`, V2/collaboration `followup_task`, freeform mutation rejection, raw-exec reactivation, and re-wait-before-close behavior.
+
+## Task 4: Make lifecycle evidence causal under concurrency
+
+- [x] RED: cover `close_agent` racing a reactivation, `wait_agent` overlapping reactivation, and `wait_agent` overlapping raw `exec` in one broker batch.
+- [x] Track a monotonically increasing generation per agent and accept terminal evidence only for the same generation observed when the wait started.
+- [x] Track in-flight reactivation/close mutations so a wait overlapping either mutation cannot certify terminality regardless of local request ordering.
+- [x] Reserve `close_agent` before dispatch and reject reactivation while that close is in flight; a competing reactivation invalidates terminality before close can reserve it.
+- [x] Track a binding epoch plus raw-exec in-flight count so waits crossing arbitrary raw code cannot repopulate stale terminal evidence.
+- [x] Keep `wait_agent` itself non-blocking with respect to useful lifecycle intervention; do not hold a 30-second global mutex.
+
+## Task 5: Scope lifecycle interception to Codex multi-agent protocols
+
+- [x] RED: prove that unrelated `vendor__close_agent` and `vendor__send_input` calls are not lifecycle-gated.
+- [x] Remove generic `endsWith()` lifecycle classification and match only the explicit V1/V2/collaboration wire names supported by the bridge.
+- [x] Preserve unrelated vendor `close_agent` inside raw `exec`; block only the known Codex multi-agent close tools.
+- [x] Prove a vendor `send_input` targeting the same string id cannot invalidate Codex agent terminal evidence.
 
 ## Review focus
 
@@ -39,4 +55,7 @@
 - Terminal agents must remain closable so completed agents do not consume concurrency slots.
 - A target that has not been returned by structured `wait_agent` as terminal must fail closed because the current native schema supplies no verifiable stall evidence.
 - Terminal evidence must be invalidated whenever the same agent is reactivated and must be earned again with a later terminal `wait_agent` result.
+- A wait result is usable only if no lifecycle generation/epoch change or overlapping mutation occurred since that wait started.
+- A close reservation and a reactivation for the same target must never both be dispatched concurrently.
+- Generic vendor/MCP tools that merely share lifecycle-looking suffixes are outside this policy.
 - Raw `exec` must not provide an enforcement escape hatch.

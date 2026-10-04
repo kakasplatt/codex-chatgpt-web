@@ -52,7 +52,7 @@ const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
 const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly ${CHATGPT_WEB_AGENT_WAIT_POLL_MS / 1_000} seconds per call, matching the Codex default, then release the MCP channel so spawned Web agents can use their own tools. A wait timeout is not task completion; check agent progress and wait again if needed. Keep the native tool's declared arguments.`;
-const AGENT_CLOSE_ORCHESTRATION_RULE = "ChatGPT Web orchestration rule: do not call close_agent for a worker whose latest observed status is still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint with the available non-interrupting message or follow-up tool (send_input in Compatibility V1), then wait again. The current native close schema exposes no verifiable stall-evidence field, so this bridge forwards structured close_agent only after a structured wait_agent result has returned that target in a terminal-status map. Any structured resume/follow-up that can reactivate the target invalidates that terminal observation until wait_agent reports it terminal again. Raw exec close_agent is blocked, and entering raw exec clears the binding's terminal observations because nested lifecycle mutations cannot update the structured ledger.";
+const AGENT_CLOSE_ORCHESTRATION_RULE = "ChatGPT Web orchestration rule: do not call close_agent for a worker whose latest observed status is still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint with the available non-interrupting message or follow-up tool (send_input in Compatibility V1), then wait again. The current native close schema exposes no verifiable stall-evidence field, so this bridge forwards structured close_agent only after a structured wait_agent result has returned that target in a terminal-status map. Any structured resume/follow-up attempt starts a new causal generation and requires wait_agent to report the target terminal again. Overlapping lifecycle mutations cannot certify terminal state. Raw exec close_agent is blocked, and raw exec invalidates binding-wide terminal observations because nested lifecycle mutations cannot update the structured ledger.";
 const MAX_AGENT_TERMINAL_STATE_BINDINGS = 64;
 // Native command calls share a transport with the two-minute MCP tunnel. Keep each command/session
 // poll bounded so a long-running process yields a session_id instead of occupying the invocation
@@ -186,14 +186,11 @@ function isAgentCloseTool(tool: CodexTool): boolean {
 }
 
 function isGatewayAgentCloseTool(name: string): boolean {
-  return GATEWAY_AGENT_CLOSE_TOOL_NAMES.has(name) || name.endsWith("__close_agent");
+  return GATEWAY_AGENT_CLOSE_TOOL_NAMES.has(name);
 }
 
 function isGatewayAgentReactivationTool(name: string): boolean {
-  return GATEWAY_AGENT_REACTIVATION_TOOL_NAMES.has(name)
-    || name.endsWith("__send_input")
-    || name.endsWith("__resume_agent")
-    || name.endsWith("__followup_task");
+  return GATEWAY_AGENT_REACTIVATION_TOOL_NAMES.has(name);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -244,7 +241,7 @@ function closeAgentTarget(argumentsValue: Record<string, unknown>): string | und
 
 function reactivatedAgentTarget(toolName: string, argumentsValue: Record<string, unknown>): string | undefined {
   if (!isGatewayAgentReactivationTool(toolName)) return undefined;
-  const candidate = toolName.endsWith("__resume_agent") ? argumentsValue.id : argumentsValue.target;
+  const candidate = toolName === "multi_agent_v1__resume_agent" ? argumentsValue.id : argumentsValue.target;
   return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
 }
 
@@ -500,7 +497,7 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
     "    let exposed = value;",
     "    if (typeof value === \"function\" && name === blockedExecName) {",
     "      exposed = () => { throw new Error(\"Nested raw exec is unavailable inside ChatGPT Web exec\"); };",
-    "    } else if (typeof value === \"function\" && typeof name === \"string\" && (closeNames.has(name) || name.endsWith(\"__close_agent\"))) {",
+    "    } else if (typeof value === \"function\" && typeof name === \"string\" && closeNames.has(name)) {",
     "      exposed = () => { throw new Error(\"ChatGPT Web close_agent requires structured terminal-state verification and is unavailable inside raw exec\"); };",
     "    } else if (typeof value === \"function\" && typeof name === \"string\" && waitNames.has(name)) {",
     "      exposed = args => {",
@@ -568,25 +565,87 @@ export async function runChatGptMcpServer(options: {
     { name: contract === "safe" ? "codex-safe" : "codex-native", version: VERSION },
     contract === "safe" ? { instructions: ZERO_RISK_MCP_INSTRUCTIONS } : undefined,
   );
-  const terminalAgentsByBinding = new Map<string, Set<string>>();
+  interface AgentLifecycleState {
+    generation: number;
+    terminalGeneration?: number;
+    closeInFlight: boolean;
+    reactivationInFlight: number;
+  }
 
-  const terminalAgentsForBinding = (bindingId: string): Set<string> => {
-    const existing = terminalAgentsByBinding.get(bindingId);
+  interface BindingLifecycleState {
+    epoch: number;
+    rawExecInFlight: number;
+    agents: Map<string, AgentLifecycleState>;
+  }
+
+  interface AgentWaitObservation {
+    epoch: number;
+    startedDuringRawExec: boolean;
+    generations: Map<string, number>;
+    mutationInFlight: Set<string>;
+  }
+
+  const agentLifecycleByBinding = new Map<string, BindingLifecycleState>();
+
+  const lifecycleForBinding = (bindingId: string): BindingLifecycleState => {
+    const existing = agentLifecycleByBinding.get(bindingId);
     if (existing) return existing;
-    if (terminalAgentsByBinding.size >= MAX_AGENT_TERMINAL_STATE_BINDINGS) {
-      const oldestBinding = terminalAgentsByBinding.keys().next().value;
-      if (typeof oldestBinding === "string") terminalAgentsByBinding.delete(oldestBinding);
+    if (agentLifecycleByBinding.size >= MAX_AGENT_TERMINAL_STATE_BINDINGS) {
+      const oldestBinding = agentLifecycleByBinding.keys().next().value;
+      if (typeof oldestBinding === "string") agentLifecycleByBinding.delete(oldestBinding);
     }
-    const created = new Set<string>();
-    terminalAgentsByBinding.set(bindingId, created);
+    const created: BindingLifecycleState = { epoch: 0, rawExecInFlight: 0, agents: new Map() };
+    agentLifecycleByBinding.set(bindingId, created);
     return created;
   };
 
-  const rememberTerminalAgents = (bindingId: string, toolResult: unknown): void => {
+  const lifecycleForAgent = (bindingId: string, agentId: string): AgentLifecycleState => {
+    const binding = lifecycleForBinding(bindingId);
+    const existing = binding.agents.get(agentId);
+    if (existing) return existing;
+    const created: AgentLifecycleState = { generation: 0, closeInFlight: false, reactivationInFlight: 0 };
+    binding.agents.set(agentId, created);
+    return created;
+  };
+
+  const captureAgentWaitObservation = (bindingId: string, toolName: string): AgentWaitObservation | undefined => {
+    if (!isGatewayAgentWaitTool(toolName)) return undefined;
+    const binding = lifecycleForBinding(bindingId);
+    return {
+      epoch: binding.epoch,
+      startedDuringRawExec: binding.rawExecInFlight > 0,
+      generations: new Map([...binding.agents].map(([agentId, state]) => [agentId, state.generation])),
+      mutationInFlight: new Set(
+        [...binding.agents]
+          .filter(([, state]) => state.closeInFlight || state.reactivationInFlight > 0)
+          .map(([agentId]) => agentId),
+      ),
+    };
+  };
+
+  const rememberTerminalAgents = (
+    bindingId: string,
+    toolResult: unknown,
+    observation: AgentWaitObservation | undefined,
+  ): void => {
+    if (!observation) return;
     const terminalAgentIds = terminalAgentIdsFromResult(toolResult);
     if (terminalAgentIds.length === 0) return;
-    const state = terminalAgentsForBinding(bindingId);
-    for (const agentId of terminalAgentIds) state.add(agentId);
+    const binding = agentLifecycleByBinding.get(bindingId);
+    if (!binding
+      || observation.startedDuringRawExec
+      || binding.rawExecInFlight > 0
+      || binding.epoch !== observation.epoch) return;
+    for (const agentId of terminalAgentIds) {
+      const agent = lifecycleForAgent(bindingId, agentId);
+      const observedGeneration = observation.generations.get(agentId) ?? 0;
+      if (agent.generation === observedGeneration
+        && !observation.mutationInFlight.has(agentId)
+        && !agent.closeInFlight
+        && agent.reactivationInFlight === 0) {
+        agent.terminalGeneration = agent.generation;
+      }
+    }
   };
 
   const consumeAgentCloseAuthorization = (
@@ -599,16 +658,31 @@ export async function runChatGptMcpServer(options: {
     if (!target) {
       throw new Error("ChatGPT Web close_agent requires a non-empty target for terminal-state verification");
     }
-    const terminalAgents = terminalAgentsByBinding.get(bindingId);
-    if (!terminalAgents?.has(target)) {
+    const agent = lifecycleForAgent(bindingId, target);
+    if (agent.closeInFlight) {
+      throw new Error("ChatGPT Web close_agent already has an in-flight close for this target");
+    }
+    if (agent.reactivationInFlight > 0) {
+      throw new Error("ChatGPT Web close_agent cannot run while an agent reactivation is in flight for this target");
+    }
+    if (agent.terminalGeneration !== agent.generation) {
       throw new Error(
         "ChatGPT Web close_agent requires an observed terminal status for the target in this turn. "
         + "A wait timeout or empty status is not stall evidence; request a checkpoint if useful and wait again.",
       );
     }
-    // Consume before dispatch so concurrent close attempts cannot reuse the same terminal observation.
-    terminalAgents.delete(target);
+    // Reserve the target before dispatch. Advancing its generation invalidates any concurrent wait
+    // that began against the terminal generation and blocks reactivation until this close settles.
+    agent.closeInFlight = true;
+    agent.generation += 1;
+    agent.terminalGeneration = undefined;
     return target;
+  };
+
+  const finishAgentClose = (bindingId: string, target: string | undefined): void => {
+    if (!target) return;
+    const agent = agentLifecycleByBinding.get(bindingId)?.agents.get(target);
+    if (agent) agent.closeInFlight = false;
   };
 
   const invalidateTerminalObservationForReactivation = (
@@ -618,19 +692,50 @@ export async function runChatGptMcpServer(options: {
   ): string | undefined => {
     const target = reactivatedAgentTarget(toolName, invocationArguments);
     if (!target) return undefined;
-    const terminalAgents = terminalAgentsByBinding.get(bindingId);
-    if (!terminalAgents?.delete(target)) return undefined;
+    const agent = lifecycleForAgent(bindingId, target);
+    if (agent.closeInFlight) {
+      throw new Error("ChatGPT Web cannot reactivate an agent while close_agent is in flight for that target");
+    }
+    // Every attempted reactivation starts a new causal generation. Even an explicit tool error is
+    // not strong enough to prove that the remote mutation could not have crossed its activation boundary.
+    agent.generation += 1;
+    agent.terminalGeneration = undefined;
+    agent.reactivationInFlight += 1;
     return target;
+  };
+
+  const finishAgentReactivation = (bindingId: string, target: string | undefined): void => {
+    if (!target) return;
+    const agent = agentLifecycleByBinding.get(bindingId)?.agents.get(target);
+    if (agent) agent.reactivationInFlight = Math.max(0, agent.reactivationInFlight - 1);
+  };
+
+  const beginRawExec = (bindingId: string): void => {
+    const binding = lifecycleForBinding(bindingId);
+    if ([...binding.agents.values()].some(agent => agent.closeInFlight)) {
+      throw new Error("ChatGPT Web raw exec cannot start while close_agent is in flight; retry after that structured close settles");
+    }
+    binding.epoch += 1;
+    binding.rawExecInFlight += 1;
+    for (const agent of binding.agents.values()) agent.terminalGeneration = undefined;
+  };
+
+  const finishRawExec = (bindingId: string): void => {
+    const binding = lifecycleForBinding(bindingId);
+    binding.epoch += 1;
+    binding.rawExecInFlight = Math.max(0, binding.rawExecInFlight - 1);
+    for (const agent of binding.agents.values()) agent.terminalGeneration = undefined;
   };
 
   const recordAgentLifecycleResult = (
     bindingId: string,
     toolName: string,
     toolResult: { structuredContent?: unknown; content?: unknown[]; isError?: boolean },
+    waitObservation?: AgentWaitObservation,
   ): void => {
     if (toolResult.isError) return;
     if (isGatewayAgentWaitTool(toolName)) {
-      rememberTerminalAgents(bindingId, toolResult);
+      rememberTerminalAgents(bindingId, toolResult, waitObservation);
     }
   };
 
@@ -1120,43 +1225,58 @@ export async function runChatGptMcpServer(options: {
           }
           const invocationArguments = args ?? {};
           assertGatewayToolArguments(wire_name, invocationArguments);
+          const waitObservation = captureAgentWaitObservation(claimed.bindingId, wire_name);
           const reactivatedTarget = invalidateTerminalObservationForReactivation(
             claimed.bindingId,
             wire_name,
             invocationArguments,
           );
           const closeTarget = consumeAgentCloseAuthorization(claimed.bindingId, wire_name, invocationArguments);
-          const response = await invoke(claimed.bindingId, bound, gateway, {
-            input: execGatewayProgram(wire_name, input !== undefined, {
-              ...(input !== undefined ? { input } : { arguments: invocationArguments }),
-            }, bound.tools.map(wireName)),
-          }, extra.signal);
-          recordAgentLifecycleResult(claimed.bindingId, wire_name, response);
-          if (reactivatedTarget && response.isError) terminalAgentsForBinding(claimed.bindingId).add(reactivatedTarget);
-          if (closeTarget && response.isError) terminalAgentsForBinding(claimed.bindingId).add(closeTarget);
+          let response;
+          try {
+            response = await invoke(claimed.bindingId, bound, gateway, {
+              input: execGatewayProgram(wire_name, input !== undefined, {
+                ...(input !== undefined ? { input } : { arguments: invocationArguments }),
+              }, bound.tools.map(wireName)),
+            }, extra.signal);
+          } finally {
+            finishAgentReactivation(claimed.bindingId, reactivatedTarget);
+            finishAgentClose(claimed.bindingId, closeTarget);
+          }
+          recordAgentLifecycleResult(claimed.bindingId, wire_name, response, waitObservation);
           return response;
         }
         if (tool.freeform) {
           if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
           if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
-          if (tool === execGateway(bound)) terminalAgentsByBinding.delete(claimed.bindingId);
-          return invoke(claimed.bindingId, bound, tool, {
-            input: tool === execGateway(bound) ? transportBoundRawExecProgram(input, wireName(tool)) : input,
-          }, extra.signal);
+          const isRawExec = tool === execGateway(bound);
+          if (isRawExec) beginRawExec(claimed.bindingId);
+          try {
+            return await invoke(claimed.bindingId, bound, tool, {
+              input: isRawExec ? transportBoundRawExecProgram(input, wireName(tool)) : input,
+            }, extra.signal);
+          } finally {
+            if (isRawExec) finishRawExec(claimed.bindingId);
+          }
         }
         if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
         const invocationArguments = args ?? {};
         assertBrowserToolArguments(tool, invocationArguments);
+        const waitObservation = captureAgentWaitObservation(claimed.bindingId, wire_name);
         const reactivatedTarget = invalidateTerminalObservationForReactivation(
           claimed.bindingId,
           wire_name,
           invocationArguments,
         );
         const closeTarget = consumeAgentCloseAuthorization(claimed.bindingId, wire_name, invocationArguments);
-        const response = await invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
-        recordAgentLifecycleResult(claimed.bindingId, wire_name, response);
-        if (reactivatedTarget && response.isError) terminalAgentsForBinding(claimed.bindingId).add(reactivatedTarget);
-        if (closeTarget && response.isError) terminalAgentsForBinding(claimed.bindingId).add(closeTarget);
+        let response;
+        try {
+          response = await invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
+        } finally {
+          finishAgentReactivation(claimed.bindingId, reactivatedTarget);
+          finishAgentClose(claimed.bindingId, closeTarget);
+        }
+        recordAgentLifecycleResult(claimed.bindingId, wire_name, response, waitObservation);
         return response;
       });
     },
