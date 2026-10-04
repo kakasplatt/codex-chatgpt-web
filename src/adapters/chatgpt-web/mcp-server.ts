@@ -34,11 +34,18 @@ const GATEWAY_AGENT_WAIT_TOOL_NAMES = new Set([
   "collaboration__wait_agent",
 ]);
 
+const GATEWAY_AGENT_CLOSE_TOOL_NAMES = new Set([
+  "multi_agent_v1__close_agent",
+  "multi_agent_v2__close_agent",
+  "collaboration__close_agent",
+]);
+
 const turnTokenSchema = z.string().min(20).max(256);
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
 const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly ${CHATGPT_WEB_AGENT_WAIT_POLL_MS / 1_000} seconds per call, matching the Codex default, then release the MCP channel so spawned Web agents can use their own tools. A wait timeout is not task completion; check agent progress and wait again if needed. Keep the native tool's declared arguments.`;
+const AGENT_CLOSE_ORCHESTRATION_RULE = "ChatGPT Web orchestration rule: do not call close_agent for a worker whose latest observed status is still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint with the available non-interrupting message or follow-up tool (send_input in Compatibility V1), then wait again. Close it only after a terminal status or explicit no-progress/stall evidence.";
 // Native command calls share a transport with the two-minute MCP tunnel. Keep each command/session
 // poll bounded so a long-running process yields a session_id instead of occupying the invocation
 // until the 90-second local deadline retires the whole turn binding.
@@ -166,10 +173,19 @@ function isGatewayAgentWaitTool(name: string): boolean {
   return GATEWAY_AGENT_WAIT_TOOL_NAMES.has(name);
 }
 
+function isAgentCloseTool(tool: CodexTool): boolean {
+  return isGatewayAgentCloseTool(wireName(tool));
+}
+
+function isGatewayAgentCloseTool(name: string): boolean {
+  return GATEWAY_AGENT_CLOSE_TOOL_NAMES.has(name) || name.endsWith("__close_agent");
+}
+
 function browserToolDescription(tool: CodexTool): string {
-  if (isAgentWaitTool(tool)) return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
+  if (isAgentWaitTool(tool)) return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}\n\n${AGENT_CLOSE_ORCHESTRATION_RULE}`;
+  if (isAgentCloseTool(tool)) return `${tool.description}\n\n${AGENT_CLOSE_ORCHESTRATION_RULE}`;
   if (!tool.namespace && tool.name === "exec") {
-    return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE} This rule is enforced for wait_agent calls made inside exec; recursive raw exec is unavailable.`;
+    return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE} This rule is enforced for wait_agent calls made inside exec; recursive raw exec is unavailable.\n\n${AGENT_CLOSE_ORCHESTRATION_RULE}`;
   }
   return tool.description;
 }
@@ -268,8 +284,11 @@ interface GatewayToolCatalogPage {
 }
 
 function gatewayToolDescription(tool: GatewayToolDescriptor): string {
-  if (!isGatewayAgentWaitTool(tool.name)) return tool.description;
-  return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
+  if (isGatewayAgentWaitTool(tool.name)) {
+    return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}\n\n${AGENT_CLOSE_ORCHESTRATION_RULE}`;
+  }
+  if (isGatewayAgentCloseTool(tool.name)) return `${tool.description}\n\n${AGENT_CLOSE_ORCHESTRATION_RULE}`;
+  return tool.description;
 }
 
 function gatewayToolCatalogProgram(options: {

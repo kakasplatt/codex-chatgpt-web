@@ -2813,6 +2813,13 @@ describe("ChatGPT outer-native harness v4", () => {
           properties: { timeout_ms: { type: "number", default: 180_000 } },
         },
       },
+      {
+        name: "close_agent", namespace: "multi_agent_v1", description: "Close an agent when it is no longer needed.",
+        parameters: {
+          type: "object", additionalProperties: false,
+          properties: { target: { type: "string" } }, required: ["target"],
+        },
+      },
     ];
     const token = await broker.register(gatewayOnlyEnvironment, 60_000);
     const transport = new StdioClientTransport({
@@ -3020,12 +3027,40 @@ describe("ChatGPT outer-native harness v4", () => {
           wire_name: "exec",
           name: "exec",
           kind: "freeform",
-          description: expect.stringContaining("enforced for wait_agent calls made inside exec"),
+          description: expect.stringContaining("still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint"),
         }],
         total: 1,
         next_offset: null,
       });
       expect(rawGatewayInventory.structuredContent).not.toHaveProperty("discovery_tools");
+
+      const directCloseInventory = await inventoryThroughGateway(
+        "multi_agent_v1__close_agent",
+        true,
+        ["exec", "multi_agent_v1__close_agent"],
+      );
+      expect(directCloseInventory.structuredContent).toMatchObject({
+        total: 1,
+        tools: [{
+          wire_name: "multi_agent_v1__close_agent",
+          kind: "function",
+          description: expect.stringContaining("still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint"),
+        }],
+      });
+
+      const deferredCloseInventory = await inventoryThroughGateway(
+        "multi_agent_v2__close_agent",
+        true,
+        ["exec", "multi_agent_v2__close_agent"],
+      );
+      expect(deferredCloseInventory.structuredContent).toMatchObject({
+        total: 1,
+        tools: [{
+          wire_name: "multi_agent_v2__close_agent",
+          kind: "gateway",
+          description: expect.stringContaining("still running. A wait timeout is not evidence that the worker is stalled. If a running worker appears stuck, first request a checkpoint"),
+        }],
+      });
 
       const rawWeb = call("codex_tool_call", {
         turn_token: token,
@@ -3156,6 +3191,8 @@ describe("ChatGPT outer-native harness v4", () => {
         const catalog = inventory.structuredContent as { tools: Array<{ description: string; parameters: { properties: Record<string, unknown>; required: string[] } }> };
         expect(catalog.tools).toHaveLength(1);
         expect(catalog.tools[0]!.description).toContain("exactly 30 seconds");
+        expect(catalog.tools[0]!.description).toContain("wait timeout");
+        expect(catalog.tools[0]!.description).toContain("still running");
         expect(catalog.tools[0]!.description).not.toContain("target ids");
         if (wait.direct) {
           const schema = catalog.tools[0]!.parameters;
