@@ -133,6 +133,12 @@ function toolAcceptsArgument(tool: CodexTool, name: string): boolean {
     || tool.parameters.additionalProperties !== false;
 }
 
+function assertToolSupportsBoundedCommandPolling(tool: CodexTool, argumentName: string): void {
+  if (!toolAcceptsArgument(tool, argumentName)) {
+    throw new Error(`The current native ${tool.name} tool does not support ${argumentName} required for bounded command polling`);
+  }
+}
+
 function gatewayToolNameIsValid(name: string): boolean {
   return /^[A-Za-z0-9_$]+$/.test(name);
 }
@@ -445,10 +451,16 @@ function execCommandGatewayProgram(
   const shellCommandName = gatewayNestedToolName("shell_command");
   return execGatewayResultProgram([
     "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native command tool registry is unavailable\");",
-    "const nativeCommandNames = new Set(ALL_TOOLS.map(tool => tool?.name));",
-    `const nativeCommandCandidates = ${JSON.stringify([execCommandName, shellCommandName])}.filter(name => nativeCommandNames.has(name));`,
+    `const nativeCommandCandidates = ALL_TOOLS.filter(tool => ${JSON.stringify([execCommandName, shellCommandName])}.includes(tool?.name));`,
     "if (nativeCommandCandidates.length !== 1) throw new Error(\"Expected exactly one native command tool; found \" + (nativeCommandCandidates.join(\", \") || \"none\"));",
-    "const nativeCommandName = nativeCommandCandidates[0];",
+    "const nativeCommandTool = nativeCommandCandidates[0];",
+    "const nativeCommandName = nativeCommandTool.name;",
+    `const boundedPollingArgument = nativeCommandName === ${JSON.stringify(execCommandName)} ? "yield_time_ms" : "timeout_ms";`,
+    "const nativeCommandParameters = nativeCommandTool?.parameters;",
+    "const nativeCommandProperties = nativeCommandParameters?.properties;",
+    "if (nativeCommandParameters && typeof nativeCommandParameters === \"object\" && !Array.isArray(nativeCommandParameters) && nativeCommandParameters.additionalProperties === false && (!nativeCommandProperties || typeof nativeCommandProperties !== \"object\" || Array.isArray(nativeCommandProperties) || !Object.prototype.hasOwnProperty.call(nativeCommandProperties, boundedPollingArgument))) {",
+    "  throw new Error(\"Native command tool \" + nativeCommandName + \" does not support \" + boundedPollingArgument + \" required for bounded command polling\");",
+    "}",
     "const nativeCommand = tools[nativeCommandName];",
     "if (typeof nativeCommand !== \"function\") throw new Error(\"Native command tool \" + nativeCommandName + \" is listed but unavailable\");",
     `const nativeCommandInput = nativeCommandName === ${JSON.stringify(execCommandName)} ? ${JSON.stringify(execCommandArguments)} : ${JSON.stringify(shellCommandArguments)};`,
@@ -665,9 +677,7 @@ export async function runChatGptMcpServer(options: {
         const execCommandArguments = {
           cmd,
           ...(workdir ? { workdir } : {}),
-          ...(!tool || tool.name !== "exec_command" || toolAcceptsArgument(tool, "yield_time_ms")
-            ? { yield_time_ms: commandYieldMs }
-            : {}),
+          yield_time_ms: commandYieldMs,
           ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
           ...(tty !== undefined ? { tty } : {}),
           ...permissions,
@@ -675,9 +685,7 @@ export async function runChatGptMcpServer(options: {
         const shellCommandArguments = {
           command: cmd,
           ...(workdir ? { workdir } : {}),
-          ...(!tool || tool.name !== "shell_command" || toolAcceptsArgument(tool, "timeout_ms")
-            ? { timeout_ms: commandYieldMs }
-            : {}),
+          timeout_ms: commandYieldMs,
           ...permissions,
         };
         if (tool) {
@@ -688,6 +696,10 @@ export async function runChatGptMcpServer(options: {
               throw new Error(`The current native ${tool.name} tool does not support ${key}`);
             }
           }
+          assertToolSupportsBoundedCommandPolling(
+            tool,
+            tool.name === "exec_command" ? "yield_time_ms" : "timeout_ms",
+          );
           const args = tool.name === "exec_command" ? execCommandArguments : shellCommandArguments;
           return invoke(claimed.bindingId, bound, tool, { arguments: args }, extra.signal);
         }
@@ -725,10 +737,11 @@ export async function runChatGptMcpServer(options: {
         const bound = claimed.environment;
         const commandYieldMs = Math.min(yield_time_ms ?? CHATGPT_WEB_NATIVE_COMMAND_POLL_MS, CHATGPT_WEB_NATIVE_COMMAND_POLL_MS);
         const tool = exactTool(bound, "write_stdin");
+        if (tool) assertToolSupportsBoundedCommandPolling(tool, "yield_time_ms");
         const payload = { arguments: {
           session_id,
           ...(chars !== undefined ? { chars } : {}),
-          ...(!tool || toolAcceptsArgument(tool, "yield_time_ms") ? { yield_time_ms: commandYieldMs } : {}),
+          yield_time_ms: commandYieldMs,
           ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
         } };
         return tool
