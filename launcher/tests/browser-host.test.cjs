@@ -2739,6 +2739,215 @@ test("a retained conversation is not reused for a different connector identity",
   assert.equal(retained.status, "ready");
 });
 
+test("automatic turn bootstrap commits a persisted ChatGPT conversation URL before marking its surface", async () => {
+  const conversationUrl = "https://chatgpt.com/c/00000000-0000-4000-8000-000000000101";
+  const calls = [];
+  const contents = new EventEmitter();
+  let currentUrl = "about:blank";
+  contents.isDestroyed = () => false;
+  contents.getURL = () => currentUrl;
+  contents.stop = () => calls.push("stop");
+  contents.loadURL = async (url) => {
+    calls.push(["load", url]);
+    currentUrl = url;
+    queueMicrotask(() => contents.emit("did-finish-load"));
+  };
+  const tab = {
+    id: "restored-bootstrap",
+    traceId: "trace_restored_bootstrap",
+    initializingSurface: true,
+    view: { webContents: contents },
+  };
+  const fixture = {
+    turnTabs: new Map([[tab.id, tab]]),
+    markTurnTabSurface: async current => calls.push(["mark", current.id]),
+    removeTurnTab: () => assert.fail("successful restored bootstrap must not remove its tab"),
+    logger: { error: () => assert.fail("successful restored bootstrap must not log an error") },
+  };
+
+  await BrowserHost.prototype.initializeTurnTab.call(fixture, tab, undefined, conversationUrl);
+
+  assert.deepEqual(calls, [["load", conversationUrl], ["mark", tab.id]]);
+  assert.equal(tab.initializingSurface, false);
+});
+
+test("persisted conversation bootstrap failures never log the private ChatGPT conversation UUID", async () => {
+  const conversationUrl = "https://chatgpt.com/c/00000000-0000-4000-8000-000000000102";
+  const logs = [];
+  const contents = new EventEmitter();
+  contents.isDestroyed = () => false;
+  contents.getURL = () => "about:blank";
+  contents.stop = () => {};
+  contents.loadURL = () => {
+    queueMicrotask(() => contents.emit(
+      "did-fail-load",
+      {},
+      -2,
+      "ERR_FAILED",
+      conversationUrl,
+      true,
+    ));
+    return new Promise(() => {});
+  };
+  const tab = {
+    id: "restored-bootstrap-failed",
+    traceId: "trace_restored_bootstrap_failed",
+    initializingSurface: true,
+    view: { webContents: contents },
+  };
+  const fixture = {
+    turnTabs: new Map([[tab.id, tab]]),
+    markTurnTabSurface: async () => assert.fail("failed navigation must not mark the surface"),
+    removeTurnTab(current) { this.turnTabs.delete(current.id); },
+    logger: { error: (event, detail) => logs.push([event, detail]) },
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.initializeTurnTab.call(fixture, tab, undefined, conversationUrl),
+    /ERR_FAILED/,
+  );
+  assert.equal(fixture.turnTabs.has(tab.id), false);
+  assert.equal(logs.length, 1);
+  const serialized = JSON.stringify(logs);
+  assert.doesNotMatch(serialized, /00000000-0000-4000-8000-000000000102/);
+  assert.doesNotMatch(serialized, /\/c\//);
+  assert.deepEqual(logs[0], [
+    "browser.tab_initialization_failed",
+    { tabId: tab.id, traceId: tab.traceId, errorType: "Error" },
+  ]);
+});
+
+test("automatic tab navigation failures log only the origin for a private persisted conversation", () => {
+  const conversationUrl = "https://chatgpt.com/c/00000000-0000-4000-8000-000000000103";
+  const logs = [];
+  const removed = [];
+  const contents = new EventEmitter();
+  contents.setWindowOpenHandler = () => {};
+  const tab = {
+    id: "private-navigation-failure",
+    traceId: "trace_private_navigation_failure",
+    view: { webContents: contents },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    logger: { error: (event, detail) => logs.push([event, detail]) },
+    removeTurnTab: current => removed.push(current.id),
+    publishState() {},
+    snapshot: () => ({}),
+  });
+  fixture.bindTurnContents(tab);
+
+  contents.emit("did-fail-load", {}, -2, "ERR_FAILED", conversationUrl, true);
+
+  assert.deepEqual(removed, [tab.id]);
+  assert.deepEqual(logs, [["browser.tab_navigation_failed", {
+    tabId: tab.id,
+    traceId: tab.traceId,
+    errorCode: -2,
+    errorDescription: "ERR_FAILED",
+    origin: "https://chatgpt.com",
+  }]]);
+  const serialized = JSON.stringify(logs);
+  assert.doesNotMatch(serialized, /00000000-0000-4000-8000-000000000103/);
+  assert.doesNotMatch(serialized, /\/c\//);
+});
+
+test("a resumed automatic turn restores its persisted ChatGPT conversation into a new tab", async () => {
+  const conversationKey = "e".repeat(64);
+  const conversationUrl = "https://chatgpt.com/c/00000000-0000-4000-8000-000000000001";
+  const created = {
+    id: "restored",
+    surfaceId: "surface-restored",
+    connectorBound: false,
+  };
+  const calls = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map(),
+    userCancelledTurnOwners: new Map(),
+    retainedConversationStore: {
+      get(key, connectorIdentity) {
+        calls.push(["get", key, connectorIdentity]);
+        return { url: conversationUrl, connectorIdentity: "Codex Native2", updatedAt: 1 };
+      },
+    },
+    createTurnTab: async (...args) => {
+      calls.push(["create", ...args]);
+      return created;
+    },
+    writeDescriptor: () => calls.push(["descriptor"]),
+    syncViewVisibility: () => calls.push(["visible"]),
+    publishState: () => calls.push(["published"]),
+    snapshot: () => ({ tabs: [] }),
+    logger: { info: (event) => calls.push([event]), warn: () => {} },
+  });
+
+  const lease = await fixture.beginTurn(
+    "trace_resume",
+    false,
+    222,
+    conversationKey,
+    "Codex Native2",
+  );
+
+  assert.deepEqual(lease, {
+    surfaceId: "surface-restored",
+    tabId: "restored",
+    reused: true,
+    connectorBound: true,
+  });
+  assert.equal(created.connectorBound, true);
+  assert.equal(created.conversationUrl, conversationUrl);
+  assert.deepEqual(calls.slice(0, 2), [
+    ["get", conversationKey, "Codex Native2"],
+    ["create", "trace_resume", 222, conversationKey, "Codex Native2", undefined, conversationUrl],
+  ]);
+  assert.equal(calls.some(([event]) => event === "browser.tab_restored"), true);
+});
+
+test("a stale persisted conversation falls back to a fresh full-context tab unless retention is required", async () => {
+  for (const required of [false, true]) {
+    const conversationKey = "f".repeat(64);
+    const conversationUrl = "https://chatgpt.com/c/00000000-0000-4000-8000-000000000002";
+    const deleted = [];
+    const created = [];
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      manualOperation: null,
+      turnTabs: new Map(),
+      userCancelledTurnOwners: new Map(),
+      retainedConversationStore: {
+        get: () => ({ url: conversationUrl, connectorIdentity: "Codex Native2", updatedAt: 1 }),
+        delete: key => { deleted.push(key); return true; },
+      },
+      createTurnTab: async (...args) => {
+        created.push(args);
+        if (args.at(-1) === conversationUrl) throw new Error("saved conversation is unavailable");
+        return { id: "fresh", surfaceId: "surface-fresh" };
+      },
+      writeDescriptor() {},
+      syncViewVisibility() {},
+      publishState() {},
+      snapshot: () => ({ tabs: [] }),
+      logger: { info() {}, warn() {} },
+    });
+
+    if (required) {
+      await assert.rejects(
+        fixture.beginTurn("trace_resume", false, 222, conversationKey, "Codex Native2", true),
+        error => error?.code === "retained_conversation_unavailable",
+      );
+      assert.equal(created.length, 1);
+    } else {
+      assert.deepEqual(
+        await fixture.beginTurn("trace_resume", false, 222, conversationKey, "Codex Native2"),
+        { surfaceId: "surface-fresh", tabId: "fresh", reused: false, connectorBound: false },
+      );
+      assert.equal(created.length, 2);
+      assert.equal(created[1].at(-1), undefined);
+    }
+    assert.deepEqual(deleted, [conversationKey]);
+  }
+});
+
 test("an Automatic turn never reuses a retained Zero Risk conversation", async () => {
   const conversationKey = "m".repeat(64);
   const retained = {
@@ -2859,6 +3068,94 @@ test("a required retained conversation fails before creating a browser tab", asy
       && /retained ChatGPT conversation is no longer available/.test(error.message),
   );
   assert.equal(created, false);
+});
+
+test("a successfully retained automatic turn persists its canonical ChatGPT conversation URL", async () => {
+  const conversationKey = "9".repeat(64);
+  const remembered = [];
+  const tab = {
+    id: "persisted-tab",
+    traceId: "trace_persisted",
+    helperPid: 555,
+    status: "running",
+    loading: true,
+    conversationKey,
+    connectorIdentity: "Codex Native2",
+    connectorBound: false,
+    interactionMode: "automatic",
+    url: "https://chatgpt.com/c/00000000-0000-4000-8000-000000000003?model=gpt-5#answer",
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
+    retainedConversationStore: {
+      remember: (...args) => { remembered.push(args); return true; },
+      delete: () => assert.fail("durable conversation must remain valid"),
+    },
+    syncPowerSaveBlocker() {},
+    snapshot: () => ({ tabs: [] }),
+    publishState() {},
+    writeDescriptor() {},
+    logger: { info() {} },
+  });
+
+  assert.deepEqual(
+    await fixture.endTurn(tab.traceId, tab.helperPid, "completed", false, undefined, true, true),
+    { cancelledByUser: false },
+  );
+  assert.equal(tab.status, "ready");
+  assert.equal(tab.connectorBound, true);
+  assert.equal(tab.conversationUrl, "https://chatgpt.com/c/00000000-0000-4000-8000-000000000003");
+  assert.deepEqual(remembered, [[
+    conversationKey,
+    "https://chatgpt.com/c/00000000-0000-4000-8000-000000000003",
+    "Codex Native2",
+  ]]);
+});
+
+test("temporary retained tabs stay process-local and clear any stale durable mapping", async () => {
+  const conversationKey = "8".repeat(64);
+  const deleted = [];
+  const tab = {
+    id: "temporary-tab",
+    traceId: "trace_temporary",
+    helperPid: 556,
+    status: "running",
+    loading: true,
+    conversationKey,
+    connectorIdentity: "Codex Native2",
+    connectorBound: false,
+    interactionMode: "automatic",
+    url: "https://chatgpt.com/c/00000000-0000-4000-8000-000000000004?temporary-chat=true",
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
+    retainedConversationStore: {
+      remember: () => assert.fail("temporary conversations are not durable"),
+      delete: key => { deleted.push(key); return true; },
+    },
+    syncPowerSaveBlocker() {},
+    snapshot: () => ({ tabs: [] }),
+    publishState() {},
+    writeDescriptor() {},
+    logger: { info() {} },
+  });
+
+  await fixture.endTurn(tab.traceId, tab.helperPid, "completed", false, undefined, true, true);
+  assert.equal(tab.status, "ready");
+  assert.equal(tab.conversationUrl, undefined);
+  assert.deepEqual(deleted, [conversationKey]);
+});
+
+test("launcher main wires a profile-local retained conversation store into BrowserHost", () => {
+  const source = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
+  assert.match(source, /new RetainedConversationStore\(path\.join\(app\.getPath\("userData"\), "retained-conversations\.json"\)\)/);
+  assert.match(source, /retainedConversationStore,/);
 });
 
 test("five browser tabs are a hard account-safety limit", async () => {
@@ -3769,9 +4066,15 @@ test("off-on-off fresh conversation changes retire completed history before it c
     const config = { experimentalFreshConversationPerTurn: false, useSavedChats: false };
     let handler, failSetup = true, commit;
     const removed = [];
+    let durableClears = 0;
     const fixture = Object.assign(Object.create(BrowserHost.prototype), {
       manualOperation: null, turnTabs: new Map([[stale.id, stale], [manual.id, manual]]),
       userCancelledTurnOwners: new Map(), selectedTabId: "home", logger: { info() {} },
+      retainedConversationStore: {
+        get() { return undefined; },
+        delete() { return true; },
+        clear() { durableClears += 1; },
+      },
       syncViewVisibility() {}, snapshot: () => ({}), publishState() {}, writeDescriptor() {},
       removeTurnTab(tab, abortRunning) {
         assert.equal(abortRunning, false);
@@ -3795,6 +4098,7 @@ test("off-on-off fresh conversation changes retire completed history before it c
     });
     await assert.rejects(() => handler(null, true), /setup rejected/);
     assert.equal(fixture.turnTabs.get(stale.id), stale, "failed setup preserves prior history");
+    assert.equal(durableClears, 0, "failed setup preserves durable history");
     failSetup = false;
     const enabling = handler(null, true);
     assert.equal(fixture.turnTabs.has(stale.id), true, "pending setup must not release history");
@@ -3803,6 +4107,7 @@ test("off-on-off fresh conversation changes retire completed history before it c
     fixture.turnTabs.set(running.id, running);
     commit();
     await enabling;
+    assert.equal(durableClears, 1, "committed setting change clears durable history");
     assert.deepEqual(removed, savedChats ? [stale.id, manual.id] : [stale.id]);
     assert.equal(fixture.turnTabs.get(running.id), running);
     assert.equal(fixture.turnTabs.get(manual.id), savedChats ? undefined : manual);
@@ -3810,6 +4115,7 @@ test("off-on-off fresh conversation changes retire completed history before it c
     const disabling = handler(null, false);
     commit();
     await disabling;
+    assert.equal(durableClears, 2, "each committed retention-policy change clears durable history");
     const lease = await fixture.beginTurn("new-turn", false, 123, key, "Codex Native2");
     assert.equal(lease.reused, false);
     assert.equal(lease.tabId, "new-chat");

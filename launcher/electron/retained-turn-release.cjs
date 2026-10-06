@@ -1,4 +1,5 @@
 function releaseRetainedConversation(host, conversationKey) {
+  host.retainedConversationStore?.delete(conversationKey);
   const retained = [...host.turnTabs.values()].filter((tab) => (
     tab.status === "ready" && tab.conversationKey === conversationKey
   ));

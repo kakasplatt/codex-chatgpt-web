@@ -663,6 +663,7 @@ test("browser control server reports a missing retained conversation as a typed 
 
 test("browser control server releases only ready tabs for an authenticated conversation key", async () => {
   const removed = [];
+  const durableDeleted = [];
   const releaseEvents = [];
   const ready = {
     id: "ready-tab",
@@ -678,6 +679,7 @@ test("browser control server releases only ready tabs for an authenticated conve
   };
   const host = {
     turnTabs: new Map([[ready.id, ready], [running.id, running]]),
+    retainedConversationStore: { delete: key => { durableDeleted.push(key); return true; } },
     logger: { info: (event, detail) => releaseEvents.push([event, detail]) },
     removeTurnTab(tab, abortRunning) {
       assert.equal(abortRunning, false);
@@ -710,6 +712,7 @@ test("browser control server releases only ready tabs for an authenticated conve
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { ok: true, released: 1 });
     assert.deepEqual(removed, ["ready-tab"]);
+    assert.deepEqual(durableDeleted, ["b".repeat(64)]);
     assert.deepEqual([...host.turnTabs.keys()], ["running-tab"]);
     assert.deepEqual(releaseEvents, [["browser.tab_released", {
       tabId: "ready-tab",
@@ -717,6 +720,48 @@ test("browser control server releases only ready tabs for an authenticated conve
       status: "ready",
       reason: "retained_conversation_superseded",
     }]]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("browser control server does not release the in-memory conversation when durable deletion fails", async () => {
+  const key = "c".repeat(64);
+  const ready = {
+    id: "ready-durable-failure",
+    traceId: "ready-durable-failure-trace",
+    status: "ready",
+    conversationKey: key,
+  };
+  const removed = [];
+  const host = {
+    turnTabs: new Map([[ready.id, ready]]),
+    retainedConversationStore: { delete: () => { throw new Error("durable delete failed"); } },
+    logger: { info() {}, warn() {} },
+    removeTurnTab(tab) {
+      removed.push(tab.id);
+      this.turnTabs.delete(tab.id);
+    },
+  };
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {} },
+    getBrowserHost: () => host,
+    getPreferences: () => ({}),
+  }).start();
+  const descriptor = server.descriptor();
+  try {
+    const response = await fetch(`${descriptor.endpoint}/v1/turn/release`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ conversationKey: key }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /durable delete failed/);
+    assert.deepEqual(removed, []);
+    assert.equal(host.turnTabs.get(ready.id), ready);
   } finally {
     await server.close();
   }

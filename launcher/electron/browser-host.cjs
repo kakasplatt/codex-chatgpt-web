@@ -3,6 +3,7 @@ const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { canonicalChatGptConversationUrl } = require("./retained-conversation-store.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -331,6 +332,7 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    retainedConversationStore,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -361,6 +363,7 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.retainedConversationStore = retainedConversationStore;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -565,7 +568,7 @@ class BrowserHost {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
-  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal) {
+  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal, initialUrl = IDLE_BROWSER_URL) {
     signal?.throwIfAborted();
     if (this.turnTabs.size >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
@@ -622,11 +625,11 @@ class BrowserHost {
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
-    await this.initializeTurnTab(tab, signal);
+    await this.initializeTurnTab(tab, signal, initialUrl);
     return tab;
   }
 
-  async initializeTurnTab(tab, signal) {
+  async initializeTurnTab(tab, signal, initialUrl = IDLE_BROWSER_URL) {
     let onAbort;
     const aborted = new Promise((_, reject) => {
       onAbort = () => reject(signal.reason);
@@ -635,18 +638,21 @@ class BrowserHost {
     try {
       signal?.throwIfAborted();
       await Promise.race([(async () => {
-        await loadCommittedBrowserSurface(tab.view.webContents, IDLE_BROWSER_URL);
+        await loadCommittedBrowserSurface(
+          tab.view.webContents,
+          initialUrl,
+          initialUrl === IDLE_BROWSER_URL ? PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS : TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
+        );
         signal?.throwIfAborted();
         await this.markTurnTabSurface(tab);
       })(), aborted]);
       signal?.throwIfAborted();
       tab.initializingSurface = false;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       this.logger.error("browser.tab_initialization_failed", {
         tabId: tab.id,
         traceId: tab.traceId,
-        message,
+        ...navigationErrorForLog(error),
       });
       // Destroy the exact pending document too: abandoning its promise alone leaves renderer
       // work running and lets a late ownership mark race a future browser turn.
@@ -896,7 +902,7 @@ class BrowserHost {
         traceId: tab.traceId,
         errorCode,
         errorDescription,
-        url,
+        origin: navigationOriginForLog(url),
       });
       this.removeTurnTab(tab, true);
     });
@@ -2558,6 +2564,53 @@ class BrowserHost {
         connectorBound: existing.connectorBound === true,
       };
     }
+    const persisted = conversationKey
+      ? this.retainedConversationStore?.get(conversationKey, connectorIdentity)
+      : undefined;
+    if (persisted) {
+      try {
+        const restored = await this.createTurnTab(
+          traceId,
+          helperPid,
+          conversationKey,
+          connectorIdentity,
+          signal,
+          persisted.url,
+        );
+        restored.connectorBound = connectorIdentity ? true : restored.connectorBound === true;
+        restored.conversationUrl = persisted.url;
+        this.selectedTabId = restored.id;
+        if (reveal) this.show();
+        else this.syncViewVisibility();
+        this.publishState?.(this.snapshot());
+        this.writeDescriptor();
+        this.logger.info("browser.tab_restored", { tabId: restored.id, traceId });
+        return {
+          surfaceId: restored.surfaceId,
+          tabId: restored.id,
+          reused: true,
+          connectorBound: restored.connectorBound === true,
+        };
+      } catch (error) {
+        try {
+          this.retainedConversationStore?.delete(conversationKey);
+        } catch (deleteError) {
+          this.logger.warn("browser.retained_conversation_delete_failed", {
+            traceId,
+            errorType: deleteError?.name || "Error",
+          });
+        }
+        this.logger.warn("browser.tab_restore_failed", {
+          traceId,
+          errorType: error?.name || "Error",
+        });
+        if (requireRetainedConversation) {
+          const unavailable = new Error("The retained ChatGPT conversation is no longer available");
+          unavailable.code = "retained_conversation_unavailable";
+          throw unavailable;
+        }
+      }
+    }
     if (requireRetainedConversation) {
       const error = new Error("The retained ChatGPT conversation is no longer available");
       error.code = "retained_conversation_unavailable";
@@ -2616,6 +2669,24 @@ class BrowserHost {
       && tab.conversationKey
       && (!tab.connectorIdentity || connectorBound)) {
       tab.connectorBound = connectorBound === true;
+      const conversationUrl = canonicalChatGptConversationUrl(tab.url);
+      tab.conversationUrl = conversationUrl;
+      try {
+        if (conversationUrl) {
+          this.retainedConversationStore?.remember(
+            tab.conversationKey,
+            conversationUrl,
+            tab.connectorIdentity,
+          );
+        } else {
+          this.retainedConversationStore?.delete(tab.conversationKey);
+        }
+      } catch (error) {
+        this.logger.warn("browser.retained_conversation_persist_failed", {
+          traceId,
+          errorType: error?.name || "Error",
+        });
+      }
       tab.lastHeartbeatAt = Date.now();
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
