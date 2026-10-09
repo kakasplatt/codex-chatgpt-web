@@ -272,10 +272,17 @@ export class ChatGptThreadEnvironmentStore {
       this.loaded = true;
       return;
     }
-    const invalidState = (reason: string) => new ChatGptWebAdapterError(
+    // Only a damaged-JSON file is rebuilt from a fresh task's verified environment. An unfamiliar
+    // format or invalid records are never discarded, so a fresh task fails the same way.
+    const invalidState = (reason: string, freshTaskRepairs = false) => new ChatGptWebAdapterError(
       `The saved Codex task environment file (thread-environments.json) ${reason}. `
-      + "Its contents have not been overwritten. Start a fresh Codex task to supply its current workspace and permissions. "
-      + "If that also fails, export Activity > Export safe log; do not delete your launcher settings.",
+      + "Its contents have not been overwritten. "
+      + (freshTaskRepairs
+        ? "Start a fresh Codex task to supply its current workspace and permissions. "
+          + "If that also fails, export Activity > Export safe log; do not delete your launcher settings."
+        : "A fresh Codex task will not repair it. Move thread-environments.json aside so it can be rebuilt "
+          + "(tasks started before then must be restarted), or export Activity > Export safe log and ask for help. "
+          + "Do not delete your launcher settings."),
       { status: 409, errorType: "invalid_request_error", code: "thread_environment_state_invalid", retryable: false },
     );
     const source = readFileSync(this.path, "utf8");
@@ -283,10 +290,10 @@ export class ChatGptThreadEnvironmentStore {
     try {
       decoded = JSON.parse(source);
     } catch {
-      if (!verifiedEnvironment) throw invalidState("contains invalid JSON");
+      if (!verifiedEnvironment) throw invalidState("contains invalid JSON", true);
       // Preserve the original for diagnosis. Never infer permissions from a damaged cache,
       // discard an unfamiliar schema, or turn a read/rename permission error into recovery.
-      if (readFileSync(this.path, "utf8") !== source) throw invalidState("changed during recovery");
+      if (readFileSync(this.path, "utf8") !== source) throw invalidState("changed during recovery", true);
       const backup = `${this.path}.corrupt-${crypto.randomUUID()}`;
       renameSync(this.path, backup);
       console.warn("[chatgpt-web] preserved corrupt thread-environments.json beside the original; rebuilding from a verified current Codex environment");

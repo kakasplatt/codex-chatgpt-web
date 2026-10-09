@@ -720,6 +720,7 @@ describe("trusted Codex task environment continuity", () => {
     // Repeating a failed load must not mark the empty in-memory cache as successfully loaded.
     for (let attempt = 0; attempt < 2; attempt++) {
       expect(() => store.resolve(continuation)).toThrow("contains invalid JSON");
+      expect(() => store.resolve(continuation)).toThrow("Start a fresh Codex task");
       try { store.resolve(continuation); } catch (error) {
         expect(error).toMatchObject({ code: "thread_environment_state_invalid", retryable: false });
         expect((error as Error).message).not.toContain("private-original");
@@ -748,6 +749,9 @@ describe("trusted Codex task environment continuity", () => {
       const store = new ChatGptThreadEnvironmentStore(statePath);
       for (let attempt = 0; attempt < 2; attempt++) {
         expect(() => store.resolve(currentWire())).toThrow("thread-environments.json");
+        // A fresh task cannot repair these files, so the message must not suggest one.
+        expect(() => store.resolve(currentWire())).toThrow("A fresh Codex task will not repair it");
+        expect(() => store.resolve(currentWire())).not.toThrow("Start a fresh Codex task");
         expect(readFileSync(statePath, "utf8")).toBe(original);
         expect(readdirSync(stateRoot)).toEqual(["thread-environments.json"]);
       }
