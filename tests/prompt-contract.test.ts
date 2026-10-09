@@ -81,6 +81,8 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex_tool_inventory|codex\.control\.turn_complete/);
   expect(transportOnly).toContain("Do not claim a safety or permission block without an explicit tool result or platform error supporting it.");
   expect(transportOnly).not.toMatch(/expired|invalid|revoked|blocked|security layer|permission gate/i);
+  // A chat confirmation may resolve a safety refusal, but never reverse a user or approval-flow denial.
+  expect(transportOnly).toContain("A denial by the user or by the Codex approval flow is final for that action: chat confirmation does not reverse it, and you must not retry it or route it through another tool.");
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
   expect(compiled.text).not.toContain("internally compacts this response");
 });
