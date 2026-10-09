@@ -38,6 +38,9 @@ interface StoredThreadEnvironmentFile {
 
 const MAX_THREAD_ENVIRONMENTS = 256;
 const THREAD_ENVIRONMENT_TTL_MS = 30 * 24 * 60 * 60_000;
+// Repeating an unchanged environment only renews updatedAt, which is measured in days. Skip the
+// durable write for it so every request does not pay an fsync.
+const THREAD_ENVIRONMENT_REFRESH_MS = 60_000;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -150,6 +153,7 @@ function sameAuthority(left: ChatGptTurnEnvironment, right: ChatGptTurnEnvironme
 export class ChatGptThreadEnvironmentStore {
   private loaded = false;
   private readonly threads = new Map<string, StoredThreadEnvironment>();
+  private lastPersistedAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly path?: string,
@@ -256,14 +260,22 @@ export class ChatGptThreadEnvironmentStore {
     // Only this path has already verified authority from the current request, native
     // rollout, or a successfully loaded parent. A cache read alone may never recover it.
     this.load(true);
+    const now = this.now();
+    const previous = this.threads.get(threadId);
+    const next = authority(environment, now);
+    const unchanged = previous !== undefined
+      && JSON.stringify({ ...previous, updatedAt: 0 }) === JSON.stringify({ ...next, updatedAt: 0 });
     this.threads.delete(threadId);
-    this.threads.set(threadId, authority(environment, this.now()));
+    this.threads.set(threadId, next);
+    let evicted = false;
     while (this.threads.size > MAX_THREAD_ENVIRONMENTS) {
       const oldest = this.threads.keys().next().value as string | undefined;
       if (!oldest) break;
       this.threads.delete(oldest);
+      evicted = true;
     }
-    this.persist();
+    if (unchanged && !evicted && now - this.lastPersistedAt < THREAD_ENVIRONMENT_REFRESH_MS) return;
+    this.persist(now);
   }
 
   private load(verifiedEnvironment = false): void {
@@ -318,12 +330,13 @@ export class ChatGptThreadEnvironmentStore {
     this.loaded = true;
   }
 
-  private persist(): void {
+  private persist(now: number = this.now()): void {
     if (!this.path) return;
     const payload: StoredThreadEnvironmentFile = {
       version: 1,
       threads: Object.fromEntries(this.threads),
     };
     atomicWriteFile(this.path, `${JSON.stringify(payload, null, 2)}\n`, { durable: true });
+    this.lastPersistedAt = now;
   }
 }

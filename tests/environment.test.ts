@@ -794,6 +794,30 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  test("rewrites unchanged thread authority at most once per refresh window but persists changes immediately", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-environment-refresh-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    let clock = 1_000_000;
+    const store = new ChatGptThreadEnvironmentStore(statePath, () => clock, join(stateRoot, "codex"));
+    const updatedAt = (threadId: string) => JSON.parse(readFileSync(statePath, "utf8")).threads[threadId]?.updatedAt;
+
+    store.resolve(currentWire());
+    expect(updatedAt("thread_current")).toBe(1_000_000);
+
+    clock += 1_000;
+    store.resolve(currentWire());
+    expect(updatedAt("thread_current")).toBe(1_000_000);
+
+    clock += 1_000;
+    store.resolve(currentWire({ threadId: "thread_other" }));
+    expect(updatedAt("thread_other")).toBe(1_002_000);
+
+    clock += 60_000;
+    store.resolve(currentWire());
+    expect(updatedAt("thread_current")).toBe(1_062_000);
+  });
+
   test("does not borrow authority across threads or hide an invalid trusted update", () => {
     const store = new ChatGptThreadEnvironmentStore();
     store.resolve(currentWire());
