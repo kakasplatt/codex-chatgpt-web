@@ -484,7 +484,7 @@ test("runtime upgrade disables a saved Bigger Context that the account can no lo
   assert.equal(eligible.invocation().args.includes("--standard-context"), false);
 });
 
-test("a failed version upgrade preserves setup inputs without starting an incompatible old runtime", async () => {
+test("a failed version upgrade is retried once, then preserves setup inputs without starting an incompatible old runtime", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-upgrade-failure-"));
   const configPath = path.join(root, "config.json");
   const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "6.1.4" };
@@ -519,8 +519,49 @@ test("a failed version upgrade preserves setup inputs without starting an incomp
       return true;
     });
     assert.deepEqual(JSON.parse(fs.readFileSync(configPath)), config);
-    assert.equal(stops, 1);
+    assert.equal(stops, 2);
     assert.equal(starts, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a version upgrade that fails once is retried without restarting the launcher", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-upgrade-retry-"));
+  const configPath = path.join(root, "config.json");
+  const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "6.1.4" };
+  fs.writeFileSync(configPath, `${JSON.stringify(config)}
+`);
+  let attempts = 0;
+  let starts = 0;
+  const host = new RuntimeHost({
+    app: { getPath: () => root, getVersion: () => "6.1.6" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    codexHome: path.join(root, "codex"),
+    supervisor: {
+      configPath,
+      readSetupConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      readConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      stopForSetup: async () => {},
+      startIfConfigured: async () => { starts += 1; return { status: "ready" }; },
+    },
+  });
+  host.run = async (_name, args) => {
+    if (args.includes("--preflight-only")) return { code: 0, stdout: "", stderr: "" };
+    attempts += 1;
+    if (attempts === 1) throw new Error("transient setup failure");
+    fs.writeFileSync(configPath, `${JSON.stringify({ ...config, releaseVersion: "6.1.6" })}
+`);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  try {
+    const result = await host.upgradeManagedRuntime();
+    assert.equal(result.updated, true);
+    assert.equal(attempts, 2);
+    assert.equal(starts, 1);
+    assert.equal(JSON.parse(fs.readFileSync(configPath)).releaseVersion, "6.1.6");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -1378,7 +1378,8 @@ class RuntimeHost {
         : []),
       "--restart-service",
     ];
-    const result = await this.runSetup("runtime-upgrade", args, {
+    const previousRuntimeCompatible = existing.config.releaseVersion === currentVersion;
+    const upgradeOptions = {
       message: tunnelProfileMigrationRequired
         ? `Separating ${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP credentials`
         : `Upgrading launcher runtime from ${existing.config.releaseVersion} to ${currentVersion}`,
@@ -1386,8 +1387,19 @@ class RuntimeHost {
         ? `${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP profile migrated`
         : `Launcher runtime upgraded to ${currentVersion}`,
       timeoutMs: existing.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
-      previousRuntimeCompatible: existing.config.releaseVersion === currentVersion,
-    });
+      previousRuntimeCompatible,
+    };
+    let result;
+    try {
+      result = await this.runSetup("runtime-upgrade", args, upgradeOptions);
+    } catch (error) {
+      // A failed version upgrade cannot restore the older runtime, which this launcher may
+      // be unable to run. runSetup has already restored the saved inputs, so retry once
+      // instead of leaving the runtime stopped until the user restarts the launcher.
+      if (previousRuntimeCompatible) throw error;
+      this.logger.warn("runtime.upgrade_retry", { message: error instanceof Error ? error.message : String(error) });
+      result = await this.runSetup("runtime-upgrade", args, upgradeOptions);
+    }
     return {
       updated: true,
       mode: existing.mode,
