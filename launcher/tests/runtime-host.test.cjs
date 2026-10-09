@@ -445,6 +445,7 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
     "--automatic-browser-interaction",
+    "--refresh-account-capabilities",
     "--acknowledge-unofficial",
     "--restart-service",
   ]);
@@ -505,9 +506,10 @@ test("a failed version upgrade is retried once, then preserves setup inputs with
       startIfConfigured: async () => { starts += 1; return { status: "needs-setup" }; },
     },
   });
+  const refreshed = [];
   host.run = async (_name, args) => {
-    assert.equal(args.includes("--refresh-account-capabilities"), false);
     if (args.includes("--preflight-only")) return { code: 0, stdout: "", stderr: "" };
+    refreshed.push(args.includes("--refresh-account-capabilities"));
     fs.writeFileSync(configPath, `${JSON.stringify({ ...config, releaseVersion: "6.1.6" })}\n`);
     throw new Error("configuration write failed");
   };
@@ -519,6 +521,8 @@ test("a failed version upgrade is retried once, then preserves setup inputs with
       return true;
     });
     assert.deepEqual(JSON.parse(fs.readFileSync(configPath)), config);
+    // The retry drops the capability refresh so an unavailable account cannot block startup.
+    assert.deepEqual(refreshed, [true, false]);
     assert.equal(stops, 2);
     assert.equal(starts, 0);
   } finally {
@@ -534,6 +538,7 @@ test("a version upgrade that fails once is retried without restarting the launch
 `);
   let attempts = 0;
   let starts = 0;
+  const refreshFlags = [];
   const host = new RuntimeHost({
     app: { getPath: () => root, getVersion: () => "6.1.6" },
     logger: { info() {}, warn() {}, error() {} },
@@ -551,6 +556,7 @@ test("a version upgrade that fails once is retried without restarting the launch
   host.run = async (_name, args) => {
     if (args.includes("--preflight-only")) return { code: 0, stdout: "", stderr: "" };
     attempts += 1;
+    refreshFlags.push(args.includes("--refresh-account-capabilities"));
     if (attempts === 1) throw new Error("transient setup failure");
     fs.writeFileSync(configPath, `${JSON.stringify({ ...config, releaseVersion: "6.1.6" })}
 `);
@@ -560,6 +566,7 @@ test("a version upgrade that fails once is retried without restarting the launch
     const result = await host.upgradeManagedRuntime();
     assert.equal(result.updated, true);
     assert.equal(attempts, 2);
+    assert.deepEqual(refreshFlags, [true, false]);
     assert.equal(starts, 1);
     assert.equal(JSON.parse(fs.readFileSync(configPath)).releaseVersion, "6.1.6");
   } finally {
@@ -604,7 +611,8 @@ test("launcher update transaction does not preserve a stale disconnected route p
   assert.equal(result.updated, true);
   assert.equal("bridgeEnabled" in result, false);
   assert.equal(fixture.invocation().args.includes("disconnect"), false);
-  assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), false);
+  // A version change refreshes the account capabilities that a new release may detect differently.
+  assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
 });
 
 test("launcher update preserves Zero Risk and never probes its account capabilities", async () => {

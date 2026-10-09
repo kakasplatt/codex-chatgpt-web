@@ -1362,14 +1362,13 @@ class RuntimeHost {
         && !tunnelProfileMigrationRequired)) {
       return { updated: false };
     }
-    const args = [
+    const previousRuntimeCompatible = existing.config.releaseVersion === currentVersion;
+    const buildArgs = (refreshCapabilities) => [
       "setup",
       existing.mode === "full" ? "--full" : "--browser-only",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
-      // Preserve the installed model selection during an update. Account refresh is
-      // a separate Setup action and must not prevent the local bridge from starting.
-      ...this.browserInteractionArgs({ mode: interactionMode }),
+      ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities }),
       "--acknowledge-unofficial",
       // Setup rejects a saved Bigger Context on an account without Sol or Pro. The upgrade
       // cannot ask the user to fix that, and failing here would block it on every launch.
@@ -1378,7 +1377,6 @@ class RuntimeHost {
         : []),
       "--restart-service",
     ];
-    const previousRuntimeCompatible = existing.config.releaseVersion === currentVersion;
     const upgradeOptions = {
       message: tunnelProfileMigrationRequired
         ? `Separating ${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP credentials`
@@ -1391,14 +1389,17 @@ class RuntimeHost {
     };
     let result;
     try {
-      result = await this.runSetup("runtime-upgrade", args, upgradeOptions);
+      // A new release may repair capability detection, and reusing the saved result would keep
+      // eligible models disabled. Refresh once per version change; the retry below drops it so
+      // a signed-out or offline account cannot stop the local bridge from starting.
+      result = await this.runSetup("runtime-upgrade", buildArgs(!previousRuntimeCompatible), upgradeOptions);
     } catch (error) {
       // A failed version upgrade cannot restore the older runtime, which this launcher may
       // be unable to run. runSetup has already restored the saved inputs, so retry once
       // instead of leaving the runtime stopped until the user restarts the launcher.
       if (previousRuntimeCompatible) throw error;
       this.logger.warn("runtime.upgrade_retry", { message: error instanceof Error ? error.message : String(error) });
-      result = await this.runSetup("runtime-upgrade", args, upgradeOptions);
+      result = await this.runSetup("runtime-upgrade", buildArgs(false), upgradeOptions);
     }
     return {
       updated: true,
