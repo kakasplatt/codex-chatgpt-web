@@ -186,7 +186,7 @@ test("DEV core setup configures only the isolated harness contract", async () =>
 });
 
 test("Bigger Context uses the setup transaction and refreshes the production Codex catalog", async () => {
-  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
+  const fixture = hostFor({ mode: "full", appName: "Codex Native2", solAvailable: true });
   const result = await fixture.host.setBiggerContext(true);
   assert.equal(result.enabled, true);
   assert.deepEqual(fixture.invocation(), {
@@ -203,6 +203,17 @@ test("Bigger Context uses the setup transaction and refreshes the production Cod
       "--bigger-context",
     ],
   });
+});
+
+test("Luna cannot enable Bigger Context, but can turn off an existing unsupported setting", async () => {
+  for (const createHost of [hostFor, devHostFor]) {
+    const fixture = createHost({ mode: "browser-only", solAvailable: false, experimentalBiggerContext: true });
+    await assert.rejects(fixture.host.setBiggerContext(true), /unavailable for Luna and Think/);
+    assert.equal(fixture.invocation(), undefined);
+    const result = await fixture.host.setBiggerContext(false);
+    assert.equal(result.enabled, false);
+    assert.ok(fixture.invocation().args.includes("--standard-context"));
+  }
 });
 
 test("Bigger Context updates the isolated DEV config without installing a Codex route", async () => {
@@ -448,6 +459,121 @@ test("launcher update transaction upgrades its owned full runtime with saved con
   });
 });
 
+test("runtime upgrade disables a saved Bigger Context that the account can no longer use", async () => {
+  const stale = hostFor({
+    mode: "browser-only",
+    browserHost: "launcher",
+    releaseVersion: "1.1.1",
+    solAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
+    experimentalBiggerContext: true,
+  });
+  stale.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
+  await stale.host.upgradeManagedRuntime();
+  assert.ok(stale.invocation().args.includes("--standard-context"));
+
+  const eligible = hostFor({
+    mode: "browser-only",
+    browserHost: "launcher",
+    releaseVersion: "1.1.1",
+    solAvailable: true,
+    extraHighAvailable: false, proAvailable: false,
+    experimentalBiggerContext: true,
+  });
+  eligible.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
+  await eligible.host.upgradeManagedRuntime();
+  assert.equal(eligible.invocation().args.includes("--standard-context"), false);
+});
+
+test("a failed version upgrade is retried once, then preserves setup inputs without starting an incompatible old runtime", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-upgrade-failure-"));
+  const configPath = path.join(root, "config.json");
+  const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "6.1.4" };
+  fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+  let stops = 0;
+  let starts = 0;
+  const host = new RuntimeHost({
+    app: { getPath: () => root, getVersion: () => "6.1.6" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    codexHome: path.join(root, "codex"),
+    supervisor: {
+      configPath,
+      readSetupConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      readConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      stopForSetup: async () => { stops += 1; },
+      startIfConfigured: async () => { starts += 1; return { status: "needs-setup" }; },
+    },
+  });
+  const refreshed = [];
+  host.run = async (_name, args) => {
+    if (args.includes("--preflight-only")) return { code: 0, stdout: "", stderr: "" };
+    refreshed.push(args.includes("--refresh-account-capabilities"));
+    fs.writeFileSync(configPath, `${JSON.stringify({ ...config, releaseVersion: "6.1.6" })}\n`);
+    throw new Error("configuration write failed");
+  };
+  try {
+    await assert.rejects(host.upgradeManagedRuntime(), error => {
+      assert.match(error.message, /configuration write failed/);
+      assert.match(error.message, /Restart the launcher to retry the update/);
+      assert.doesNotMatch(error.message, /Previous runtime recovery|expected ready/);
+      return true;
+    });
+    assert.deepEqual(JSON.parse(fs.readFileSync(configPath)), config);
+    // The retry drops the capability refresh so an unavailable account cannot block startup.
+    assert.deepEqual(refreshed, [true, false]);
+    assert.equal(stops, 2);
+    assert.equal(starts, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a version upgrade that fails once is retried without restarting the launcher", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-upgrade-retry-"));
+  const configPath = path.join(root, "config.json");
+  const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "6.1.4" };
+  fs.writeFileSync(configPath, `${JSON.stringify(config)}
+`);
+  let attempts = 0;
+  let starts = 0;
+  const refreshFlags = [];
+  const host = new RuntimeHost({
+    app: { getPath: () => root, getVersion: () => "6.1.6" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    codexHome: path.join(root, "codex"),
+    supervisor: {
+      configPath,
+      readSetupConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      readConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      stopForSetup: async () => {},
+      startIfConfigured: async () => { starts += 1; return { status: "ready" }; },
+    },
+  });
+  host.run = async (_name, args) => {
+    if (args.includes("--preflight-only")) return { code: 0, stdout: "", stderr: "" };
+    attempts += 1;
+    refreshFlags.push(args.includes("--refresh-account-capabilities"));
+    if (attempts === 1) throw new Error("transient setup failure");
+    fs.writeFileSync(configPath, `${JSON.stringify({ ...config, releaseVersion: "6.1.6" })}
+`);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  try {
+    const result = await host.upgradeManagedRuntime();
+    assert.equal(result.updated, true);
+    assert.equal(attempts, 2);
+    assert.deepEqual(refreshFlags, [true, false]);
+    assert.equal(starts, 1);
+    assert.equal(JSON.parse(fs.readFileSync(configPath)).releaseVersion, "6.1.6");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher migrates the legacy connector identity even when the release version is unchanged", async () => {
   const fixture = hostFor({
     mode: "full",
@@ -465,7 +591,6 @@ test("launcher migrates the legacy connector identity even when the release vers
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
     "--automatic-browser-interaction",
-    "--refresh-account-capabilities",
     "--acknowledge-unofficial",
     "--restart-service",
   ]);
@@ -486,6 +611,7 @@ test("launcher update transaction does not preserve a stale disconnected route p
   assert.equal(result.updated, true);
   assert.equal("bridgeEnabled" in result, false);
   assert.equal(fixture.invocation().args.includes("disconnect"), false);
+  // A version change refreshes the account capabilities that a new release may detect differently.
   assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
 });
 

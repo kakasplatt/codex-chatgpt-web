@@ -1095,6 +1095,9 @@ class RuntimeHost {
     if (!current.configured) {
       throw new Error("Initialize the runtime before changing Bigger Context");
     }
+    if (enabled === true && current.config?.solAvailable !== true) {
+      throw new Error("Bigger Context requires Sol or Pro in the launcher's model list. It is unavailable for Luna and Think.");
+    }
     const mode = current.mode;
     const contextFlag = enabled === true ? "--bigger-context" : "--standard-context";
     if (this.launcherProfile === "development") {
@@ -1359,18 +1362,22 @@ class RuntimeHost {
         && !tunnelProfileMigrationRequired)) {
       return { updated: false };
     }
-    const args = [
+    const previousRuntimeCompatible = existing.config.releaseVersion === currentVersion;
+    const buildArgs = (refreshCapabilities) => [
       "setup",
       existing.mode === "full" ? "--full" : "--browser-only",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
-      // A release may repair capability detection. Reusing the previous result can
-      // keep eligible models disabled even after the corrected probe is installed.
-      ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities: true }),
+      ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities }),
       "--acknowledge-unofficial",
+      // Setup rejects a saved Bigger Context on an account without Sol or Pro. The upgrade
+      // cannot ask the user to fix that, and failing here would block it on every launch.
+      ...(existing.config?.experimentalBiggerContext === true && existing.config?.solAvailable !== true
+        ? ["--standard-context"]
+        : []),
       "--restart-service",
     ];
-    const result = await this.runSetup("runtime-upgrade", args, {
+    const upgradeOptions = {
       message: tunnelProfileMigrationRequired
         ? `Separating ${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP credentials`
         : `Upgrading launcher runtime from ${existing.config.releaseVersion} to ${currentVersion}`,
@@ -1378,7 +1385,22 @@ class RuntimeHost {
         ? `${interactionMode === "manual" ? "Zero Risk" : "Automatic"} MCP profile migrated`
         : `Launcher runtime upgraded to ${currentVersion}`,
       timeoutMs: existing.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
-    });
+      previousRuntimeCompatible,
+    };
+    let result;
+    try {
+      // A new release may repair capability detection, and reusing the saved result would keep
+      // eligible models disabled. Refresh once per version change; the retry below drops it so
+      // a signed-out or offline account cannot stop the local bridge from starting.
+      result = await this.runSetup("runtime-upgrade", buildArgs(!previousRuntimeCompatible), upgradeOptions);
+    } catch (error) {
+      // A failed version upgrade cannot restore the older runtime, which this launcher may
+      // be unable to run. runSetup has already restored the saved inputs, so retry once
+      // instead of leaving the runtime stopped until the user restarts the launcher.
+      if (previousRuntimeCompatible) throw error;
+      this.logger.warn("runtime.upgrade_retry", { message: error instanceof Error ? error.message : String(error) });
+      result = await this.runSetup("runtime-upgrade", buildArgs(false), upgradeOptions);
+    }
     return {
       updated: true,
       mode: existing.mode,
@@ -1542,6 +1564,7 @@ class RuntimeHost {
     this.lifecycleOperation = name;
     let setupCommandStarted = false;
     let runtimeTransitionStarted = false;
+    let runtimeStartAttempted = false;
     try {
       if (this.launcherProfile === "production") {
         await this.run(name, [...args, "--preflight-only"], {
@@ -1556,6 +1579,7 @@ class RuntimeHost {
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
       const result = await this.run(name, args, options);
+      runtimeStartAttempted = true;
       const runtime = await this.supervisor.startIfConfigured();
       if (runtime.status !== "ready") {
         throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
@@ -1567,6 +1591,7 @@ class RuntimeHost {
       const failures = [];
       let rolledBack = false;
       let checkpointChanged = false;
+      let checkpointRestored = false;
       if (!previousRuntime.configured && setupCommandStarted) {
         try {
           rolledBack = await this.rollbackFirstSetup(checkpoint);
@@ -1586,13 +1611,25 @@ class RuntimeHost {
           );
         }
         try {
+          if (options.previousRuntimeCompatible === false && runtimeStartAttempted) {
+            // Stop any incomplete new runtime while its own configuration is still
+            // available. Never restore old process inputs underneath a live candidate.
+            await this.supervisor.stopForSetup();
+          }
           this.restoreSetupCheckpoint(checkpoint);
+          checkpointRestored = true;
         } catch (caught) {
           failures.push(caught instanceof Error ? caught.message : String(caught));
         }
       }
       let recoveryError;
-      if (runtimeTransitionStarted) {
+      if (runtimeTransitionStarted && options.previousRuntimeCompatible === false) {
+        // The installed launcher cannot run an older configuration. Keep the restored
+        // inputs for a retry instead of attempting an impossible runtime rollback.
+        if (checkpointRestored) {
+          failures.push("The saved configuration was preserved. Restart the launcher to retry the update.");
+        }
+      } else if (runtimeTransitionStarted) {
         try {
           await this.restorePreviousRuntime(previousRuntime, name, {
             repairExternal: previousRuntime.owner === "external" && checkpointChanged,
