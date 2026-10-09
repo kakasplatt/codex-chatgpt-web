@@ -1001,7 +1001,14 @@ export async function resolveChatGptToolConfirmation(
     }
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await allowCurrentAction.click({ timeout: 10_000, signal });
-    await dialog.waitFor({ state: "hidden", timeout: 10_000, signal });
+    try {
+      await dialog.waitFor({ state: "hidden", timeout: 10_000, signal });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // A card that lingers after the click (for example showing "Allowed") has consumed the
+      // one-time approval. Fail only while the same Allow action is still offered.
+      if (await allowCurrentAction.count() > 0) throw error;
+    }
     return true;
   }
 

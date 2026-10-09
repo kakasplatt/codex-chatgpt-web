@@ -27,6 +27,27 @@ domTest("current and earlier approval surfaces select only the visible one-time 
   });
 }, 20_000);
 
+domTest("a card that lingers after its one-time Allow was consumed does not fail the turn", async () => {
+  await withPage(async page => {
+    // After the click the card stays but no longer offers any action, as with an "Allowed" status.
+    await page.setContent(`<section data-codex-approval-surface="true"><div role="alert"><p>Allow ChatGPT to use Codex Native2?</p>
+      <div id="actions"><button>Deny</button>
+      <button onclick="document.body.dataset.chosen=this.textContent;document.getElementById('actions').innerHTML='<p>Allowed</p>'">Allow once</button></div></div></section>`);
+    expect(await resolveChatGptToolConfirmation(page, "Codex Native2", true)).toBeTrue();
+    expect(await page.locator("body").getAttribute("data-chosen")).toBe("Allow once");
+  });
+}, 30_000);
+
+domTest("a card that keeps offering Allow after the click still fails the turn", async () => {
+  await withPage(async page => {
+    await page.setContent(`<section data-codex-approval-surface="true"><div role="alert"><p>Allow ChatGPT to use Codex Native2?</p>
+      <button>Deny</button><button>Allow once</button></div></section>`);
+    let failure: unknown;
+    try { await resolveChatGptToolConfirmation(page, "Codex Native2", true); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+  });
+}, 30_000);
+
 domTest("approval cannot choose another connector, a quoted alert, or ambiguous permission controls", async () => {
   await withPage(async page => {
     for (const html of [card("GitHub"), card("Codex Native2 extra"), card("Codex Native2", "Allow once", 'class="answer-text"')]) {
