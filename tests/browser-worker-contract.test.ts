@@ -4268,6 +4268,22 @@ test("GPT-6 staged input enforces its measured account and effort ceiling before
   )).not.toThrow();
 });
 
+test("GPT-6 Sol Bigger Context gate does not reject Full Context staging", () => {
+  const plus = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+  for (const effort of ["low", "medium", "high"] as const) {
+    let message = "";
+    try {
+      assertChatGptWebMultipartInputWithinLimits(
+        100_000, 40_000, "gpt-5.6-sol", effort, plus, 200_000, 6, undefined, "full", "6",
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).not.toContain("Bigger Context");
+    expect(message).not.toContain("GPT-6 Sol uses standard context");
+  }
+});
+
 test("Bigger Context fits mixed-density whole records within both token and composer limits", () => {
   const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false, experimentalBiggerContext: true };
   const dense = "a!b@c#d$e%f^g&h*".repeat(3_750);

@@ -1125,7 +1125,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT ${modeLabel} limit is not defined for model: ${modelId}`);
   }
-  if (!supportsChatGptWebBiggerContext(modelId, effort, capabilities, modelFamily)) {
+  if (contextMode !== "full" && !supportsChatGptWebBiggerContext(modelId, effort, capabilities, modelFamily)) {
     throw new Error(CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR);
   }
   const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
