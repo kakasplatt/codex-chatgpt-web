@@ -1371,6 +1371,11 @@ class RuntimeHost {
       // a separate Setup action and must not prevent the local bridge from starting.
       ...this.browserInteractionArgs({ mode: interactionMode }),
       "--acknowledge-unofficial",
+      // Setup rejects a saved Bigger Context on an account without Sol or Pro. The upgrade
+      // cannot ask the user to fix that, and failing here would block it on every launch.
+      ...(existing.config?.experimentalBiggerContext === true && existing.config?.solAvailable !== true
+        ? ["--standard-context"]
+        : []),
       "--restart-service",
     ];
     const result = await this.runSetup("runtime-upgrade", args, {

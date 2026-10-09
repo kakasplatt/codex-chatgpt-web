@@ -458,6 +458,32 @@ test("launcher update transaction upgrades its owned full runtime with saved con
   });
 });
 
+test("runtime upgrade disables a saved Bigger Context that the account can no longer use", async () => {
+  const stale = hostFor({
+    mode: "browser-only",
+    browserHost: "launcher",
+    releaseVersion: "1.1.1",
+    solAvailable: false,
+    extraHighAvailable: false, proAvailable: false,
+    experimentalBiggerContext: true,
+  });
+  stale.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
+  await stale.host.upgradeManagedRuntime();
+  assert.ok(stale.invocation().args.includes("--standard-context"));
+
+  const eligible = hostFor({
+    mode: "browser-only",
+    browserHost: "launcher",
+    releaseVersion: "1.1.1",
+    solAvailable: true,
+    extraHighAvailable: false, proAvailable: false,
+    experimentalBiggerContext: true,
+  });
+  eligible.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
+  await eligible.host.upgradeManagedRuntime();
+  assert.equal(eligible.invocation().args.includes("--standard-context"), false);
+});
+
 test("a failed version upgrade preserves setup inputs without starting an incompatible old runtime", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-upgrade-failure-"));
   const configPath = path.join(root, "config.json");
