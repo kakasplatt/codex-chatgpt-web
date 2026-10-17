@@ -1858,10 +1858,25 @@ export function chatGptThreadAlertTexts(turn: Element): string[] {
 }
 
 /**
+ * Generation, an in-flight Codex tool call, an open response stream, or a completed-turn action all
+ * prove the turn is not stuck on a thread alert.
+ */
+export function chatGptThreadAlertActivity(state: {
+  running: boolean;
+  externalToolCallsInFlight?: boolean;
+  responseStreamActive?: boolean;
+  completionActionVisible?: boolean;
+}): boolean {
+  return state.running || state.externalToolCallsInFlight === true || state.responseStreamActive === true
+    || state.completionActionVisible === true;
+}
+
+/**
  * Turns a thread alert that appeared during this turn into a fast, specific failure. An alert is
- * terminal only while ChatGPT shows no generation and no Codex tool call is in flight, and only
- * after it stayed visible for a short grace period. Alerts already present when observation began
- * belong to an earlier turn and are ignored.
+ * terminal only while the turn shows no activity (see `chatGptThreadAlertActivity`), and only after
+ * it stayed visible for a short grace period. Alerts already present when observation began belong
+ * to an earlier turn and are ignored; this compares visible text, so a new alert identical to one
+ * still shown from an earlier turn falls back to the generic stalled-turn verdict.
  */
 export class ChatGptThreadAlertTracker {
   private baseline?: Set<string>;
@@ -1869,19 +1884,24 @@ export class ChatGptThreadAlertTracker {
 
   constructor(private readonly graceMs = CHATGPT_THREAD_ALERT_GRACE_MS) {}
 
-  update(state: {
-    alerts: readonly string[];
-    running: boolean;
-    externalToolCallsInFlight?: boolean;
-    responseStreamActive?: boolean;
-  }, now = Date.now()): string | undefined {
+  get hasBaseline(): boolean {
+    return this.baseline !== undefined;
+  }
+
+  /** Renewed activity restarts the grace period of any visible alert. */
+  suspend(): void {
+    this.candidate = undefined;
+  }
+
+  update(state: Parameters<typeof chatGptThreadAlertActivity>[0] & { alerts: readonly string[] }, now = Date.now()):
+    string | undefined {
     if (!this.baseline) {
       this.baseline = new Set(state.alerts);
       return undefined;
     }
     const baseline = this.baseline;
     const text = state.alerts.filter(alert => !baseline.has(alert)).at(-1);
-    if (!text || state.running || state.externalToolCallsInFlight || state.responseStreamActive) {
+    if (!text || chatGptThreadAlertActivity(state)) {
       this.candidate = undefined;
       return undefined;
     }
@@ -6148,7 +6168,6 @@ export class ChatGptBrowserWorker {
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
       const threadAlertTracker = new ChatGptThreadAlertTracker();
-      let threadAlertBaselineCaptured = false;
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
@@ -6299,18 +6318,22 @@ export class ChatGptBrowserWorker {
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
           if (textDelta) emitMarkdownDelta(textDelta);
-          if (!threadAlertBaselineCaptured || !(running || externalToolCallsInFlight || responseStreamActive)) {
+          const threadAlertState = {
+            running,
+            externalToolCallsInFlight,
+            responseStreamActive,
+            completionActionVisible: snapshot.completionActionVisible,
+          };
+          if (!threadAlertTracker.hasBaseline || !chatGptThreadAlertActivity(threadAlertState)) {
+            // A failed read neither establishes the baseline nor counts as "no alerts"; the existing
+            // DOM health paths own observation timeouts.
             const alerts = await withChatGptBrowserObservationTimeout(
               responseTurn.locator.evaluate(chatGptThreadAlertTexts),
-            ).catch(() => [] as string[]);
-            threadAlertBaselineCaptured = true;
-            const alertText = threadAlertTracker.update({
-              alerts,
-              running,
-              externalToolCallsInFlight,
-              responseStreamActive,
-            });
+            ).catch(() => undefined);
+            const alertText = alerts ? threadAlertTracker.update({ ...threadAlertState, alerts }) : undefined;
             if (alertText) throw chatGptThreadAlertError(alertText);
+          } else {
+            threadAlertTracker.suspend();
           }
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,

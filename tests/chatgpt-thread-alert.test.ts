@@ -90,6 +90,7 @@ test.each([
   ["Stop is visible", { running: true }],
   ["a Codex tool call is in flight", { externalToolCallsInFlight: true }],
   ["the response stream is open", { responseStreamActive: true }],
+  ["the turn shows its completed-turn actions", { completionActionVisible: true }],
 ])("a thread alert is not terminal while %s", (_label, activity) => {
   const tracker = new ChatGptThreadAlertTracker();
   const state = { running: false, externalToolCallsInFlight: false, responseStreamActive: false, ...activity };
@@ -120,6 +121,37 @@ test("renewed activity restarts the alert grace period", () => {
     .toBe(deliveryTimeout);
 });
 
+test("activity observed without reading alerts restarts the grace period", () => {
+  const tracker = new ChatGptThreadAlertTracker();
+  const idle = { running: false, externalToolCallsInFlight: false, responseStreamActive: false };
+
+  tracker.update({ ...idle, alerts: [] }, 0);
+  expect(tracker.hasBaseline).toBe(true);
+  tracker.update({ ...idle, alerts: [deliveryTimeout] }, 1_000);
+  tracker.suspend();
+  expect(tracker.update({ ...idle, alerts: [deliveryTimeout] }, 60_000)).toBeUndefined();
+  expect(tracker.update({ ...idle, alerts: [deliveryTimeout] }, 60_000 + CHATGPT_THREAD_ALERT_GRACE_MS))
+    .toBe(deliveryTimeout);
+});
+
+test("the observed localized alert flows from the page read to a retryable failure", () => {
+  const alertText = "A entrega da mensagem atingiu o tempo limite. Tente novamente.Tentar novamente";
+  const before = threadDocument(`<main><section id="turn"><div data-conversation-role="assistant"></div></section></main>`);
+  const after = threadDocument(`<main><section id="turn"><div data-conversation-role="assistant"></div>
+    <aside role="alert">${alertText}</aside></section></main>`);
+  const tracker = new ChatGptThreadAlertTracker();
+  const idle = { running: false, externalToolCallsInFlight: false, responseStreamActive: false };
+
+  tracker.update({ ...idle, alerts: chatGptThreadAlertTexts(turnOf(before)) }, 0);
+  tracker.update({ ...idle, alerts: chatGptThreadAlertTexts(turnOf(after)) }, 1_000);
+  const reported = tracker.update(
+    { ...idle, alerts: chatGptThreadAlertTexts(turnOf(after)) },
+    1_000 + CHATGPT_THREAD_ALERT_GRACE_MS,
+  );
+  expect(reported).toBe(alertText);
+  expect(chatGptThreadAlertError(reported!).message).toContain("A entrega da mensagem atingiu o tempo limite");
+});
+
 test("thread alert failures are retryable upstream errors that carry ChatGPT's own text", () => {
   expect(chatGptThreadAlertError(deliveryTimeout)).toMatchObject({
     name: "ChatGptWebAdapterError",
@@ -135,6 +167,7 @@ test("thread alert failures are retryable upstream errors that carry ChatGPT's o
 test("the response loop checks thread alerts before the generic stalled-turn verdict", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const alertCheck = workerSource.indexOf("responseTurn.locator.evaluate(chatGptThreadAlertTexts)");
+  expect(workerSource).toContain(").catch(() => undefined);");
   expect(alertCheck).toBeGreaterThan(-1);
   expect(workerSource.indexOf("const domError = domHealthTracker.update({", alertCheck)).toBeGreaterThan(alertCheck);
 });
