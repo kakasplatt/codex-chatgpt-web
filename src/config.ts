@@ -119,6 +119,7 @@ export interface AppConfig {
   proAvailable: boolean;
   experimentalBiggerContext: boolean;
   experimentalFullContext: boolean;
+  composerPredictionsEnabled: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;
@@ -253,6 +254,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     proAvailable: false,
     experimentalBiggerContext: false,
     experimentalFullContext: false,
+    composerPredictionsEnabled: true,
     experimentalSkillAttachments: false,
     experimentalFreshConversationPerTurn: false,
     useSavedChats: false,
@@ -554,6 +556,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalSkillAttachments in ${path}`);
   }
   const experimentalSkillAttachments = parsed.experimentalSkillAttachments === true;
+  if (parsed.composerPredictionsEnabled !== undefined && typeof parsed.composerPredictionsEnabled !== "boolean") {
+    throw new Error(`Invalid composerPredictionsEnabled in ${path}`);
+  }
+  const composerPredictionsEnabled = parsed.composerPredictionsEnabled !== false;
   if (parsed.experimentalFreshConversationPerTurn !== undefined
     && typeof parsed.experimentalFreshConversationPerTurn !== "boolean") {
     throw new Error(`Invalid experimentalFreshConversationPerTurn in ${path}`);
@@ -595,6 +601,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     proAvailable,
     experimentalBiggerContext,
     experimentalFullContext,
+    composerPredictionsEnabled,
     experimentalSkillAttachments,
     experimentalFreshConversationPerTurn,
     useSavedChats,
