@@ -81,7 +81,7 @@ test.skipIf(!executable)('an attachment whose card never appears fails once, non
 test('card labels accept only ChatGPT de-duplication suffixes of the exact attached name',()=>{
  const image=chatGptAttachmentLabelPattern('codex-input-image-1.png');
  for(const label of ['codex-input-image-1.png','codex-input-image-1(9).png','codex-input-image-1(20261017-195740).png'])expect(image.test(label)).toBe(true);
- for(const label of ['codex-input-image-10.png','codex-input-image-1(9).jpg','Remover codex-input-image-1(9).png','codex-input-image-1(x).png'])expect(image.test(label)).toBe(false);
+ for(const label of ['codex-input-image-10.png','codex-input-image-1(9).jpg','Remover codex-input-image-1(9).png','codex-input-image-1(x).png','codex-input-image-1(-).png','codex-input-image-1(1-).png'])expect(image.test(label)).toBe(false);
  expect(chatGptAttachmentLabelPattern('imagegen--e572ac164d347ecf.txt').test('imagegen--e572ac164d347ecf(3).txt')).toBe(true);
 });
 

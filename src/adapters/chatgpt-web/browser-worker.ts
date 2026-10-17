@@ -2597,7 +2597,7 @@ export function chatGptAttachmentLabelPattern(name: string): RegExp {
   const dot = name.lastIndexOf(".");
   const [stem, extension] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
   const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escape(stem)}(?:\\([0-9-]+\\))?${escape(extension)}$`);
+  return new RegExp(`^${escape(stem)}(?:\\((?:\\d+|\\d{8}-\\d{6})\\))?${escape(extension)}$`);
 }
 
 /**

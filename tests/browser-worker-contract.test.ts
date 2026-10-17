@@ -3166,7 +3166,7 @@ test("each new tool prompt verifies its connector after the previous Send cleare
   expect(prompts).toEqual(["first task", "follow-up task"]);
 });
 
-test("image attachment readiness uses exact file tiles and not localized remove-button text", async () => {
+test("image attachment readiness uses the attached file tile name and not localized remove-button text", async () => {
   const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
   const calls: Array<[string, string?]> = [];
   const send = {
