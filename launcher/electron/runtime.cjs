@@ -1419,11 +1419,6 @@ class RuntimeHost {
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities }),
       "--acknowledge-unofficial",
-      // Setup rejects a saved Bigger Context on an account without Sol or Pro. The upgrade
-      // cannot ask the user to fix that, and failing here would block it on every launch.
-      ...(existing.config?.experimentalBiggerContext === true && existing.config?.solAvailable !== true
-        ? ["--standard-context"]
-        : []),
       "--restart-service",
       "--preserve-disconnected-route",
     ];

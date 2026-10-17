@@ -476,7 +476,7 @@ test("launcher update transaction upgrades its owned full runtime with saved con
   });
 });
 
-test("runtime upgrade disables a saved Bigger Context that the account can no longer use", async () => {
+test("runtime upgrade preserves a saved Bigger Context with or without Sol", async () => {
   const stale = hostFor({
     mode: "browser-only",
     browserHost: "launcher",
@@ -487,7 +487,8 @@ test("runtime upgrade disables a saved Bigger Context that the account can no lo
   });
   stale.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
   await stale.host.upgradeManagedRuntime();
-  assert.ok(stale.invocation().args.includes("--standard-context"));
+  // Luna supports Bigger Context, so setup accepts it without Sol and the upgrade must keep it.
+  assert.equal(stale.invocation().args.includes("--standard-context"), false);
 
   const eligible = hostFor({
     mode: "browser-only",
