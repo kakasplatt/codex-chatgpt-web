@@ -4,6 +4,7 @@ import type { LimitsSnapshot } from "./limits-types";
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
+export type AutomaticBrowserEngine = "embedded" | "headless";
 export type Surface = "browser" | "setup" | "mcp" | "activity" | "limits" | "settings";
 
 export interface LauncherState {
@@ -17,6 +18,7 @@ export interface LauncherState {
   showBrowserDuringTurns: boolean;
   autoApproveToolCalls: boolean;
   browserInteractionMode: BrowserInteractionMode;
+  automaticBrowserEngine: AutomaticBrowserEngine;
   experimentalBiggerContext: boolean;
   experimentalFullContext: boolean;
   biggerContextAvailable?: boolean;
@@ -122,6 +124,8 @@ export interface LauncherSnapshot {
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
+  runtimeMode: "browser-only" | "full";
+  headlessReady: boolean;
   logs: LogRecord[];
   urls: {
     github: string;
@@ -189,6 +193,8 @@ export interface LauncherApi {
     credentialsRequired: boolean;
     targetMode: BrowserInteractionMode;
   }>;
+  setAutomaticBrowserEngine(engine: AutomaticBrowserEngine): Promise<LauncherState>;
+  loginHeadless(): Promise<{ headlessReady: boolean }>;
   setPreference(
     key: "keepRunningOnClose" | "showBrowserDuringTurns",
     value: boolean,

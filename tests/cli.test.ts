@@ -51,6 +51,29 @@ test("production and DEV setup reject the removed connector-name option before c
   }
 });
 
+test("headless CLI requires an explicit launcher owner and DEV rejects headless before saving", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-web-headless-cli-"));
+  const env = {
+    ...process.env,
+    CODEX_HOME: join(root, "codex"),
+    CODEX_CHATGPT_WEB_HOME: join(root, "app"),
+    CODEX_WEB_GPT_DEV_HOME: join(root, "dev"),
+  };
+  try {
+    const invalid = await runCli(["setup", "--browser-only", "--automatic-browser-engine", "windowed", "--acknowledge-unofficial"], env);
+    expect(invalid.exitCode).toBe(1);
+    expect(invalid.stderr).toContain("must be embedded or headless");
+    const orphaned = await runCli(["setup", "--browser-only", "--automatic-browser-engine", "headless", "--acknowledge-unofficial"], env);
+    expect(orphaned.exitCode).toBe(1);
+    expect(orphaned.stderr).toContain("requires --browser-host-descriptor");
+    const dev = await runCli(["dev", "setup", "--browser-only", "--automatic-browser-engine", "headless", "--acknowledge-unofficial"], env);
+    expect(dev.exitCode).toBe(1);
+    expect(dev.stderr).toContain("not yet supported by the isolated DEV chat harness");
+    expect(existsSync(join(root, "app", "config.json"))).toBeFalse();
+    expect(existsSync(join(root, "dev", "config.json"))).toBeFalse();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("production and DEV setup reject conflicting conversation modes before configuration", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-web-conversation-flags-"));
   try {

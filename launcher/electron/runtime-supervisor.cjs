@@ -216,7 +216,15 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   if (typeof config.releaseVersion !== "string" || !config.releaseVersion.trim()) {
     throw new Error("Runtime configuration has no release version");
   }
-  if (config.browserHost !== "launcher") throw new Error("Runtime configuration is not owned by the launcher");
+  const selectedHeadless = config.automaticBrowserEngine === "headless" && config.browserInteractionMode === "automatic";
+  if (selectedHeadless && (config.mode === "full" || launcherProfile === "development")) {
+    throw new Error("Headless mode has not passed the Full MCP and DEV browser parity gates");
+  }
+  if (selectedHeadless
+    ? config.browserHost !== "managed-chrome" || config.headed !== false
+    : config.browserHost !== "launcher" || config.headed !== true) {
+    throw new Error("Runtime browser engine does not match the launcher-owned configuration");
+  }
   if (!absolutePath(config.browserHostDescriptorPath || "", platform)
     || pathIdentity(config.browserHostDescriptorPath || "", platform) !== pathIdentity(descriptorPath, platform)) {
     throw new Error("Runtime configuration points to a different launcher browser host");

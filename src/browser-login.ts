@@ -157,10 +157,11 @@ function writeVerificationMarker(
 async function inspectStoredState(
   config: AppConfig,
   storageState: NonNullable<BrowserContextOptions["storageState"]>,
+  headless = false,
 ): Promise<ChatGptWebAccountCapabilities & { url: string }> {
   const verifierBrowser = await chromium.launch({
     executablePath: config.chromeExecutablePath,
-    headless: false,
+    headless,
     ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain"],
     args: ["--no-first-run", "--no-default-browser-check"],
   });
@@ -183,7 +184,8 @@ async function inspectStoredState(
 
 export async function inspectBrowserLoginCapabilities(config: AppConfig): Promise<ChatGptWebAccountCapabilities> {
   if (!browserLoginStateExists(config)) throw new Error("ChatGPT login state is missing or unverified");
-  const inspected = await inspectStoredState(config, config.storageStatePath);
+  const inspected = await inspectStoredState(config, config.storageStatePath,
+    config.browserHostDescriptorPath !== undefined && config.browserHost === "managed-chrome" && config.headed === false);
   writeVerificationMarker(config.storageStatePath, inspected);
   return { solAvailable: inspected.solAvailable, extraHighAvailable: inspected.extraHighAvailable, proAvailable: inspected.proAvailable };
 }

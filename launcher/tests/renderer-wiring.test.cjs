@@ -10,6 +10,18 @@ const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.c
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 
+test("headless controls are localized and require transactional IPC rather than ordinary preferences", () => {
+  const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
+  assert.equal((i18nSource.match(/headlessMode:/g) || []).length, 5);
+  assert.match(appSource, /api!\.setAutomaticBrowserEngine\(enabled \? "headless" : "embedded"\)/);
+  assert.match(appSource, /api!\.loginHeadless\(\)/);
+  assert.match(preloadSource, /"launcher:automatic-browser-engine"/);
+  assert.match(preloadSource, /"launcher:headless-login"/);
+  assert.match(electronMain, /await runtimeHost\.setAutomaticBrowserEngine\(engine\)/);
+  assert.match(electronMain, /Close all browser tasks before changing the automatic browser engine/);
+  assert.match(appSource, /copy\.headlessVisibilityUnavailable/);
+});
+
 test("Bigger Context waits for startup and route recovery without invalidating healthy setup", async () => {
   const vm = require("node:vm");
   for (const fails of [false, true]) {

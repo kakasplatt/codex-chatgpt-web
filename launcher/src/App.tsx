@@ -1718,6 +1718,8 @@ function SettingsSurface({
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const [headlessReady, setHeadlessReady] = useState(snapshot.headlessReady);
+  const headlessSupported = !devProfile && snapshot.runtimeMode === "browser-only";
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
   const currentPluginName = snapshot.connectorNames[snapshot.state.browserInteractionMode];
@@ -1835,6 +1837,29 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setAutomaticBrowserEngine = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setAutomaticBrowserEngine(enabled ? "headless" : "embedded"));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const loginHeadless = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api!.loginHeadless();
+      setHeadlessReady(result.headlessReady);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setFreshConversationPerTurn = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -1904,6 +1929,23 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
+        <SettingRow body={!headlessSupported ? copy.headlessUnsupported : snapshot.state.browserInteractionMode === "manual" ? copy.headlessManualUnavailable : copy.headlessModeBody} label={copy.headlessMode}>
+          <Switch
+            checked={snapshot.state.automaticBrowserEngine === "headless"}
+            disabled={busy || !headlessSupported || snapshot.state.browserInteractionMode === "manual"
+              || !snapshot.state.coreSetupComplete
+              || (!headlessReady && snapshot.state.automaticBrowserEngine !== "headless")}
+            onChange={(enabled) => void setAutomaticBrowserEngine(enabled)}
+          />
+        </SettingRow>
+        {headlessSupported && snapshot.state.browserInteractionMode === "automatic" && snapshot.state.coreSetupComplete ? (
+          <SettingRow
+            body={snapshot.state.automaticBrowserEngine === "headless" ? copy.headlessLoginWhileActive : copy.headlessLoginBody}
+            label={copy.headlessLogin}
+          >
+            <SecondaryButton disabled={busy || snapshot.state.automaticBrowserEngine === "headless"} onClick={() => void loginHeadless()}>{copy.headlessLogin}</SecondaryButton>
+          </SettingRow>
+        ) : null}
         <div className="plugin-name-setting">
           <SettingRow body={copy.pluginNameBody} label={copy.pluginName}>
             <div className="plugin-name-input">
@@ -1937,10 +1979,10 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
-        <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
+        <SettingRow body={snapshot.state.automaticBrowserEngine === "headless" ? copy.headlessVisibilityUnavailable : copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}
-            disabled={snapshot.state.browserInteractionMode === "manual"}
+            disabled={snapshot.state.browserInteractionMode === "manual" || snapshot.state.automaticBrowserEngine === "headless"}
             onChange={(checked) => void api!.setPreference("showBrowserDuringTurns", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}

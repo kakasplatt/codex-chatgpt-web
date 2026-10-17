@@ -347,6 +347,10 @@ export async function runDevCommand(args: string[]): Promise<void> {
     const tunnelId = takeOption(args, "--tunnel-id");
     const runtimeKeyFile = takeOption(args, "--runtime-key-file");
     const descriptorPath = takeOption(args, "--browser-host-descriptor") ?? paths.descriptorPath;
+    const automaticBrowserEngine = takeOption(args, "--automatic-browser-engine");
+    if (automaticBrowserEngine !== undefined && automaticBrowserEngine !== "embedded" && automaticBrowserEngine !== "headless") {
+      throw new Error("--automatic-browser-engine must be embedded or headless");
+    }
     const connectorNameSuffix = takeOption(args, "--connector-name-suffix");
     const acknowledgedUnofficial = takeFlag(args, "--acknowledge-unofficial");
     const refreshAccountCapabilities = takeFlag(args, "--refresh-account-capabilities");
@@ -380,6 +384,7 @@ export async function runDevCommand(args: string[]): Promise<void> {
     const result = await setupDevProfile({
       mode: full ? "full" : "browser-only",
       browserHostDescriptorPath: descriptorPath,
+      ...(automaticBrowserEngine ? { automaticBrowserEngine } : {}),
       ...(connectorNameSuffix !== undefined ? { connectorNameSuffix } : {}),
       refreshAccountCapabilities,
       acknowledgedUnofficial,

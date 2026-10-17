@@ -60,6 +60,72 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
   return { host, invocation: () => invocation };
 }
 
+test("headless engine selection is owned, reversible, requires login, and rejects Full/DEV", async () => {
+  const existing = { mode: "browser-only", browserHost: "launcher", automaticBrowserEngine: "embedded" };
+  const fixture = hostFor(existing);
+  await assert.rejects(() => fixture.host.setAutomaticBrowserEngine("headless"), /Sign in/);
+  fixture.host.headlessReady = () => true;
+  const enabled = await fixture.host.setAutomaticBrowserEngine("headless");
+  assert.deepEqual(enabled, { configured: true, engine: "headless" });
+  assert.equal(fixture.invocation().args.includes("--automatic-browser-engine"), true);
+  assert.equal(fixture.invocation().args.includes("headless"), true);
+  assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
+  assert.equal(fixture.invocation().args.includes("--restart-service"), true);
+  assert.equal((await fixture.host.setAutomaticBrowserEngine("embedded")).engine, "embedded");
+  await assert.rejects(() => fixture.host.setAutomaticBrowserEngine("invalid"), /Unknown automatic browser engine/);
+  const full = hostFor({ ...existing, mode: "full" });
+  full.host.headlessReady = () => true;
+  await assert.rejects(() => full.host.setAutomaticBrowserEngine("headless"), /Full MCP/);
+  const dev = devHostFor(existing);
+  dev.host.headlessReady = () => true;
+  await assert.rejects(() => dev.host.setAutomaticBrowserEngine("headless"), /DEV chats/);
+  await assert.rejects(() => hostFor(existing, "manual").host.setAutomaticBrowserEngine("headless"), /Zero Risk/);
+});
+
+test("headless login drains the launcher-owned daemon and resumes on success or failure", async () => {
+  for (const loginFails of [false, true]) {
+    const fixture = hostFor({ mode: "browser-only", browserHost: "launcher" });
+    const actions = [];
+    fixture.host.headlessReady = () => true;
+    fixture.host.launcherControlEnvironment = () => ({ CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: "test-value" });
+    fixture.host.supervisor.acquireDrain = async () => { actions.push("drain"); return true; };
+    fixture.host.supervisor.control = async (_config, action) => { actions.push(action); return { status: "ok" }; };
+    fixture.host.run = async (name, args, options) => {
+      actions.push(name);
+      assert.deepEqual(args, ["login", "--headless-launcher"]);
+      assert.ok(options.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN);
+      assert.equal(fixture.host.currentOperation(), "headless-login");
+      if (loginFails) throw new Error("User closed sign-in before validation");
+    };
+    if (loginFails) {
+      await assert.rejects(() => fixture.host.loginHeadless(), /User closed sign-in/);
+    } else {
+      assert.deepEqual(await fixture.host.loginHeadless(), { headlessReady: true });
+    }
+    assert.deepEqual(actions, ["drain", "headless-login", "resume"]);
+    assert.equal(fixture.host.currentOperation(), null);
+  }
+});
+
+test("headless login fails closed when idle drain cannot be established", async () => {
+  const fixture = hostFor({ mode: "browser-only", browserHost: "launcher" });
+  fixture.host.supervisor.acquireDrain = async () => false;
+  fixture.host.run = () => { throw new Error("must not start Chrome"); };
+  await assert.rejects(() => fixture.host.loginHeadless(), /verified idle daemon drain/);
+  assert.equal(fixture.host.currentOperation(), null);
+});
+
+test("headless sign-in never replaces credentials beneath a live managed browser context", async () => {
+  const fixture = hostFor({
+    mode: "browser-only", browserHost: "managed-chrome",
+    browserHostDescriptorPath: "/runtime/launcher-browser.json",
+    automaticBrowserEngine: "headless", headed: false,
+  });
+  fixture.host.supervisor.acquireDrain = () => { throw new Error("must not drain"); };
+  fixture.host.run = () => { throw new Error("must not spawn login"); };
+  await assert.rejects(() => fixture.host.loginHeadless(), /Switch back to the embedded browser/);
+});
+
 test("prediction preference uses the owned setup flow and preserves approvals without refreshing models", async () => {
   for (const factory of [hostFor, devHostFor]) {
     const fixture = factory({ mode: "full", appName: "Codex Native2", autoApproveToolCalls: true });

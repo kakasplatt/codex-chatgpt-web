@@ -42,6 +42,54 @@ Full harness mode connects ChatGPT to the current task’s files, terminal, tool
 The app includes its browser and runtime. No separate Chrome, Node, or Bun installation is needed.
 
 <details>
+<summary><strong>Experimental headless Chrome automation (source builds)</strong></summary>
+
+Development builds include an **experimental Headless Chrome** engine for **production,
+automatic browser-only** tasks. It uses a real Playwright-managed Chrome process with
+`headless: true`, rather than merely hiding an Electron tab. The existing embedded browser
+remains the default. This is **not** part of the published v6.1.10 installers linked above.
+
+To try it from a source build on Windows:
+
+1. Install a separate system Google Chrome browser. Finish the regular embedded-browser setup.
+2. Choose **Settings → Sign in to headless Chrome**. A separate regular Chrome window opens;
+   sign in to ChatGPT and **close that Chrome window completely** to verify the saved session.
+3. Enable **Settings → Headless Chrome (experimental)**. The launcher preflights authentication
+   in headless Chrome, performs a transactional runtime switch, and asks you to restart Codex.
+4. To revert, disable the switch; this restores the launcher-owned embedded browser engine.
+   The previous **Show browser during turns** preference is preserved.
+
+**Current restrictions:** Headless is disabled in Full MCP harness, Zero Risk, and the isolated
+DEV launcher. Existing tool approvals, retained conversations, and structured compaction still
+require the embedded Electron browser; they are **not silently downgraded** in headless mode.
+The setting cannot be changed during active tasks. The extra Chrome login does not copy cookies
+from the Electron session. If the headless session expires, **switch to embedded first**, use
+**Sign in to headless Chrome**, and switch back after verification. This restarts the worker so
+it cannot keep using an outdated in-memory browser session. Login challenges must be completed
+visibly; the automation does not bypass them.
+
+Headless Chromium still performs DOM/JavaScript work and may consume substantial CPU and RAM.
+**No performance improvement is yet established by live benchmarks.** On Windows, an optional
+read-only process sampler can help collect local measurements while you manually run equivalent
+Codex tasks using each engine:
+
+```powershell
+bun scripts/headless-benchmark.ts --engine embedded --root-pid <LAUNCHER_PID> --seconds 60 --output embedded-metrics.json
+bun scripts/headless-benchmark.ts --engine headless --root-pid <LAUNCHER_PID> --seconds 60 --output headless-metrics.json
+```
+
+Run them separately, with matching workloads and the actual launcher process ID. Reported CPU
+and working-set memory cover sampled descendants, not external Chrome processes that are no longer
+children, and cannot replace end-to-end task-correctness/DOM-health measurements. No ChatGPT
+messages are sent by the sampler.
+
+The full implementation design, parity gates, and benchmark acceptance criteria are recorded
+under `docs/superpowers/specs/2026-10-17-chatgpt-headless-automation-design.md` and
+`docs/superpowers/plans/2026-10-17-chatgpt-headless-automation.md`.
+
+</details>
+
+<details>
 <summary><strong>Terminal install, updates & repair</strong></summary>
 
 Quit the launcher before updating. These installers select the platform and architecture, verify the published checksums, and preserve your ChatGPT profile and launcher settings.
