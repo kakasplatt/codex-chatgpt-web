@@ -1,7 +1,7 @@
 import {test,expect} from "bun:test";
 import {chromium,type Browser} from "playwright-core";
 import {observeChatGptAttachmentUploads} from "../src/adapters/chatgpt-web/attachment-upload";
-import {ChatGptBrowserWorker} from "../src/adapters/chatgpt-web/browser-worker";
+import {ChatGptBrowserWorker,chatGptAttachmentLabelPattern} from "../src/adapters/chatgpt-web/browser-worker";
 import {ChatGptWebAdapterError} from "../src/adapters/chatgpt-web/adapter-error";
 import {createHash} from "node:crypto";
 
@@ -76,6 +76,24 @@ test.skipIf(!executable)('an attachment whose card never appears fails once, non
   expect(error.message).not.toContain('codex-input-image-1.png');
   expect(await page.evaluate(()=> (window as any).sends)).toBe(0);
  },()=>new Response(JSON.stringify({event:'file.processing.completed'})+'\n',{headers:{'content-type':'application/x-ndjson'}}));
+},10000);
+
+test('card labels accept only ChatGPT de-duplication suffixes of the exact attached name',()=>{
+ const image=chatGptAttachmentLabelPattern('codex-input-image-1.png');
+ for(const label of ['codex-input-image-1.png','codex-input-image-1(9).png','codex-input-image-1(20261017-195740).png'])expect(image.test(label)).toBe(true);
+ for(const label of ['codex-input-image-10.png','codex-input-image-1(9).jpg','Remover codex-input-image-1(9).png','codex-input-image-1(x).png'])expect(image.test(label)).toBe(false);
+ expect(chatGptAttachmentLabelPattern('imagegen--e572ac164d347ecf.txt').test('imagegen--e572ac164d347ecf(3).txt')).toBe(true);
+});
+
+test.skipIf(!executable)('a renamed attachment card (ChatGPT de-duplication suffix) is accepted and the prompt becomes sendable',async()=>{
+ await fixture(async(browser,base)=>{
+  const page=await browser.newPage();await page.goto(base);
+  const worker=Object.create(ChatGptBrowserWorker.prototype) as any;worker.attachmentAcceptTimeoutMs=3000;
+  await worker.attachFiles(page,prompt,AbortSignal.timeout(5000));
+  expect(await page.evaluate(()=> (window as any).sends)).toBe(0);
+ },()=>new Response(JSON.stringify({event:'file.processing.completed'})+'\n',{headers:{'content-type':'application/x-ndjson'}}),
+ html.replace("const card=document.createElement('div');card.role='group';card.setAttribute('aria-label','codex-input-image-1.png');",
+  "const card=document.createElement('div');card.role='button';card.className='composer-attachment-surface';card.setAttribute('aria-label','codex-input-image-1(20261017-195740).png');"));
 },10000);
 
 test.skipIf(!executable)('processing that never completes fails at the attachment deadline, not the stage timeout',async()=>{

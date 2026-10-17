@@ -778,6 +778,18 @@ export async function responseRequest(
       headers: { "content-type": "application/json" },
     });
   }
+  const unsentError = traceId ? chatGptTurnSessions.unsentTerminalError(traceId) : undefined;
+  if (unsentError) {
+    // The same rule for a turn that failed deterministically before submission (attachments
+    // ChatGPT did not accept, too many attachments): the reconnect gets the real error once as a
+    // terminal request error instead of replaying it into "Reconnecting 5/5".
+    return new Response(JSON.stringify({
+      error: { type: unsentError.errorType, code: unsentError.code, message: unsentError.message },
+    }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();

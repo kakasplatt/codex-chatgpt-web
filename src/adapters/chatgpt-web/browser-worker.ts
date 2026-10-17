@@ -2588,6 +2588,19 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
 }
 
 /**
+ * Accessible name of the composer card for an attached file. When the account already holds a file
+ * with the same name, ChatGPT shows the new one with a de-duplication suffix before the extension,
+ * observed as `codex-input-image-5(9).png`, `codex-input-image-1(20261017-195740).png` and
+ * `imagegen--e572ac164d347ecf(3).txt`. Attachment names repeat across turns, so accept that suffix.
+ */
+export function chatGptAttachmentLabelPattern(name: string): RegExp {
+  const dot = name.lastIndexOf(".");
+  const [stem, extension] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escape(stem)}(?:\\([0-9-]+\\))?${escape(extension)}$`);
+}
+
+/**
  * Nothing was sent, but a retry rebuilds the same composer and stalls on the same attachments.
  * Fail once, non-retryable, so Codex does not reconnect into the same minute-long stall.
  */
@@ -4593,8 +4606,13 @@ export class ChatGptBrowserWorker {
     const uploads = await observeChatGptAttachmentUploads(page, files.map(file => file.name));
     try {
       await withBrowserTurnAbort(input.setInputFiles(files), abortSignal);
-      const card = (name: string) => composerForm.getByRole("group", { name, exact: true })
-        .or(composerForm.locator(`.composer-attachment-surface:is(button, [role="button"])[aria-label=${JSON.stringify(name)}]`));
+      const card = (name: string) => {
+        const label = chatGptAttachmentLabelPattern(name);
+        return composerForm.getByRole("group", { name: label })
+          .or(composerForm.locator('.composer-attachment-surface:is(button, [role="button"])')
+            .and(composerForm.getByRole("button", { name: label })))
+          .first();
+      };
       const acceptTimeoutMs = this.attachmentAcceptTimeoutMs ?? 60_000;
       // Cards and processing share one deadline: a processing stream that stays open without a
       // completion event must fail here with the stalled names, not at the generic stage timeout.
@@ -4616,7 +4634,7 @@ export class ChatGptBrowserWorker {
         // timed out, and a card that did appear must not be reported as missing.
         const missingCards: string[] = [];
         for (const file of files) {
-          if (!await card(file.name).first().isVisible().catch(() => false)) missingCards.push(file.name);
+          if (!await card(file.name).isVisible().catch(() => false)) missingCards.push(file.name);
         }
         const unprocessed = uploads.unconfirmed();
         throw attachmentsNotAcceptedError(
