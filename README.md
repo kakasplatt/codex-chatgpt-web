@@ -190,6 +190,8 @@ bun run smoke:subagents
 bun run app:package
 ```
 
+On Windows, double-click `build-windows.cmd` in the repository root to build the installer in one step. It downloads Bun 1.4.0 into the git-ignored `.tools\` folder (your global Bun is not changed), installs dependencies, runs `bun run app:package`, and opens `launcher\artifacts` with the new `.exe` selected.
+
 `dev:launcher` uses a separate profile and account under `~/.codex-chatgpt-web-dev`. `dev:chat` exercises the real browser and compaction paths with explicit simulated tool results, without changing your normal Codex route. See the [DEV chat harness](docs/dev-chat.md) for setup and commands.
 
 </details>
