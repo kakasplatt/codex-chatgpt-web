@@ -31,6 +31,36 @@ test("a localized delivery alert after the current turn is reported", () => {
   expect(chatGptThreadAlertTexts(turnOf(document))).toEqual([deliveryTimeout]);
 });
 
+test("a delivery alert rendered inside the current turn below its activity rows is reported", () => {
+  const document = threadDocument(`<main>
+    <section id="turn" data-turn-key="current"><div data-conversation-role="assistant"></div>
+      <div>Pensando</div>
+      <aside role="alert">${deliveryTimeout}</aside>
+    </section>
+  </main>`);
+
+  expect(chatGptThreadAlertTexts(turnOf(document))).toEqual([deliveryTimeout]);
+});
+
+test("the observed 78-character localized delivery alert is not matched by the English terminal-error detector", async () => {
+  // Root cause of trace 489e31f82f93: this alert reached only the generic stalled-turn verdict.
+  const alertText = "A entrega da mensagem atingiu o tempo limite. Tente novamente.Tentar novamente";
+  expect(alertText).toHaveLength(78);
+  const { throwIfChatGptTerminalErrorAlert } = await import("../src/adapters/chatgpt-web/browser-worker");
+  const document = threadDocument(`<section id="turn"><aside role="alert">${alertText}</aside></section>`);
+  const root = turnOf(document);
+  const locatorFor = (elements: Element[]): any => ({
+    filter: ({ hasText }: { hasText: RegExp }) => locatorFor(elements.filter(e => hasText.test(e.textContent ?? ""))),
+    last: () => locatorFor(elements.slice(-1)),
+    isVisible: async () => elements.length > 0,
+  });
+  const scope = {
+    locator: (selector: string) => locatorFor(Array.from(root.querySelectorAll(selector))),
+    getByTestId: () => locatorFor([]),
+  };
+  await throwIfChatGptTerminalErrorAlert(scope as any);
+});
+
 test("message content and the composer are never thread alerts", () => {
   const document = threadDocument(`<main>
     <section id="turn" data-turn-key="current">
