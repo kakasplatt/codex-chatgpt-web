@@ -1,5 +1,5 @@
 # Builds the Codex Web GPT Windows installer from source.
-# Run with build-windows.cmd (double-click) or: powershell -ExecutionPolicy Bypass -File build-windows.ps1
+# Run with build-windows.cmd (double-click), or from PowerShell 7: pwsh -ExecutionPolicy Bypass -File build-windows.ps1
 
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
