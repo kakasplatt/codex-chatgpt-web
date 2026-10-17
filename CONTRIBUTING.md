@@ -49,6 +49,7 @@ work went into it.
    real installed Codex integration; DEV simulation is not end-to-end acceptance evidence.
 
 Launcher changes must preserve native packaging on macOS, Windows, and Linux. Platform packages
-must be built on their matching operating system. See [DEV chat mode](docs/dev-chat.md) for isolated
+must be built on their matching operating system. On Windows, `build-windows.cmd` runs the full
+install-and-package flow with a project-local Bun and leaves the installer in `launcher\artifacts`. See [DEV chat mode](docs/dev-chat.md) for isolated
 browser and MCP development, and [release validation](docs/release-validation.md) for the required
 account-bound release checks.

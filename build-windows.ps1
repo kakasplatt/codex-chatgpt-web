@@ -70,6 +70,15 @@ if ($Installed -ne $BunVersion) {
 }
 # Only this script's process sees the project Bun first on PATH.
 $env:Path = "$BunHome;$env:Path"
+# launcher/scripts/package.cjs runs electron-builder with "node". Without Node.js installed,
+# a copy of bun.exe named node.exe runs it in Bun's Node-compatible mode.
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+  $NodeShim = Join-Path $BunHome "node-shim"
+  New-Item -ItemType Directory -Path $NodeShim -Force | Out-Null
+  Copy-Item -LiteralPath $BunExe -Destination (Join-Path $NodeShim "node.exe") -Force
+  $env:Path = "$NodeShim;$env:Path"
+  Write-Host "Node.js not found; using Bun as node for electron-builder."
+}
 $env:CODEX_WEB_GPT_BUN = $BunExe
 $env:CODEX_CHATGPT_WEB_BUN = $BunExe
 Write-Host "Using Bun $Installed from $BunExe"
