@@ -3166,7 +3166,7 @@ test("each new tool prompt verifies its connector after the previous Send cleare
   expect(prompts).toEqual(["first task", "follow-up task"]);
 });
 
-test("image attachment readiness uses exact file tiles and not localized remove-button text", async () => {
+test("image attachment readiness uses the attached file tile name and not localized remove-button text", async () => {
   const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
   const calls: Array<[string, string?]> = [];
   const send = {
@@ -3176,19 +3176,24 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     },
   };
   const composerForm = {
-    getByRole: (role: string, options: { name: string; exact: boolean }) => {
-      expect(role).toBe("group");
-      expect(options).toEqual({ name: "codex-input-image-1.png", exact: true });
+    getByRole: (role: string, options: { name: RegExp }) => {
+      expect(["group", "button"]).toContain(role);
+      // File tiles match the attached name, or ChatGPT's de-duplicated copy of it, never a
+      // localized remove button.
+      expect(options.name.test("codex-input-image-1.png")).toBe(true);
+      expect(options.name.test("codex-input-image-1(3).png")).toBe(true);
+      expect(options.name.test("Remove codex-input-image-1.png")).toBe(false);
       return {
         or() { return this; },
+        first() { return this; },
         waitFor: async (state: { state: string; timeout: number }) => {
           expect(state).toEqual({ state: "visible", timeout: 60_000 });
-          calls.push(["fileTile", options.name]);
+          calls.push(["fileTile", "codex-input-image-1.png"]);
         },
       };
     },
     locator: (selector: string) => {
-      if (selector.startsWith(".composer-attachment-surface")) return {};
+      if (selector.startsWith(".composer-attachment-surface")) return { and: () => ({}) };
       expect(selector).toBe(CHATGPT_SEND_BUTTON_SELECTOR);
       return send;
     },

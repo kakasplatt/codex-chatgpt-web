@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
 import { runStructuredCompactionOnce } from "../src/adapters/chatgpt-web/compaction-handoff";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { callTurnBroker, closeTurnBrokers, RemoteTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig, providerConfig } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
@@ -940,6 +941,61 @@ test("a Codex retry after tab cancellation receives terminal HTTP 400 without a 
       },
     });
     expect(adapterConstructions).toBe(0);
+  } finally {
+    chatGptTurnSessions.clear();
+  }
+});
+
+test("a Codex retry after an unsent non-retryable browser failure receives terminal HTTP 400", async () => {
+  const config = defaultConfig("browser-only");
+  const turnId = "turn_unsent_failure_replay";
+  const body = {
+    model: "chatgpt-web/high",
+    stream: true,
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_unsent_failure_replay", turn_id: turnId }),
+    },
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Edit the attached images" }],
+      internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    }],
+  };
+  const parsed = parseRequest(body);
+  routeChatGptWebRequest(parsed, config);
+  const traceId = chatGptWebTraceId(providerConfig(config), parsed);
+  const failure = new ChatGptWebAdapterError("ChatGPT did not accept all prompt attachments. The prompt was not sent.", {
+    status: 502, errorType: "server_error", code: "chatgpt_attachments_not_accepted", retryable: false,
+  });
+  chatGptTurnSessions.clear();
+  const failedBrowser = Promise.reject(failure);
+  failedBrowser.catch(() => {});
+  const session = chatGptTurnSessions.getOrCreate("unsent-failure-replay", () => ({
+    mode: "read-only",
+    browser: failedBrowser,
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    submission: { phase: "prepared" },
+    cancel: () => {},
+  }), traceId);
+
+  try {
+    await Bun.sleep(5);
+    expect(session.settledOutcome()?.type).toBe("error");
+    expect(chatGptTurnSessions.unsentTerminalError(traceId)).toBe(failure);
+    const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }), config, () => {
+      throw new Error("an unsent terminal failure must not construct a new browser adapter");
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: { type: "server_error", code: "chatgpt_attachments_not_accepted", message: failure.message },
+    });
   } finally {
     chatGptTurnSessions.clear();
   }

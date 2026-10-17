@@ -807,6 +807,26 @@ export class ChatGptTurnSessions {
     return undefined;
   }
 
+  /**
+   * A browser turn that already failed with a non-retryable error before ChatGPT accepted the
+   * prompt. Replaying it on Codex's reconnect only drives another streamed failure that Codex
+   * treats as retryable, so the caller answers the reconnect with a terminal request error.
+   */
+  unsentTerminalError(traceId: string): ChatGptWebAdapterError | undefined {
+    // An expired failure must not block a later fresh attempt of the same turn.
+    this.prune();
+    for (const session of this.entries.values()) {
+      if (session.traceId !== traceId) continue;
+      // Compaction never advances its submission phase, so "prepared" proves nothing there.
+      if (session.runtime.usageInput?._compactionRequest) continue;
+      const outcome = session.settledOutcome();
+      if (outcome?.type !== "error" || !(outcome.error instanceof ChatGptWebAdapterError)) continue;
+      if (outcome.error.retryable || session.runtime.submission?.phase !== "prepared") continue;
+      return outcome.error;
+    }
+    return undefined;
+  }
+
   activeCount(): number {
     this.prune();
     let active = 0;

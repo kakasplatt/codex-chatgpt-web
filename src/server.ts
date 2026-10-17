@@ -767,16 +767,14 @@ export async function responseRequest(
     // closed the only browser document is instead a terminal client state: repeating that exact
     // request is invalid and must not recreate the DOM. Codex maps HTTP 400 to its non-retryable
     // InvalidRequest category while the body preserves the real client_cancelled classification.
-    return new Response(JSON.stringify({
-      error: {
-        type: "client_closed_request",
-        code: "client_cancelled",
-        message: cancelledError.message,
-      },
-    }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
+    return terminalReplayResponse("client_closed_request", "client_cancelled", cancelledError.message);
+  }
+  const unsentError = traceId ? chatGptTurnSessions.unsentTerminalError(traceId) : undefined;
+  if (unsentError) {
+    // The same rule for a turn that failed deterministically before submission (attachments
+    // ChatGPT did not accept, too many attachments): the reconnect gets the real error once as a
+    // terminal request error instead of replaying it into "Reconnecting 5/5".
+    return terminalReplayResponse(unsentError.errorType, unsentError.code, unsentError.message);
   }
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
@@ -840,6 +838,14 @@ export async function responseRequest(
   });
   rememberCompletedResponse(json);
   return Response.json(json);
+}
+
+/** A reconnect to a turn that already ended terminally: HTTP 400 is non-retryable in Codex. */
+function terminalReplayResponse(type: string, code: string, message: string): Response {
+  return new Response(JSON.stringify({ error: { type, code, message } }), {
+    status: 400,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 export async function compactRequest(
