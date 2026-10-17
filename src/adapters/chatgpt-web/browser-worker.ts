@@ -2606,6 +2606,8 @@ export class ChatGptBrowserWorker {
   private launcherHelper?: LauncherBrowserHelperClient;
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
+  /** How long each attachment card may take to appear; overridden only by tests. */
+  private attachmentCardTimeoutMs?: number;
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
@@ -4580,11 +4582,13 @@ export class ChatGptBrowserWorker {
     const uploads = await observeChatGptAttachmentUploads(page, files.map(file => file.name));
     try {
       await withBrowserTurnAbort(input.setInputFiles(files), abortSignal);
+      const visibleCards = new Set<string>();
       try {
         await withBrowserTurnAbort(Promise.all([uploads.wait(abortSignal), ...files.map(file => (
           composerForm.getByRole("group", { name: file.name, exact: true })
             .or(composerForm.locator(`.composer-attachment-surface:is(button, [role="button"])[aria-label=${JSON.stringify(file.name)}]`))
-            .waitFor({ state: "visible", timeout: 60_000 })
+            .waitFor({ state: "visible", timeout: this.attachmentCardTimeoutMs ?? 60_000 })
+            .then(() => { visibleCards.add(file.name); })
         ))]), abortSignal);
       } catch (error) {
         uploads.throwIfFailed();
@@ -4592,9 +4596,17 @@ export class ChatGptBrowserWorker {
         const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
           .map(text => text.replace(/\s+/g, " ").trim())
           .filter(Boolean);
-        throw new Error(
-          `ChatGPT did not accept all prompt attachments`
-          + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : ""),
+        const missingCards = files.map(file => file.name).filter(name => !visibleCards.has(name));
+        const unprocessed = uploads.unconfirmed();
+        // Nothing was sent, but a retry rebuilds the same composer and stalls on the same
+        // attachments. Fail once and name the files that stalled so the turn can be diagnosed.
+        throw new ChatGptWebAdapterError(
+          "ChatGPT did not accept all prompt attachments"
+          + (missingCards.length > 0 ? `; no attachment card for ${missingCards.join(", ")}` : "")
+          + (unprocessed.length > 0 ? `; processing not confirmed for ${unprocessed.join(", ")}` : "")
+          + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : "")
+          + ". The prompt was not sent.",
+          { status: 502, errorType: "server_error", code: "chatgpt_attachments_not_accepted", retryable: false, cause: error },
         );
       }
       uploads.throwIfFailed();
