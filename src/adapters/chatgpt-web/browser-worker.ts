@@ -1832,6 +1832,77 @@ export class ChatGptTurnDomHealthTracker {
   }
 }
 
+export const CHATGPT_THREAD_ALERT_GRACE_MS = 3_000;
+const CHATGPT_THREAD_ALERT_MAX_CHARS = 200;
+
+/**
+ * Visible `role="alert"` surfaces that follow `turn` in document order, excluding message content
+ * and the composer. ChatGPT renders thread-level delivery failures ("Message delivery timed out",
+ * localized) as an alert after the last turn, outside the assistant turn subtree. Runs in the page.
+ */
+export function chatGptThreadAlertTexts(turn: Element): string[] {
+  const alerts = Array.from(turn.ownerDocument.querySelectorAll('[role="alert"]'));
+  const texts: string[] = [];
+  for (const alert of alerts) {
+    // DOCUMENT_POSITION_FOLLOWING (4) or DOCUMENT_POSITION_CONTAINED_BY (16).
+    if ((turn.compareDocumentPosition(alert) & (4 | 16)) === 0) continue;
+    if (alert.closest('[data-markdown-text-style], [data-user-message-bubble], form, [hidden], [aria-hidden="true"]')) {
+      continue;
+    }
+    const element = alert as HTMLElement;
+    if (typeof element.getClientRects === "function" && element.getClientRects().length === 0) continue;
+    const text = (element.innerText ?? element.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (text) texts.push(text);
+  }
+  return texts;
+}
+
+/**
+ * Turns a thread alert that appeared during this turn into a fast, specific failure. An alert is
+ * terminal only while ChatGPT shows no generation and no Codex tool call is in flight, and only
+ * after it stayed visible for a short grace period. Alerts already present when observation began
+ * belong to an earlier turn and are ignored.
+ */
+export class ChatGptThreadAlertTracker {
+  private baseline?: Set<string>;
+  private candidate?: { text: string; since: number };
+
+  constructor(private readonly graceMs = CHATGPT_THREAD_ALERT_GRACE_MS) {}
+
+  update(state: {
+    alerts: readonly string[];
+    running: boolean;
+    externalToolCallsInFlight?: boolean;
+    responseStreamActive?: boolean;
+  }, now = Date.now()): string | undefined {
+    if (!this.baseline) {
+      this.baseline = new Set(state.alerts);
+      return undefined;
+    }
+    const baseline = this.baseline;
+    const text = state.alerts.filter(alert => !baseline.has(alert)).at(-1);
+    if (!text || state.running || state.externalToolCallsInFlight || state.responseStreamActive) {
+      this.candidate = undefined;
+      return undefined;
+    }
+    if (this.candidate?.text !== text) {
+      this.candidate = { text, since: now };
+      return undefined;
+    }
+    return now - this.candidate.since >= this.graceMs ? text : undefined;
+  }
+}
+
+export function chatGptThreadAlertError(alertText: string): ChatGptWebAdapterError {
+  const text = alertText.length > CHATGPT_THREAD_ALERT_MAX_CHARS
+    ? `${alertText.slice(0, CHATGPT_THREAD_ALERT_MAX_CHARS - 1)}…`
+    : alertText;
+  return new ChatGptWebAdapterError(
+    `ChatGPT stopped this response with an error: "${text}". Retry the turn.`,
+    { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
+  );
+}
+
 export type ChatGptBrowserUiHealth = "responsive" | "degraded" | "unresponsive";
 export type ChatGptBrowserUiHealthReason =
   | "dom-observation-timeout"
@@ -6076,6 +6147,8 @@ export class ChatGptBrowserWorker {
         });
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const threadAlertTracker = new ChatGptThreadAlertTracker();
+      let threadAlertBaselineCaptured = false;
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
@@ -6226,6 +6299,19 @@ export class ChatGptBrowserWorker {
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
           if (textDelta) emitMarkdownDelta(textDelta);
+          if (!threadAlertBaselineCaptured || !(running || externalToolCallsInFlight || responseStreamActive)) {
+            const alerts = await withChatGptBrowserObservationTimeout(
+              responseTurn.locator.evaluate(chatGptThreadAlertTexts),
+            ).catch(() => [] as string[]);
+            threadAlertBaselineCaptured = true;
+            const alertText = threadAlertTracker.update({
+              alerts,
+              running,
+              externalToolCallsInFlight,
+              responseStreamActive,
+            });
+            if (alertText) throw chatGptThreadAlertError(alertText);
+          }
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
