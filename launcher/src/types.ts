@@ -20,6 +20,7 @@ export interface LauncherState {
   experimentalBiggerContext: boolean;
   experimentalFullContext: boolean;
   biggerContextAvailable?: boolean;
+  composerPredictionsEnabled: boolean;
   experimentalSkillAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;
@@ -43,6 +44,7 @@ export interface BrowserState {
   url: string;
   title: string;
   authenticated: boolean;
+  passkeyPhase?: "opening" | "waiting" | "importing" | null;
   visible: boolean;
   surfaceActive: boolean;
   loading: boolean;
@@ -176,6 +178,7 @@ export interface LauncherApi {
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setFullContext(enabled: boolean): Promise<LauncherState>;
+  setComposerPredictions(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
   setAutoApproveToolCalls(enabled: boolean): Promise<LauncherState>;
   setFreshConversationPerTurn(enabled: boolean): Promise<LauncherState>;
