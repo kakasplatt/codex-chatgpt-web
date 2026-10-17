@@ -3,6 +3,7 @@ import {chromium,type Browser} from "playwright-core";
 import {observeChatGptAttachmentUploads} from "../src/adapters/chatgpt-web/attachment-upload";
 import {ChatGptBrowserWorker} from "../src/adapters/chatgpt-web/browser-worker";
 import {ChatGptWebAdapterError} from "../src/adapters/chatgpt-web/adapter-error";
+import {createHash} from "node:crypto";
 
 const executable=process.env.CHATGPT_DOM_TEST_BROWSER;
 const html=`<form><div id="prompt-textarea" contenteditable="true">original message</div><input data-testid="upload-photos-input" type="file" multiple><button data-testid="send-button" type="button" onclick="window.sends++">Send</button></form>
@@ -58,6 +59,39 @@ test.skipIf(!executable)('an enabled send button cannot bypass delayed processin
   expect(error.retryable).toBe(false);expect(await page.evaluate(()=> (window as any).sends)).toBe(0);
   expect(await page.locator('#prompt-textarea').textContent()).toBe('original message');expect(await page.getByRole('group').count()).toBe(1);
  },async()=>{await Bun.sleep(250);return new Response('unavailable',{status:503});});
+},10000);
+
+test.skipIf(!executable)('an attachment whose card never appears fails once, non-retryable, naming the stalled file',async()=>{
+ const text='<skill>\n<name>testing</name>\nbody\n</skill>';
+ const skill={name:`testing--${createHash('sha256').update(text).digest('hex').slice(0,16)}.txt`,text};
+ await fixture(async(browser,base)=>{
+  const page=await browser.newPage();await page.goto(base);
+  const worker=Object.create(ChatGptBrowserWorker.prototype) as any;worker.attachmentAcceptTimeoutMs=1500;
+  const withSkill={...prompt,skillFiles:[skill]};
+  const error=await worker.attachFiles(page,withSkill,AbortSignal.timeout(5000)).then(()=>undefined,(e:unknown)=>e);
+  expect(error).toBeInstanceOf(ChatGptWebAdapterError);
+  expect(error.code).toBe('chatgpt_attachments_not_accepted');expect(error.retryable).toBe(false);
+  expect(error.message).toContain(`no attachment card for ${skill.name}`);
+  expect(error.message).toContain(`processing not confirmed for ${skill.name}`);
+  expect(error.message).not.toContain('codex-input-image-1.png');
+  expect(await page.evaluate(()=> (window as any).sends)).toBe(0);
+ },()=>new Response(JSON.stringify({event:'file.processing.completed'})+'\n',{headers:{'content-type':'application/x-ndjson'}}));
+},10000);
+
+test.skipIf(!executable)('processing that never completes fails at the attachment deadline, not the stage timeout',async()=>{
+ await fixture(async(browser,base)=>{
+  const page=await browser.newPage();await page.goto(base);
+  const worker=Object.create(ChatGptBrowserWorker.prototype) as any;worker.attachmentAcceptTimeoutMs=800;
+  const error=await worker.attachFiles(page,prompt,AbortSignal.timeout(5000)).then(()=>undefined,(e:unknown)=>e);
+  expect(error).toBeInstanceOf(ChatGptWebAdapterError);
+  expect(error.code).toBe('chatgpt_attachments_not_accepted');expect(error.retryable).toBe(false);
+  expect(error.message).toContain('processing not confirmed for codex-input-image-1.png');
+  expect(error.message).not.toContain('no attachment card');
+  expect(await page.evaluate(()=> (window as any).sends)).toBe(0);
+ },()=>new Response(new ReadableStream({start(controller){
+  controller.enqueue(new TextEncoder().encode('{"event":"file.processing.file_ready","file_id":"owned-file"}\n'));
+  // Deliberately never complete or close the processing stream.
+ }}),{headers:{'content-type':'application/x-ndjson'}}));
 },10000);
 
 test.skipIf(!executable)('processing completion is required and accepted before the upload stream closes',async()=>{

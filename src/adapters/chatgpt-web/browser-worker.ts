@@ -2587,6 +2587,17 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
   return document.execCommand("insertText", false, value);
 }
 
+/**
+ * Nothing was sent, but a retry rebuilds the same composer and stalls on the same attachments.
+ * Fail once, non-retryable, so Codex does not reconnect into the same minute-long stall.
+ */
+function attachmentsNotAcceptedError(message: string, cause?: unknown): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(`${message}. The prompt was not sent.`, {
+    status: 502, errorType: "server_error", code: "chatgpt_attachments_not_accepted", retryable: false,
+    ...(cause !== undefined ? { cause } : {}),
+  });
+}
+
 export class ChatGptBrowserWorker {
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
@@ -2606,6 +2617,8 @@ export class ChatGptBrowserWorker {
   private launcherHelper?: LauncherBrowserHelperClient;
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
+  /** How long attachments may take to show, process and enable send; overridden only by tests. */
+  private attachmentAcceptTimeoutMs?: number;
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
@@ -4580,11 +4593,18 @@ export class ChatGptBrowserWorker {
     const uploads = await observeChatGptAttachmentUploads(page, files.map(file => file.name));
     try {
       await withBrowserTurnAbort(input.setInputFiles(files), abortSignal);
+      const card = (name: string) => composerForm.getByRole("group", { name, exact: true })
+        .or(composerForm.locator(`.composer-attachment-surface:is(button, [role="button"])[aria-label=${JSON.stringify(name)}]`));
+      const acceptTimeoutMs = this.attachmentAcceptTimeoutMs ?? 60_000;
+      // Cards and processing share one deadline: a processing stream that stays open without a
+      // completion event must fail here with the stalled names, not at the generic stage timeout.
+      const processingSignal = AbortSignal.any([
+        AbortSignal.timeout(acceptTimeoutMs),
+        ...(abortSignal ? [abortSignal] : []),
+      ]);
       try {
-        await withBrowserTurnAbort(Promise.all([uploads.wait(abortSignal), ...files.map(file => (
-          composerForm.getByRole("group", { name: file.name, exact: true })
-            .or(composerForm.locator(`.composer-attachment-surface:is(button, [role="button"])[aria-label=${JSON.stringify(file.name)}]`))
-            .waitFor({ state: "visible", timeout: 60_000 })
+        await withBrowserTurnAbort(Promise.all([uploads.wait(processingSignal), ...files.map(file => (
+          card(file.name).waitFor({ state: "visible", timeout: acceptTimeoutMs })
         ))]), abortSignal);
       } catch (error) {
         uploads.throwIfFailed();
@@ -4592,20 +4612,30 @@ export class ChatGptBrowserWorker {
         const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
           .map(text => text.replace(/\s+/g, " ").trim())
           .filter(Boolean);
-        throw new Error(
-          `ChatGPT did not accept all prompt attachments`
+        // Re-check every card now: another wait may still have been pending when the first one
+        // timed out, and a card that did appear must not be reported as missing.
+        const missingCards: string[] = [];
+        for (const file of files) {
+          if (!await card(file.name).first().isVisible().catch(() => false)) missingCards.push(file.name);
+        }
+        const unprocessed = uploads.unconfirmed();
+        throw attachmentsNotAcceptedError(
+          "ChatGPT did not accept all prompt attachments"
+          + (missingCards.length > 0 ? `; no attachment card for ${missingCards.join(", ")}` : "")
+          + (unprocessed.length > 0 ? `; processing not confirmed for ${unprocessed.join(", ")}` : "")
           + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : ""),
+          error,
         );
       }
       uploads.throwIfFailed();
       const send = composerForm.locator(CHATGPT_SEND_BUTTON_SELECTOR);
-      const deadline = Date.now() + 60_000;
+      const deadline = Date.now() + acceptTimeoutMs;
       while (Date.now() < deadline) {
         abortSignal?.throwIfAborted();
         if (await send.isEnabled().catch(() => false)) return;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
       }
-      throw new Error("ChatGPT accepted the prompt attachments but did not make the message ready to send");
+      throw attachmentsNotAcceptedError("ChatGPT accepted the prompt attachments but did not make the message ready to send");
     } finally {
       await uploads.dispose();
     }
