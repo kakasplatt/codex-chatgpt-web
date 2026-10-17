@@ -648,9 +648,20 @@ export function compileChatGptWebPrompt(
     ];
   const build = (sourceMessages: readonly CodexMessage[], omittedMessages = 0): CompiledChatGptWebPrompt => {
     const images: ChatGptWebPromptImage[] = [];
+    // Skill files share ChatGPT's per-message attachment limit with images. Older images yield
+    // their slots to the selected skills; when skills alone fill the limit, keep the explicit
+    // too_many_attachments failure instead of dropping every image, including the newest.
+    const skillSlots = attachSkills
+      ? new Set(sourceMessages.flatMap(message =>
+        message.role === "user" && message.origin === "codex_skill" ? [selectedSkillFile(message).name] : []
+      )).size
+      : 0;
+    const imageSlots = skillSlots < CHATGPT_MAX_INPUT_IMAGES
+      ? CHATGPT_MAX_INPUT_IMAGES - skillSlots
+      : CHATGPT_MAX_INPUT_IMAGES;
     const budget: ImageBudget = {
       seen: 0,
-      dropped: Math.max(0, countChatGptContextImages(sourceMessages) - CHATGPT_MAX_INPUT_IMAGES),
+      dropped: Math.max(0, countChatGptContextImages(sourceMessages) - imageSlots),
     };
     const skillFiles: ChatGptSkillFile[] = [];
     const messages = sourceMessages.map(message => {

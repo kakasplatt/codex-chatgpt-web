@@ -101,6 +101,23 @@ test("over-limit, malformed and manual requests fail explicitly without silently
   })).toThrow("Zero Risk");
 });
 
+test("older history images yield attachment slots to selected skills instead of failing the turn", () => {
+  const image = (n: number) => ({ role: "user", content: [{ type: "input_image", image_url: `data:image/png;base64,${btoa(`img-${n}`.padEnd(6, "-"))}` }] });
+  const history = [
+    input(text()),
+    ...Array.from({ length: 12 }, (_, i) => image(i)),
+    input("remova o fundo", ["user.text"]),
+  ];
+  for (const parts of [undefined, 2] as const) {
+    const compiled = compileChatGptWebPrompt(parse(history), capabilities, token, {
+      experimentalSkillAttachments: true, experimentalMultipartParts: parts,
+    });
+    expect(compiled.skillFiles).toHaveLength(1);
+    expect(compiled.images).toHaveLength(9);
+    expect(compiled.images.at(-1)!.imageUrl).toBe(image(11).content[0]!.image_url);
+    expect(chatGptPromptFilePayloads(compiled)).toHaveLength(10);
+  }
+});
 
 test("usage accounts for skills accumulated over many turns without applying a per-message upload cap", () => {
   const parsed = parse(Array.from({ length: 11 }, (_, i) => input(text(`skill-${i}`))));
