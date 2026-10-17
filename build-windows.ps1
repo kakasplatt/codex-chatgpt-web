@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 $Launcher = Join-Path $Root "launcher"
-$Release = Join-Path $Launcher "release"
+$Artifacts = Join-Path $Launcher "artifacts"
 
 $PackageJson = Get-Content -LiteralPath (Join-Path $Root "package.json") -Raw | ConvertFrom-Json
 if ($PackageJson.packageManager -notmatch '^bun@(\d+\.\d+\.\d+)$') {
@@ -41,8 +41,9 @@ $Installed = Get-BunVersion
 if ($Installed -ne $BunVersion) {
   if ($Installed) { Write-Host "Found Bun $Installed; installing the required $BunVersion." }
   else { Write-Host "Bun not found; installing $BunVersion." }
-  $Installer = Invoke-RestMethod "https://bun.sh/install.ps1"
-  & ([scriptblock]::Create($Installer)) -Version $BunVersion
+  Write-Host "This replaces the Bun installed in $BunBin." -ForegroundColor Yellow
+  $BunInstallScript = Invoke-RestMethod "https://bun.sh/install.ps1"
+  & ([scriptblock]::Create($BunInstallScript)) -Version $BunVersion
   $env:Path = "$BunBin;$env:Path"
   $Installed = Get-BunVersion
   if ($Installed -ne $BunVersion) { throw "Expected Bun $BunVersion after install, found '$Installed'" }
@@ -58,12 +59,13 @@ Invoke-Bun @("install", "--frozen-lockfile") $Launcher
 Step "Building and packaging the launcher"
 Invoke-Bun @("run", "app:package") $Root
 
-$Installer = Get-ChildItem -LiteralPath $Release -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+# launcher/scripts/package.cjs copies the finished installer into launcher\artifacts.
+$Installer = Get-ChildItem -LiteralPath $Artifacts -Filter "*.exe" -File -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
 Step "Done"
 if ($Installer) {
   Write-Host "Installer: $($Installer.FullName)" -ForegroundColor Green
   Start-Process explorer.exe -ArgumentList "/select,`"$($Installer.FullName)`""
 } else {
-  Write-Host "Build finished; output is in $Release" -ForegroundColor Green
+  Write-Host "Build finished; output is in $Artifacts" -ForegroundColor Green
 }
