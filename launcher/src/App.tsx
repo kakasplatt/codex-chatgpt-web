@@ -44,6 +44,7 @@ export function App() {
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const catalogError = useRef<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
   useEffect(() => {
@@ -60,6 +61,7 @@ export function App() {
       setLogs(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
+        if (next.operation.name === "catalog-verification") catalogError.current = next.operation.message;
         setError(next.operation.message);
       }
     }).catch((cause) => setError(messageOf(cause)));
@@ -79,6 +81,14 @@ export function App() {
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
+      if (next.name === "catalog-verification") {
+        if (next.status === "failed") catalogError.current = next.message;
+        if (next.status === "completed") {
+          const resolved = catalogError.current;
+          setError(current => current === resolved ? null : current);
+          catalogError.current = null;
+        }
+      }
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
     });
     const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
@@ -356,16 +366,9 @@ function LauncherShell({
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
-  const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
-    snapshot.state.browserInteractionMode === "automatic"
-      && snapshot.state.coreSetupComplete === true
-      && !snapshot.state.experimentalBiggerContext,
-  );
-  const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser"
-    && !(compactSidebar && sidebarOpen)
-    && !biggerContextRecommendationOpen;
+    && !(compactSidebar && sidebarOpen);
   const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
     && browser?.authenticated !== true;
   const needsSetup = !needsBrowser && !interactionSetupComplete;
@@ -381,16 +384,9 @@ function LauncherShell({
   const limitsCopy = limitsCopyFor(language);
 
   useEffect(() => {
-    if (snapshot.state.browserInteractionMode === "manual") {
-      setBiggerContextRecommendationOpen(false);
-    }
-  }, [snapshot.state.browserInteractionMode]);
-
-  useEffect(() => {
     if (!selectedManualTab) return;
     setSurface("browser");
     setSidebarOpen(false);
-    setBiggerContextRecommendationOpen(false);
     void api!.setBrowserSurfaceActive(true).catch((cause) => setError(messageOf(cause)));
   }, [selectedManualTab?.id, selectedManualTab?.manualState, setError]);
 
@@ -514,19 +510,6 @@ function LauncherShell({
       setError(messageOf(cause));
     } finally {
       setSessionReminderBusy(false);
-    }
-  };
-
-  const setRecommendedBiggerContext = async (enabled: boolean) => {
-    if (biggerContextRecommendationBusy) return;
-    setBiggerContextRecommendationBusy(true);
-    setError(null);
-    try {
-      updateState(await api!.setBiggerContext(enabled));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBiggerContextRecommendationBusy(false);
     }
   };
 
@@ -662,7 +645,6 @@ function LauncherShell({
             </div>
             <SecondaryButton onClick={() => {
               navigateSurface("browser");
-              setBiggerContextRecommendationOpen(false);
               void api!.selectBrowserTab(tab.id).then(() => activateBrowser(true))
                 .catch(cause => setError(messageOf(cause)));
             }}>{copy.openChatgpt}</SecondaryButton>
@@ -725,7 +707,6 @@ function LauncherShell({
                 openTab={async id => {
                   await api!.selectBrowserTab(id);
                   navigateSurface("browser");
-                  setBiggerContextRecommendationOpen(false);
                   await activateBrowser(true);
                 }} />
             ) : null}
@@ -762,19 +743,7 @@ function LauncherShell({
       </section>
 
       <AnimatePresence>
-        {biggerContextRecommendationOpen ? (
-          <BiggerContextRecommendation
-            busy={biggerContextRecommendationBusy || operation?.status === "running"}
-            checked={snapshot.state.experimentalBiggerContext}
-            copy={copy}
-            onChange={(enabled) => void setRecommendedBiggerContext(enabled)}
-            onClose={() => setBiggerContextRecommendationOpen(false)}
-          />
-        ) : null}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {sessionReminderDue && !biggerContextRecommendationOpen ? (
+        {sessionReminderDue ? (
           <SessionRefreshReminder
             busy={sessionReminderBusy}
             copy={copy}
@@ -872,18 +841,27 @@ function BrowserSurface({
   platform: string;
   setError: (error: string | null) => void;
 }) {
+  const [passkeyStarting, setPasskeyStarting] = useState(false);
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const passkeyPhase = browser?.passkeyPhase;
+  const passkeyActive = passkeyStarting || Boolean(passkeyPhase);
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
   const passkeyAvailable = !manualInteraction
     && platform === "darwin"
-    && browser?.authenticated !== true;
+    && (browser?.authenticated !== true || passkeyActive);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
-  const navigationLocked = browser?.status === "running" || browser?.status === "testing";
-  const passkeyWaiting = passkeyAvailable
-    && operation?.name === "passkey-login"
-    && operation.status === "running"
-    && browser?.authenticated !== true;
+  const navigationLocked = passkeyActive || browser?.status === "running" || browser?.status === "testing";
+  const passkeyWaiting = passkeyAvailable && passkeyPhase === "waiting";
+  const passkeyImporting = passkeyPhase === "importing" || passkeyContinuationRequested;
+  const passkeyBlocked = !passkeyActive && operation?.status === "running";
+  const passkeyDisabled = passkeyBlocked || (passkeyActive && (!passkeyWaiting || passkeyImporting));
+  const passkeyLabel = passkeyImporting ? copy.passkeyImporting
+    : passkeyWaiting ? copy.passkeyContinue : passkeyActive ? copy.passkeyOpening : copy.passkeySignIn;
+  const passkeyTitle = passkeyImporting ? copy.passkeyImporting
+    : passkeyWaiting ? copy.passkeyWaitingTitle : copy.passkeyOpening;
+  const passkeyBody = passkeyImporting ? copy.passkeyImportingBody
+    : passkeyWaiting ? copy.passkeyContinueBody : copy.passkeyOpeningBody;
   useEffect(() => {
     if (!passkeyWaiting) setPasskeyContinuationRequested(false);
   }, [passkeyWaiting]);
@@ -923,10 +901,17 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
-  const openPasskeyLogin = () => {
-    if (operation?.status === "running") return;
+  const openPasskeyLogin = async () => {
+    if (passkeyActive || passkeyBlocked) return;
+    setPasskeyStarting(true);
     setError(null);
-    void api!.openPasskeyLogin().catch(cause => setError(messageOf(cause)));
+    try {
+      await api!.openPasskeyLogin();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setPasskeyStarting(false);
+    }
   };
   const continuePasskeyLogin = async () => {
     if (!passkeyWaiting || passkeyContinuationRequested) return;
@@ -1023,20 +1008,25 @@ function BrowserSurface({
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
-            disabled={passkeyWaiting && passkeyContinuationRequested}
+            disabled={passkeyDisabled}
+            title={passkeyBlocked ? operation?.message : copy.passkeyOpeningBody}
             onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
             type="button"
           >
-            {passkeyWaiting
-              ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
-              : copy.passkeySignIn}
+            {passkeyLabel}
           </button>
         ) : null}
-        <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
+        <button className="toolbar-text-button" disabled={passkeyActive} onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>
         {browser?.loading ? <i className="browser-loading-line" /> : null}
       </div>
+      {passkeyActive && visible ? (
+        <div className="passkey-login-guide" role="status">
+          <strong>{passkeyTitle}</strong>
+          <p>{passkeyBody}</p>
+        </div>
+      ) : null}
       {selectedManualTab
         && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (
         <ManualTurnGuide
@@ -1051,26 +1041,24 @@ function BrowserSurface({
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{manualInteraction
+            <h1>{passkeyActive ? passkeyTitle : manualInteraction
               ? copy.browserReady
               : browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
-            <p>{manualInteraction
+            <p>{passkeyActive ? passkeyBody : manualInteraction
               ? copy.stepAccountBody
               : browser?.authenticated
               ? copy.noActiveTaskBody
-              : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
+              : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyActive} onClick={() => void toggle()}>
                 {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton
-                  disabled={passkeyWaiting && passkeyContinuationRequested}
+                  disabled={passkeyDisabled}
                   onClick={passkeyWaiting ? continuePasskeyLogin : openPasskeyLogin}
                 >
-                  {passkeyWaiting
-                    ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
-                    : copy.passkeySignIn}
+                  {passkeyLabel}
                 </SecondaryButton>
               ) : null}
             </div>
@@ -1772,6 +1760,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setComposerPredictions = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setComposerPredictions(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setSkillAttachments = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -1915,6 +1914,7 @@ function SettingsSurface({
             checked={snapshot.state.experimentalBiggerContext}
             disabled={busy
               || snapshot.state.browserInteractionMode === "manual"
+              || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
           />
@@ -1931,6 +1931,13 @@ function SettingsSurface({
               || snapshot.state.browserInteractionMode === "manual"
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setFullContext(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={copy.composerPredictionsBody} label={copy.composerPredictions}>
+          <Switch
+            checked={snapshot.state.composerPredictionsEnabled}
+            disabled={busy || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setComposerPredictions(checked)}
           />
         </SettingRow>
         <SettingRow body={snapshot.state.browserInteractionMode === "manual"
@@ -2708,59 +2715,6 @@ function SessionRefreshReminder({
         </button>
       </div>
     </motion.aside>
-  );
-}
-
-function BiggerContextRecommendation({
-  busy,
-  checked,
-  copy,
-  onChange,
-  onClose,
-}: {
-  busy: boolean;
-  checked: boolean;
-  copy: Copy;
-  onChange: (checked: boolean) => void;
-  onClose: () => void;
-}) {
-  return (
-    <motion.div
-      animate={{ opacity: 1 }}
-      aria-describedby="bigger-context-recommendation-body"
-      aria-labelledby="bigger-context-recommendation-title"
-      aria-modal="true"
-      className="bigger-context-recommendation-backdrop"
-      exit={{ opacity: 0 }}
-      initial={{ opacity: 0 }}
-      role="dialog"
-      transition={{ duration: 0.18 }}
-    >
-      <motion.section
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        className="bigger-context-recommendation"
-        exit={{ opacity: 0, scale: 0.98, y: 6 }}
-        initial={{ opacity: 0, scale: 0.98, y: 8 }}
-        transition={PANEL_TRANSITION}
-      >
-        <header className="bigger-context-recommendation-header">
-          <small>{copy.biggerContext}</small>
-          <h2 id="bigger-context-recommendation-title">{copy.biggerContextRecommendationTitle}</h2>
-        </header>
-        <p className="bigger-context-recommendation-body" id="bigger-context-recommendation-body">{copy.biggerContextRecommendationBody}</p>
-        <div className="bigger-context-recommendation-toggle">
-          <div>
-            <strong>{copy.biggerContext}</strong>
-            <p>{copy.biggerContextRecommendationToggleBody}</p>
-          </div>
-          <Switch checked={checked} disabled={busy} onChange={onChange} />
-        </div>
-        {checked ? <p className="bigger-context-recommendation-restart">{copy.restartCodex}</p> : null}
-        <footer>
-          <SecondaryButton disabled={busy} onClick={onClose}>{copy.close}</SecondaryButton>
-        </footer>
-      </motion.section>
-    </motion.div>
   );
 }
 

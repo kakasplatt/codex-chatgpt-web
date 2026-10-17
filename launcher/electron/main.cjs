@@ -183,6 +183,9 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         at: health.last_successful_model_catalog_request_at,
       });
       send("launcher:state-changed", state);
+      if (lastOperation?.name === "catalog-verification" && lastOperation.status === "failed") {
+        publishOperation({ name: "catalog-verification", status: "completed", message: nativeCopyFor(current.language).catalogReady });
+      }
       stopCatalogVerificationMonitor();
     } catch (error) {
       logger.debug("codex.model_catalog_verification_pending", {
@@ -243,6 +246,7 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "Retry starts the launcher again without changing your saved settings or ChatGPT profile.",
     startupCleanupFailed: "Startup cleanup failed",
     catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
+    catalogReady: "Codex model list loaded.",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -258,6 +262,7 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "重试会重新启动应用，不会更改已保存的设置或 ChatGPT 登录配置。",
     startupCleanupFailed: "启动清理失败",
     catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
+    catalogReady: "Codex 模型列表已加载。",
   }),
   "zh-TW": Object.freeze({
     openLauncher: "開啟 Codex Web GPT",
@@ -273,6 +278,7 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "重試會重新啟動應用程式，不會變更已儲存的設定或 ChatGPT 登入設定檔。",
     startupCleanupFailed: "啟動清理失敗",
     catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
+    catalogReady: "Codex 模型清單已載入。",
   }),
   "ja": Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -288,6 +294,7 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "保存済みの設定と ChatGPT プロファイルを変更せずに、ランチャーを再起動します。",
     startupCleanupFailed: "起動後のクリーンアップに失敗しました",
     catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
+    catalogReady: "Codex のモデル一覧を読み込みました。",
   }),
   "ko": Object.freeze({
     openLauncher: "Codex Web GPT 열기",
@@ -303,6 +310,7 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "저장된 설정이나 ChatGPT 프로필을 변경하지 않고 런처를 다시 시작합니다.",
     startupCleanupFailed: "시작 정리에 실패했습니다",
     catalogFailure: "Codex가 런처에 연결했지만 모델 목록을 불러오지 못했습니다(HTTP {status}; {reason}). 활동에서 세부 정보를 확인하고 문제가 계속되면 안전한 로그를 내보내 주세요.",
+    catalogReady: "Codex 모델 목록을 불러왔습니다.",
   }),
 });
 
@@ -511,13 +519,19 @@ function smokePassedForCurrentVersion(state) {
 }
 
 function syncBrowserPreferences(stateStore, config) {
+  const biggerContextAvailable = typeof config?.solAvailable === "boolean";
+  const biggerContextEnabled = config?.experimentalBiggerContext === true;
+  const composerPredictionsEnabled = config?.composerPredictionsEnabled !== false;
   const useSavedChats = config?.useSavedChats === true;
   const enabled = config?.experimentalFreshConversationPerTurn === true;
   const autoApproveToolCalls = config?.autoApproveToolCalls === true;
   const current = stateStore.read();
   if (runtimeHost?.currentOperation()) return current;
-  const retentionChanged = current.experimentalFreshConversationPerTurn !== enabled || current.useSavedChats !== useSavedChats;
-  if (!retentionChanged && current.autoApproveToolCalls === autoApproveToolCalls) return current;
+  const retentionChanged = current.experimentalFreshConversationPerTurn !== enabled || current.useSavedChats !== useSavedChats
+    || current.experimentalBiggerContext !== biggerContextEnabled;
+  if (!retentionChanged && current.composerPredictionsEnabled === composerPredictionsEnabled
+    && current.autoApproveToolCalls === autoApproveToolCalls
+    && current.biggerContextAvailable === biggerContextAvailable) return current;
   // Runtime restarts leave browser views alive. Retire completed chats when their
   // persistence policy changes, including changes made by the CLI.
   const retainedKeys = new Set((retentionChanged ? [...browserHost.turnTabs.values()] : [])
@@ -526,7 +540,8 @@ function syncBrowserPreferences(stateStore, config) {
     .map(tab => tab.conversationKey));
   for (const key of retainedKeys) releaseRetainedConversation(browserHost, key);
   if (retentionChanged) browserHost.retainedConversationStore?.clear();
-  const state = stateStore.update({ experimentalFreshConversationPerTurn: enabled, useSavedChats, autoApproveToolCalls });
+  const state = stateStore.update({ composerPredictionsEnabled, experimentalFreshConversationPerTurn: enabled, useSavedChats, autoApproveToolCalls, biggerContextAvailable,
+    experimentalBiggerContext: biggerContextEnabled });
   send("launcher:state-changed", state);
   return state;
 }
@@ -534,7 +549,7 @@ function syncBrowserPreferences(stateStore, config) {
 function registerIpc({ logger, stateStore }) {
   const runtimeChannels = new Set([
     "launcher:setup-core", "launcher:setup-mcp", "launcher:uninstall-integration",
-    "launcher:bigger-context", "launcher:full-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
+    "launcher:composer-predictions", "launcher:bigger-context", "launcher:full-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
     "launcher:use-saved-chats", "launcher:zero-risk-pro", "launcher:browser-interaction-mode",
     "launcher:auto-approve-tool-calls",
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
@@ -821,6 +836,7 @@ function registerIpc({ logger, stateStore }) {
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
+      biggerContextAvailable: typeof runtimeHost.runtimeConfigSnapshot().config?.solAvailable === "boolean",
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -865,6 +881,7 @@ function registerIpc({ logger, stateStore }) {
     const state = stateStore.update({
       browserInteractionMode: interactionMode,
       ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalFullContext: false, experimentalSkillAttachments: false } : {}),
+      biggerContextAvailable: typeof runtimeHost.runtimeConfigSnapshot().config?.solAvailable === "boolean",
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -911,6 +928,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:bigger-context", async (_event, enabled) => {
     const result = await runtimeHost.setBiggerContext(enabled === true);
+    syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
     const state = stateStore.update({
       experimentalBiggerContext: result.enabled,
       ...(result.enabled ? { experimentalFullContext: false } : {}),
@@ -932,6 +950,13 @@ function registerIpc({ logger, stateStore }) {
     send("launcher:state-changed", state);
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return state;
+  });
+  handle("launcher:composer-predictions", async (_event, enabled) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation()) {
+      throw new Error("Finish or cancel active ChatGPT turns before changing next-message predictions");
+    }
+    await runtimeHost.setComposerPredictions(enabled);
+    return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
   });
   handle("launcher:skill-attachments", async (_event, enabled) => {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
@@ -1005,6 +1030,7 @@ function registerIpc({ logger, stateStore }) {
     );
     const state = stateStore.update({
       browserInteractionMode: mode,
+      biggerContextAvailable: typeof runtimeHost.runtimeConfigSnapshot().config?.solAvailable === "boolean",
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
       autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
@@ -1194,6 +1220,7 @@ async function start() {
     coreHome: CORE_HOME,
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     launcherProfile: LAUNCHER_PROFILE.kind,
+    resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
     publishOperation,
     onConfigRead: config => {
       // Setup may read an intermediate config before rollback. The setting IPC commits
@@ -1231,7 +1258,7 @@ async function start() {
     retainedConversationStore,
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
-    loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
+    loginWithPasskey: onProgress => runtimeHost.capturePasskeyLogin(onProgress),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
     publishState: (state) => send("launcher:browser-state", state),
@@ -1257,9 +1284,8 @@ async function start() {
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
-  let startupAuthenticationRefresh = Promise.resolve();
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
-    startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
+    void browserHost.refreshAuthentication().catch((error) => {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
@@ -1323,6 +1349,7 @@ async function start() {
       autoStart: false,
       experimentalBiggerContext: config?.experimentalBiggerContext === true,
       experimentalFullContext: config?.experimentalFullContext === true,
+      composerPredictionsEnabled: config?.composerPredictionsEnabled !== false,
       experimentalSkillAttachments: config?.experimentalSkillAttachments === true,
       experimentalFreshConversationPerTurn: config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: config?.useSavedChats === true,
@@ -1337,7 +1364,7 @@ async function start() {
       userData: launcherUserData,
     });
     if (config?.mode === "full") {
-      void startupAuthenticationRefresh.then(() => runtimeSupervisor.startIfConfigured()).catch((error) => {
+      void runtimeSupervisor.startIfConfigured().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         logger.error("dev_profile.runtime_start_failed", { message });
         const failed = stateStore.update({ mcpSetupComplete: false });
@@ -1345,7 +1372,6 @@ async function start() {
       }).finally(finishRuntimeStartup);
     } else finishRuntimeStartup();
   } else void (async () => {
-    await startupAuthenticationRefresh;
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
       const state = stateStore.update({
@@ -1381,26 +1407,28 @@ async function start() {
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
       const experimentalFullContext = configuredRuntime.config?.experimentalFullContext === true;
+      const composerPredictionsEnabled = configuredRuntime.config?.composerPredictionsEnabled !== false;
       const experimentalSkillAttachments = configuredRuntime.config?.experimentalSkillAttachments === true;
       const experimentalFreshConversationPerTurn = configuredRuntime.config?.experimentalFreshConversationPerTurn === true;
       const useSavedChats = configuredRuntime.config?.useSavedChats === true;
       const autoApproveToolCalls = configuredRuntime.config?.autoApproveToolCalls === true;
       const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
-      if (saved.experimentalSkillAttachments !== experimentalSkillAttachments
+      if (saved.composerPredictionsEnabled !== composerPredictionsEnabled
+        || saved.experimentalSkillAttachments !== experimentalSkillAttachments
         || saved.experimentalFreshConversationPerTurn !== experimentalFreshConversationPerTurn
         || saved.useSavedChats !== useSavedChats
         || saved.autoApproveToolCalls !== autoApproveToolCalls
         || saved.experimentalBiggerContext !== enabled
         || saved.experimentalFullContext !== experimentalFullContext
         || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalFullContext, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, autoApproveToolCalls, zeroRiskProEnabled });
+        const state = stateStore.update({ composerPredictionsEnabled, experimentalBiggerContext: enabled, experimentalFullContext, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, autoApproveToolCalls, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
-    const route = await runtimeHost.connectBridgeRoute();
+    const route = await runtimeHost.connectBridgeRoute({ recoveryOnly: true });
     return { ...runtime, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
     if (runtime.status === "ready") {
@@ -1411,6 +1439,7 @@ async function start() {
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
         experimentalFullContext: config.experimentalFullContext === true,
+        composerPredictionsEnabled: config.composerPredictionsEnabled !== false,
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
         experimentalFreshConversationPerTurn: config.experimentalFreshConversationPerTurn === true,
         useSavedChats: config.useSavedChats === true,

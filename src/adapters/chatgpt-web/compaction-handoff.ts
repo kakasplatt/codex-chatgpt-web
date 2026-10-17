@@ -216,7 +216,7 @@ export async function settleActiveCompactionSource(
     let token: string | undefined;
     try {
       token = await source.runtime.token;
-      broker.requestCompaction(token, interruptedByActiveCompaction());
+      broker.requestCompaction(token, interruptedByActiveCompaction(), () => source.runtime.trace.recordProgress());
       for (const request of outstanding) {
         const result = results.get(request.callId)!;
         await broker.completeTool(
@@ -225,6 +225,7 @@ export async function settleActiveCompactionSource(
           toolResult(result),
         );
         source.runtime.externalProgress.recordToolResult();
+        source.runtime.trace.recordProgress();
         source.markResultDelivered(request.callId);
       }
       const browserOutcome = await withCompactionAbort(source.browserOutcome, signal);
@@ -436,6 +437,7 @@ export async function requestRetainedCompactionHandoff(
       prepareResume: prepare,
       conversationKey,
       requireRetainedConversation: true,
+      compaction: true,
       abortSignal: browserAbort.signal,
       onBrowserRetirementAvailable: publishRetirement,
       // Selection precedes prompt preparation on both managed and helper browser hosts.
