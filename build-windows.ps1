@@ -47,10 +47,16 @@ function Install-ProjectBun {
     $ExpectedLine = Get-Content -LiteralPath $Checksums | Where-Object { $_ -match "  $([regex]::Escape($BunAsset))\.zip$" }
     if (@($ExpectedLine).Count -ne 1) { throw "Bun checksums did not contain exactly one $BunAsset.zip entry" }
     $Expected = ($ExpectedLine -split "\s+")[0].ToLowerInvariant()
-    $Actual = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    # .NET instead of Get-FileHash/Expand-Archive: those module cmdlets fail to load in Windows
+    # PowerShell 5.1 when it inherits PowerShell 7's PSModulePath.
+    $Sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $Stream = [System.IO.File]::OpenRead($Archive)
+    try { $Actual = ([System.BitConverter]::ToString($Sha256.ComputeHash($Stream)) -replace "-", "").ToLowerInvariant() }
+    finally { $Stream.Dispose(); $Sha256.Dispose() }
     if ($Actual -ne $Expected) { throw "Bun SHA-256 mismatch: expected $Expected, received $Actual" }
 
-    Expand-Archive -LiteralPath $Archive -DestinationPath $Extracted
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($Archive, $Extracted)
     $Executables = @(Get-ChildItem -LiteralPath $Extracted -Filter bun.exe -File -Recurse)
     if ($Executables.Count -ne 1) { throw "Bun archive contained $($Executables.Count) bun.exe files" }
     New-Item -ItemType Directory -Path $BunHome -Force | Out-Null
