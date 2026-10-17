@@ -106,6 +106,7 @@ test("older history images yield attachment slots to selected skills instead of 
   const history = [
     input(text()),
     ...Array.from({ length: 12 }, (_, i) => image(i)),
+    { role: "assistant", content: [{ type: "output_text", text: "Done" }] },
     input("remova o fundo", ["user.text"]),
   ];
   for (const parts of [undefined, 2] as const) {
@@ -117,6 +118,20 @@ test("older history images yield attachment slots to selected skills instead of 
     expect(compiled.images.at(-1)!.imageUrl).toBe(image(11).content[0]!.image_url);
     expect(chatGptPromptFilePayloads(compiled)).toHaveLength(10);
   }
+
+  // Repeated selections of one skill reserve a single slot.
+  const repeated = compile([...Array.from({ length: 10 }, () => input(text())), ...history.slice(1)]);
+  expect(repeated.skillFiles).toHaveLength(1);
+  expect(repeated.images).toHaveLength(9);
+
+  // Skills may take every slot from older images, but never from the active request's images.
+  const tenSkills = Array.from({ length: 10 }, (_, i) => input(text(`skill-${i}`)));
+  const answer = { role: "assistant", content: [{ type: "output_text", text: "Done" }] };
+  const textOnly = compile([image(0), ...tenSkills, answer, input("continue", ["user.text"])]);
+  expect(textOnly.images).toHaveLength(0);
+  expect(textOnly.text).toContain("older image not attached");
+  expect(chatGptPromptFilePayloads(textOnly)).toHaveLength(10);
+  expect(() => chatGptPromptFilePayloads(compile([image(0), ...tenSkills, answer, image(1)]))).toThrow("10 attachments");
 });
 
 test("usage accounts for skills accumulated over many turns without applying a per-message upload cap", () => {

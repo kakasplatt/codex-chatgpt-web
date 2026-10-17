@@ -207,7 +207,7 @@ export function chatGptPromptJsonBytes(text: string): number {
 }
 
 const DROPPED_IMAGE_NOTE =
-  `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
+  `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} attachments per message, including skill files]`;
 
 /**
  * A fresh compaction epoch receives the complete canonical context, so every still-relevant image
@@ -648,26 +648,33 @@ export function compileChatGptWebPrompt(
     ];
   const build = (sourceMessages: readonly CodexMessage[], omittedMessages = 0): CompiledChatGptWebPrompt => {
     const images: ChatGptWebPromptImage[] = [];
-    // Skill files share ChatGPT's per-message attachment limit with images. Older images yield
-    // their slots to the selected skills; when skills alone fill the limit, keep the explicit
-    // too_many_attachments failure instead of dropping every image, including the newest.
-    const skillSlots = attachSkills
-      ? new Set(sourceMessages.flatMap(message =>
-        message.role === "user" && message.origin === "codex_skill" ? [selectedSkillFile(message).name] : []
-      )).size
-      : 0;
-    const imageSlots = skillSlots < CHATGPT_MAX_INPUT_IMAGES
-      ? CHATGPT_MAX_INPUT_IMAGES - skillSlots
-      : CHATGPT_MAX_INPUT_IMAGES;
+    const skillFiles: ChatGptSkillFile[] = [];
+    const skillFileByMessage = new Map<CodexMessage, ChatGptSkillFile>();
+    if (attachSkills) {
+      for (const message of sourceMessages) {
+        if (message.role !== "user" || message.origin !== "codex_skill") continue;
+        const file = selectedSkillFile(message);
+        skillFileByMessage.set(message, file);
+        if (!skillFiles.some(existing => existing.name === file.name)) skillFiles.push(file);
+      }
+    }
+    // Skill files share ChatGPT's per-message attachment limit with images, so older history
+    // images yield their slots to the selected skills. Images since the latest assistant message
+    // belong to the active request and are never dropped for skills: if they cannot fit beside the
+    // skills, the turn fails explicitly with too_many_attachments.
+    const activeStart = sourceMessages.findLastIndex(message => message.role === "assistant") + 1;
+    const activeImages = countChatGptContextImages(sourceMessages.slice(activeStart));
+    const imageSlots = Math.max(
+      CHATGPT_MAX_INPUT_IMAGES - skillFiles.length,
+      Math.min(activeImages, CHATGPT_MAX_INPUT_IMAGES),
+    );
     const budget: ImageBudget = {
       seen: 0,
       dropped: Math.max(0, countChatGptContextImages(sourceMessages) - imageSlots),
     };
-    const skillFiles: ChatGptSkillFile[] = [];
     const messages = sourceMessages.map(message => {
-      if (attachSkills && message.role === "user" && message.origin === "codex_skill") {
-        const file = selectedSkillFile(message);
-        if (!skillFiles.some(existing => existing.name === file.name)) skillFiles.push(file);
+      const file = skillFileByMessage.get(message);
+      if (file) {
         return { role: "user", origin: "codex_skill", content: [{ type: "skill_attachment", filename: file.name }] };
       }
       return messageEnvelope(message, images, budget);
