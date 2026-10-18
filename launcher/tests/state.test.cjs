@@ -21,6 +21,22 @@ test("prediction setting starts on and remains off after reopening the state sto
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("automatic engine defaults to embedded and normalizes corrupt persisted values", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-headless-setting-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().automaticBrowserEngine, "embedded");
+    store.update({ automaticBrowserEngine: "headless" });
+    assert.equal(createStateStore(file).read().automaticBrowserEngine, "headless");
+    fs.writeFileSync(file, JSON.stringify({ ...store.read(), automaticBrowserEngine: "unsafe" }));
+    assert.equal(createStateStore(file).read().automaticBrowserEngine, "embedded");
+    fs.writeFileSync(file, JSON.stringify({ version: 1, showBrowserDuringTurns: false }));
+    assert.equal(createStateStore(file).read().automaticBrowserEngine, "embedded");
+    assert.equal(createStateStore(file).read().showBrowserDuringTurns, false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("launcher state persists onboarding, language, and autostart atomically", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
   const file = path.join(root, "state.json");
@@ -37,6 +53,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       showBrowserDuringTurns: true,
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
+      automaticBrowserEngine: "embedded",
       experimentalBiggerContext: false,
       experimentalFullContext: false,
       composerPredictionsEnabled: true,
@@ -70,6 +87,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       showBrowserDuringTurns: true,
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
+      automaticBrowserEngine: "embedded",
       experimentalBiggerContext: false,
       experimentalFullContext: true,
       composerPredictionsEnabled: true,
@@ -153,6 +171,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       showBrowserDuringTurns: true,
       autoApproveToolCalls: false,
       browserInteractionMode: "automatic",
+      automaticBrowserEngine: "embedded",
       experimentalBiggerContext: false,
       experimentalFullContext: false,
       composerPredictionsEnabled: true,

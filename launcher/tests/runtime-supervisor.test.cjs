@@ -68,6 +68,21 @@ function launcherConfig(descriptorPath, overrides = {}) {
   };
 }
 
+test("launcher accepts a true headless Chrome engine only for browser-only automatic turns", () => {
+  const descriptor = path.join(os.tmpdir(), "codex-headless-browser-owner.json");
+  const config = launcherConfig(descriptor, {
+    automaticBrowserEngine: "headless", browserInteractionMode: "automatic",
+    browserHost: "managed-chrome", headed: false,
+  });
+  assert.equal(validateConfig(structuredClone(config), descriptor).browserHost, "managed-chrome");
+  assert.throws(() => validateConfig({ ...config, headed: true }, descriptor), /browser engine/);
+  assert.throws(() => validateConfig({ ...config, browserHost: "launcher" }, descriptor), /browser engine/);
+  assert.throws(() => validateConfig({ ...config, mode: "full" }, descriptor), /parity gates/);
+  assert.throws(() => validateConfig({ ...config, browserInteractionMode: "manual" }, descriptor), /browser engine/);
+  assert.throws(() => validateConfig({ ...config, purpose: "dev-harness" }, descriptor, process.platform, "development"), /parity gates/);
+  assert.equal(validateConfig(launcherConfig(descriptor), descriptor).browserHost, "launcher");
+});
+
 test("packaged runtime paths are native on Windows and Unix", () => {
   const windows = packagedRuntimePaths("C:\\Program Files\\Codex\\resources", "win32");
   assert.equal(path.basename(windows.executable), "bun.exe");

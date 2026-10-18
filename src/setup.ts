@@ -46,6 +46,7 @@ export interface SetupOptions {
   connectorNameSuffix?: string;
   mode: RuntimeMode;
   browserInteractionMode?: BrowserInteractionMode;
+  automaticBrowserEngine?: "embedded" | "headless";
   subagentProtocol?: SubagentProtocol;
   port?: number;
   chromeExecutablePath?: string;
@@ -279,6 +280,7 @@ function baseConfig(
   const config = existing ? structuredClone(existing) : defaultConfig(options.mode);
   config.mode = options.mode;
   if (options.browserInteractionMode) config.browserInteractionMode = options.browserInteractionMode;
+  if (options.automaticBrowserEngine) config.automaticBrowserEngine = options.automaticBrowserEngine;
   Object.assign(config, resolveInteractionConnectorIdentities(
     config.browserInteractionMode,
     profile,
@@ -293,8 +295,13 @@ function baseConfig(
     config.port = options.port;
   }
   if (options.chromeExecutablePath) config.chromeExecutablePath = options.chromeExecutablePath;
+  if (options.automaticBrowserEngine && !options.browserHostDescriptorPath) {
+    throw new Error("--automatic-browser-engine requires --browser-host-descriptor from the running launcher");
+  }
   if (options.browserHostDescriptorPath) {
-    config.browserHost = "launcher";
+    config.browserHost = config.browserInteractionMode === "automatic"
+      && config.automaticBrowserEngine === "headless" ? "managed-chrome" : "launcher";
+    config.headed = config.browserHost === "launcher";
     config.browserHostDescriptorPath = options.browserHostDescriptorPath;
     config.brokerSocketPath = defaultBrokerEndpoint();
   } else if (options.chromeExecutablePath) {
@@ -489,13 +496,18 @@ function prepareSetup(options: SetupOptions): PreparedSetup {
   });
   delete config.purpose;
   const launcherOwned = config.browserHost === "launcher";
-  if (!launcherOwned && process.platform !== "darwin") {
+  if (config.browserHostDescriptorPath && config.browserInteractionMode === "automatic"
+    && config.automaticBrowserEngine === "headless"
+    && config.mode === "full") {
+    throw new Error("Full MCP and retained browser conversations are not yet supported in headless mode");
+  }
+  if (!config.browserHostDescriptorPath && !launcherOwned && process.platform !== "darwin") {
     throw new Error(
       "Terminal-only managed Chrome setup currently requires macOS. "
       + "Use the Codex Web GPT launcher on Windows or Linux.",
     );
   }
-  return { existing, config, launcherOwned };
+  return { existing, config, launcherOwned: launcherOwned || Boolean(config.browserHostDescriptorPath) };
 }
 
 export function preflightSetup(options: SetupOptions): void {
@@ -584,7 +596,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     proAvailable = stored.proAvailable;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
     const capabilityProbeRequired = !loginRequired
-      && (options.refreshAccountCapabilities === true
+      && (config.browserHostDescriptorPath !== undefined || options.refreshAccountCapabilities === true
         || existing?.browserInteractionMode === "manual"
         || solAvailable === undefined
         || extraHighAvailable === undefined
@@ -596,6 +608,9 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       );
     }
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && existing) await assertServiceIdle(existing);
+    if (loginRequired && launcherOwned) {
+      throw new Error("Headless ChatGPT requires a verified Chrome sign-in; use Headless sign-in in the launcher before enabling it");
+    }
     if (loginRequired) {
       const login = await loginToChatGpt(config);
       solAvailable = login.solAvailable;
@@ -677,7 +692,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   // Keep the previous terminal runtime intact through the ownership handoff. A later launcher
   // setup removes it once the launcher-owned configuration is already the established baseline.
   const migratingTerminalRuntime = Boolean(
-    launcherOwned && existing && existing.browserHost !== "launcher",
+    launcherOwned && existing && !existing.browserHostDescriptorPath,
   );
   if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
   installCodexIntegration(config, {
@@ -710,11 +725,14 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     throw new Error("DEV profile setup requires the isolated launcher browser descriptor");
   }
   const config = baseConfig(existing, options, DEV_LAUNCHER_PROFILE);
-  if (config.browserHost !== "launcher") {
+  if (config.automaticBrowserEngine === "headless" && config.browserInteractionMode === "automatic") {
+    throw new Error("Headless Chrome is not yet supported by the isolated DEV chat harness");
+  }
+  if (!config.browserHostDescriptorPath || config.browserHost !== "launcher") {
     throw new Error("DEV profile setup requires the desktop launcher browser host");
   }
   config.purpose = DEV_CONFIG_PURPOSE;
-  if (config.browserInteractionMode === "automatic") {
+  if (config.browserInteractionMode === "automatic" && config.browserHost === "launcher") {
     const capabilities = await inspectLauncherCapabilities(
       config,
       existing,
@@ -725,8 +743,6 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     config.extraHighAvailable = capabilities.solAvailable && capabilities.extraHighAvailable;
     config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
   }
-
-
   await configureTunnel(config, existing, options);
   // DEV uses the same supervisor-owned startup after this configuration is committed.
   const tunnelReady = config.mode === "full" ? false : null;

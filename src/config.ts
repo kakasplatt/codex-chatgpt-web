@@ -108,6 +108,8 @@ export interface AppConfig {
   automaticAppName: string;
   manualAppName: string;
   browserHost: BrowserHostMode;
+  /** Launcher-owned automatic browser engine; independent of manual Zero Risk mode. */
+  automaticBrowserEngine?: "embedded" | "headless";
   browserInteractionMode: BrowserInteractionMode;
   browserHostDescriptorPath?: string;
   chromeExecutablePath: string;
@@ -431,6 +433,27 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (browserInteractionMode !== "automatic" && browserInteractionMode !== "manual") {
     throw new Error(`Invalid browserInteractionMode in ${path}`);
   }
+  if (parsed.automaticBrowserEngine !== undefined
+    && parsed.automaticBrowserEngine !== "embedded" && parsed.automaticBrowserEngine !== "headless") {
+    throw new Error(`Invalid automaticBrowserEngine in ${path}`);
+  }
+  if (parsed.browserHostDescriptorPath && parsed.automaticBrowserEngine === "headless"
+    && browserInteractionMode === "automatic"
+    && (parsed.browserHost !== "managed-chrome" || parsed.headed !== false)) {
+    throw new Error(`Launcher headless mode requires headless managed Chrome in ${path}`);
+  }
+  if (parsed.browserHostDescriptorPath && parsed.automaticBrowserEngine === "headless"
+    && browserInteractionMode === "automatic" && parsed.mode === "full") {
+    throw new Error(`Full MCP headless mode is not yet supported in ${path}`);
+  }
+  if (parsed.browserHostDescriptorPath && (parsed.automaticBrowserEngine ?? "embedded") === "embedded"
+    && parsed.browserHost !== "launcher") {
+    throw new Error(`Embedded launcher mode requires the launcher browser in ${path}`);
+  }
+  if (parsed.browserHostDescriptorPath && browserInteractionMode === "manual"
+    && parsed.browserHost !== "launcher") {
+    throw new Error(`Zero Risk always requires the visible launcher browser in ${path}`);
+  }
   if (browserInteractionMode === "manual" && parsed.mode !== "full") {
     throw new Error(`Zero Risk requires full mode in ${path}`);
   }
@@ -467,12 +490,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.appName !== expectedAppName) {
     throw new Error(`Active appName does not match browserInteractionMode in ${path}; rerun setup`);
   }
-  if (parsed.browserHost === "launcher"
+  if ((parsed.browserHost === "launcher" || parsed.automaticBrowserEngine === "headless")
     && (typeof parsed.browserHostDescriptorPath !== "string" || !parsed.browserHostDescriptorPath.trim())) {
-    throw new Error(`Launcher browser host requires browserHostDescriptorPath in ${path}`);
+    throw new Error(`Launcher browser engine requires browserHostDescriptorPath in ${path}`);
   }
-  if (parsed.browserHost === "launcher"
-    && !isAbsolute(expandUserPath(parsed.browserHostDescriptorPath!))) {
+  if (parsed.browserHostDescriptorPath !== undefined
+    && (typeof parsed.browserHostDescriptorPath !== "string"
+      || !isAbsolute(expandUserPath(parsed.browserHostDescriptorPath)))) {
     throw new Error(`Launcher browserHostDescriptorPath must be absolute in ${path}`);
   }
   const brokerEndpoint = expandUserPath(parsed.brokerSocketPath!);

@@ -52,6 +52,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setAutoApproveToolCalls: (enabled) => ipcRenderer.invoke("launcher:auto-approve-tool-calls", enabled),
   setZeroRiskPro: (enabled) => ipcRenderer.invoke("launcher:zero-risk-pro", enabled),
   setBrowserInteractionMode: (mode) => ipcRenderer.invoke("launcher:browser-interaction-mode", mode),
+  setAutomaticBrowserEngine: (engine) => ipcRenderer.invoke("launcher:automatic-browser-engine", engine),
+  loginHeadless: () => ipcRenderer.invoke("launcher:headless-login"),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),

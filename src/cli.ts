@@ -3,7 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt } from "./browser-login";
 import { defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
@@ -232,6 +232,19 @@ function launcherLoginContinuation(): { promise: Promise<void>; close: () => voi
 
 async function loginCommand(args: string[]): Promise<void> {
   const launcherControl = takeFlag(args, "--launcher-control");
+  const headlessLauncher = takeFlag(args, "--headless-launcher");
+  if (headlessLauncher) {
+    assertNoArgs(args);
+    authorizeLauncherControl("headless Chrome login");
+    const config = loadConfig();
+    if (!config.browserHostDescriptorPath) throw new Error("Headless launcher login requires a launcher-owned configuration");
+    if (resolve(config.browserHostDescriptorPath) !== resolve(process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR!)) {
+      throw new Error("Headless login authorization belongs to a different launcher instance");
+    }
+    const result = await loginToChatGpt(config);
+    stdout.write(`Headless Chrome sign-in verified at ${result.storageStatePath}\n`);
+    return;
+  }
   if (!launcherControl) {
     assertNoArgs(args);
     const config = loadConfig();
@@ -290,6 +303,13 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (automaticBrowserInteraction || manualBrowserInteraction) {
     options.browserInteractionMode = manualBrowserInteraction ? "manual" : "automatic";
+  }
+  const automaticBrowserEngine = takeOption(args, "--automatic-browser-engine");
+  if (automaticBrowserEngine !== undefined) {
+    if (automaticBrowserEngine !== "embedded" && automaticBrowserEngine !== "headless") {
+      throw new Error("--automatic-browser-engine must be embedded or headless");
+    }
+    options.automaticBrowserEngine = automaticBrowserEngine;
   }
   const connectorNameSuffix = takeOption(args, "--connector-name-suffix");
   if (connectorNameSuffix !== undefined) options.connectorNameSuffix = connectorNameSuffix;
@@ -566,7 +586,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
     throw new Error("Uninstall cancelled");
   }
   const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
-  if (config?.browserHost === "launcher" && !launcherControl) {
+  if (config?.browserHostDescriptorPath && !launcherControl) {
     throw new Error(
       "Launcher-owned integration must be removed from Codex Web GPT Settings so the active runtime can be drained safely.",
     );
@@ -574,7 +594,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
   if (!config && process.platform === "darwin" && getServiceStatus().installed) {
     throw new Error("Service exists but configuration is missing; refusing an unverifiable uninstall");
   }
-  const launcherRuntimeStopped = config?.browserHost === "launcher" && launcherControl;
+  const launcherRuntimeStopped = Boolean(config?.browserHostDescriptorPath && launcherControl);
   if (config && process.platform === "darwin" && !launcherRuntimeStopped) await assertServiceIdle(config);
   if (config?.mode === "full" && !launcherRuntimeStopped) {
     if (process.platform === "darwin") await uninstallTunnelService();

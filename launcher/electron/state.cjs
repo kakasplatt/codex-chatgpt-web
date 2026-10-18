@@ -16,6 +16,7 @@ const DEFAULT_STATE = Object.freeze({
   showBrowserDuringTurns: true,
   autoApproveToolCalls: false,
   browserInteractionMode: "automatic",
+  automaticBrowserEngine: "embedded",
   experimentalBiggerContext: false,
   experimentalFullContext: false,
   composerPredictionsEnabled: true,
@@ -67,6 +68,9 @@ function readState(filePath) {
     }
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
+    }
+    if (state.automaticBrowserEngine !== "embedded" && state.automaticBrowserEngine !== "headless") {
+      state.automaticBrowserEngine = DEFAULT_STATE.automaticBrowserEngine;
     }
     if (state.coreSetupComplete !== true) {
       if (state.onboardingComplete !== true) state.browserInteractionMode = "automatic";

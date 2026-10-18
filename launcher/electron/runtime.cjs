@@ -454,7 +454,8 @@ class RuntimeHost {
         serialized: null,
       };
     }
-    const launcherOwned = setupConfig.browserHost === "launcher";
+    const launcherOwned = setupConfig.browserHost === "launcher"
+      || setupConfig.browserHostDescriptorPath === this.browserDescriptorPath;
     const config = launcherOwned ? this.supervisor.readConfig() : setupConfig;
     return {
       configured: true,
@@ -945,6 +946,91 @@ class RuntimeHost {
     }
     if (!current.configured) return CURRENT_CONNECTOR_NAME;
     return connectorNameForSetup(current.config?.appName);
+  }
+
+  headlessReady() {
+    const config = this.runtimeConfigSnapshot().config;
+    if (!config || !config.browserHostDescriptorPath || !config.storageStatePath
+      || !usableExecutable(config.chromeExecutablePath, this.platform)) return false;
+    try {
+      if (!fs.statSync(config.storageStatePath).isFile()) return false;
+      const marker = JSON.parse(fs.readFileSync(`${config.storageStatePath}.verified.json`, "utf8"));
+      return marker?.version === 1 && marker?.authenticated === true
+        && typeof marker?.verifiedAt === "string" && Number.isFinite(Date.parse(marker.verifiedAt));
+    } catch {
+      return false;
+    }
+  }
+
+  async loginHeadless() {
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured || current.owner !== "launcher") throw new Error("Install the Codex integration before signing in to headless Chrome");
+    if (current.mode !== "browser-only" || this.launcherProfile === "development") {
+      throw new Error("Headless Chrome sign-in is supported only for production browser-only mode");
+    }
+    // A running managed worker holds an already-loaded BrowserContext. Changing
+    // storageState on disk cannot reauthenticate that in-memory Chrome context.
+    // Switching to embedded and back restarts the daemon transactionally.
+    if (current.config?.automaticBrowserEngine === "headless") {
+      throw new Error("Switch back to the embedded browser before refreshing headless sign-in; re-enable headless after verification");
+    }
+    if (this.currentOperation()) throw new Error("Finish the current launcher operation before signing in to headless Chrome");
+    this.lifecycleOperation = "headless-login";
+    let drained = false;
+    try {
+      // The managed Chrome worker may be running without an Electron turn tab.
+      // The daemon drain is the only atomic idle proof for both browser engines.
+      drained = await this.supervisor.acquireDrain(this.supervisor.readConfig());
+      if (!drained) throw new Error("Headless Chrome sign-in requires a verified idle daemon drain");
+      await this.run("headless-login", ["login", "--headless-launcher"], {
+        env: this.launcherControlEnvironment(),
+        message: "Sign in to ChatGPT in the separate Chrome window, then close that Chrome window",
+        successMessage: "Dedicated headless Chrome account verified",
+        timeoutMs: PASSKEY_LOGIN_TIMEOUT_MS,
+      });
+    } finally {
+      try {
+        if (drained) await this.supervisor.control(this.supervisor.readConfig(), "resume");
+      } finally {
+        this.lifecycleOperation = null;
+      }
+    }
+    if (!this.headlessReady()) throw new Error("Headless Chrome did not produce a verified login");
+    return { headlessReady: true };
+  }
+
+  async setAutomaticBrowserEngine(engine) {
+    if (engine !== "embedded" && engine !== "headless") throw new Error("Unknown automatic browser engine");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured || current.owner !== "launcher") throw new Error("Install a launcher-owned runtime first");
+    if (this.browserInteractionMode() !== "automatic") throw new Error("Headless browser selection is unavailable in Zero Risk mode");
+    if (current.config?.automaticBrowserEngine === engine || (engine === "embedded" && !current.config?.automaticBrowserEngine)) {
+      return { configured: false, engine };
+    }
+    if (engine === "headless" && !this.headlessReady()) {
+      throw new Error("Sign in to the dedicated Chrome profile before enabling headless mode");
+    }
+    if (engine === "headless" && (current.mode === "full" || this.launcherProfile === "development")) {
+      throw new Error("Headless Chrome is not yet supported for Full MCP turns or DEV chats; use production browser-only mode");
+    }
+    const args = [
+      ...(this.launcherProfile === "development" ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      "--automatic-browser-engine", engine,
+      ...this.browserInteractionArgs({ refreshCapabilities: true }),
+      "--acknowledge-unofficial",
+      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
+    ];
+    if (current.config?.autoApproveToolCalls) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: `Switching automatic browser engine to ${engine}`,
+      successMessage: `Automatic browser engine is now ${engine}`,
+      timeoutMs: current.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+    };
+    if (this.launcherProfile === "development") await this.runDevSetup("automatic-browser-engine", args, options);
+    else await this.runSetup("automatic-browser-engine", args, options);
+    return { configured: true, engine };
   }
 
   setupConnectorName(mode = "automatic") {

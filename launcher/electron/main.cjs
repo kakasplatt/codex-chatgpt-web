@@ -524,13 +524,15 @@ function syncBrowserPreferences(stateStore, config) {
   const useSavedChats = config?.useSavedChats === true;
   const enabled = config?.experimentalFreshConversationPerTurn === true;
   const autoApproveToolCalls = config?.autoApproveToolCalls === true;
+  const automaticBrowserEngine = config?.automaticBrowserEngine === "headless" ? "headless" : "embedded";
   const current = stateStore.read();
   if (runtimeHost?.currentOperation()) return current;
   const retentionChanged = current.experimentalFreshConversationPerTurn !== enabled || current.useSavedChats !== useSavedChats
     || current.experimentalBiggerContext !== biggerContextEnabled;
   if (!retentionChanged && current.composerPredictionsEnabled === composerPredictionsEnabled
     && current.autoApproveToolCalls === autoApproveToolCalls
-    && current.biggerContextAvailable === biggerContextAvailable) return current;
+    && current.biggerContextAvailable === biggerContextAvailable
+    && current.automaticBrowserEngine === automaticBrowserEngine) return current;
   // Runtime restarts leave browser views alive. Retire completed chats when their
   // persistence policy changes, including changes made by the CLI.
   const retainedKeys = new Set((retentionChanged ? [...browserHost.turnTabs.values()] : [])
@@ -538,7 +540,7 @@ function syncBrowserPreferences(stateStore, config) {
       && (current.useSavedChats !== useSavedChats || tab.interactionMode === "automatic"))
     .map(tab => tab.conversationKey));
   for (const key of retainedKeys) releaseRetainedConversation(browserHost, key);
-  const state = stateStore.update({ composerPredictionsEnabled, experimentalFreshConversationPerTurn: enabled, useSavedChats, autoApproveToolCalls, biggerContextAvailable,
+  const state = stateStore.update({ composerPredictionsEnabled, automaticBrowserEngine, experimentalFreshConversationPerTurn: enabled, useSavedChats, autoApproveToolCalls, biggerContextAvailable,
     experimentalBiggerContext: biggerContextEnabled });
   send("launcher:state-changed", state);
   return state;
@@ -550,6 +552,7 @@ function registerIpc({ logger, stateStore }) {
     "launcher:composer-predictions", "launcher:bigger-context", "launcher:full-context", "launcher:skill-attachments", "launcher:fresh-conversation-per-turn",
     "launcher:use-saved-chats", "launcher:zero-risk-pro", "launcher:browser-interaction-mode",
     "launcher:auto-approve-tool-calls",
+    "launcher:automatic-browser-engine", "launcher:headless-login",
     "launcher:connector-name", "launcher:mcp-verify", "launcher:doctor", "launcher:cancel-turns",
     "launcher:browser-passkey-login", "launcher:browser-logout", "launcher:browser-smoke",
     "launcher:limits-setup", "launcher:update-install", "launcher:complete-onboarding",
@@ -578,6 +581,8 @@ function registerIpc({ logger, stateStore }) {
       manual: runtimeHost.setupConnectorName("manual"),
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
+    runtimeMode: runtimeHost?.runtimeConfigSnapshot().mode ?? "browser-only",
+    headlessReady: runtimeHost?.headlessReady?.() ?? false,
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
@@ -1042,6 +1047,30 @@ function registerIpc({ logger, stateStore }) {
     send("launcher:browser-state", browserHost.snapshot());
     if (!IS_DEV_PROFILE && result.configured) startCatalogVerificationMonitor({ logger, stateStore });
     return { state, credentialsRequired: false, targetMode: mode };
+  });
+  handle("launcher:headless-login", async () => {
+    if (stateStore.read().browserInteractionMode !== "automatic") throw new Error("Headless sign-in is available only in automatic mode");
+    if (browserHost.activeTraceId || browserHost.currentOperation() || browserHost.turnTabs.size > 0) {
+      throw new Error("Close all browser tasks before opening a dedicated Chrome sign-in");
+    }
+    const result = await runtimeHost.loginHeadless();
+    send("launcher:state-changed", stateStore.read());
+    return result;
+  });
+  handle("launcher:automatic-browser-engine", async (_event, engine) => {
+    if (engine !== "embedded" && engine !== "headless") throw new Error("Unknown automatic browser engine");
+    if (stateStore.read().browserInteractionMode !== "automatic") throw new Error("Headless engine cannot run in Zero Risk mode");
+    if (browserHost.activeTraceId || browserHost.currentOperation() || browserHost.turnTabs.size > 0) {
+      throw new Error("Close all browser tasks before changing the automatic browser engine");
+    }
+    const result = await runtimeHost.setAutomaticBrowserEngine(engine);
+    const state = stateStore.update({
+      automaticBrowserEngine: engine,
+      ...(result.configured ? { codexCatalogVerified: IS_DEV_PROFILE, codexRestartRequired: !IS_DEV_PROFILE } : {}),
+    });
+    send("launcher:state-changed", state);
+    if (!IS_DEV_PROFILE && result.configured) startCatalogVerificationMonitor({ logger, stateStore });
+    return state;
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
