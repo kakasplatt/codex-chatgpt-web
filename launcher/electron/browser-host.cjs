@@ -3215,17 +3215,20 @@ class BrowserHost {
     const connectorName = this.connectorName();
     const initialUrl = this.view.webContents.getURL();
     const startedIdle = initialUrl === IDLE_BROWSER_URL;
-    if (detectCapabilities) await this.refreshChatGptHomeDocument();
+    const useSavedChats = this.getUseSavedChats();
+    if (detectCapabilities) await this.refreshChatGptHomeDocument(useSavedChats);
     const result = await this.runBrowserHelperOperation({
       helper: this.helper,
       descriptorPath: this.descriptorPath,
       appName: connectorName,
+      useSavedChats,
       operation: "inspect",
       payload: { detectCapabilities },
       logger: this.logger,
     });
     const inspected = result?.value;
-    if (!inspected || inspected.authenticated !== true || inspected.temporary !== true || typeof inspected.url !== "string") {
+    if (!inspected || inspected.authenticated !== true || inspected.temporary !== !useSavedChats
+      || typeof inspected.url !== "string") {
       throw new Error("Browser helper returned invalid ChatGPT session evidence");
     }
     if (detectCapabilities

@@ -710,23 +710,25 @@ test("smoke preserves an already-hydrated Temporary Chat page", () => {
   assert.equal(isTemporaryChatUrl("not a url"), false);
 });
 
-test("session inspection delegates navigation and capability detection to the shared browser helper", async () => {
+for (const useSavedChats of [false, true]) test(`session inspection honors selected chat mode (saved=${useSavedChats})`, async () => {
   const calls = [];
+  const url = useSavedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true";
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
     descriptorPath: "/runtime/launcher-browser.json",
     getConnectorName: () => "Codex Native2",
+    getUseSavedChats: () => useSavedChats,
     logger: { info() {} },
     view: { webContents: { getURL: () => "https://chatgpt.com/" } },
-    refreshChatGptHomeDocument: async () => calls.push({ operation: "refresh" }),
+    refreshChatGptHomeDocument: async selected => calls.push({ operation: "refresh", selected }),
     runBrowserHelperOperation: async options => {
       calls.push(options);
       return {
         type: "result",
         value: {
           authenticated: true,
-          temporary: true,
-          url: "https://chatgpt.com/?temporary-chat=true",
+          temporary: !useSavedChats,
+          url,
           solAvailable: true,
           extraHighAvailable: true, proAvailable: true,
         },
@@ -738,15 +740,17 @@ test("session inspection delegates navigation and capability detection to the sh
 
   assert.deepEqual(inspected, {
     authenticated: true,
-    temporary: true,
-    url: "https://chatgpt.com/?temporary-chat=true",
+    temporary: !useSavedChats,
+    url,
     solAvailable: true,
     extraHighAvailable: true, proAvailable: true,
   });
   assert.equal(calls.length, 2);
   assert.equal(calls[0].operation, "refresh");
+  assert.equal(calls[0].selected, useSavedChats);
   assert.equal(calls[1].operation, "inspect");
   assert.equal(calls[1].appName, "Codex Native2");
+  assert.equal(calls[1].useSavedChats, useSavedChats);
   assert.deepEqual(calls[1].payload, { detectCapabilities: true });
 });
 
@@ -755,6 +759,7 @@ test("session inspection fails closed on incomplete shared-helper capability evi
     helper: {},
     descriptorPath: "/runtime/launcher-browser.json",
     getConnectorName: () => "Codex Native",
+    getUseSavedChats: () => false,
     logger: { info() {} },
     view: { webContents: { getURL: () => "https://chatgpt.com/?temporary-chat=true" } },
     refreshChatGptHomeDocument: async () => {},

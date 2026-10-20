@@ -155,8 +155,9 @@ uses ordinary saved conversations for task turns in Automatic and Zero Risk mode
 independent of conversation reuse. Changing it releases idle retained tabs, and its provider
 configuration participates in conversation identity. Saved history does not authorize reopening
 an arbitrary ChatGPT conversation. Compaction still starts the next context epoch in a new chat;
-connector verification uses the same saved/temporary mode as task turns, while account inspection
-continues to use an empty Temporary Chat. Existing explicit choices are preserved on upgrade.
+connector verification, session inspection, and account capability detection follow the selected
+saved/temporary mode. Login bootstrapping and the browser-only smoke test still use an empty
+Temporary Chat. Existing explicit choices are preserved on upgrade.
 ChatGPT memory and custom instructions
 may apply to saved conversations.
 

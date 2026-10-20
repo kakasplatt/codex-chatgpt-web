@@ -5746,6 +5746,24 @@ test("multipart observation surfaces Stopped thinking on its first observation e
   expect(acknowledged).toBeFalse();
 });
 
+test("session inspection uses the configured conversation mode", async () => {
+  const inspect = (ChatGptBrowserWorker.prototype as any).inspectSessionExclusive;
+  for (const useSavedChats of [false, true]) {
+    const url = useSavedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true";
+    const page = { url: () => url };
+    let preparedMode: boolean | undefined;
+    const worker = {
+      config: { useSavedChats },
+      ensurePage: async () => page,
+      prepareChatSurface: async (_page: unknown, _capture: unknown, mode: boolean) => {
+        preparedMode = mode;
+      },
+    };
+    expect(await inspect.call(worker, false)).toEqual({ authenticated: true, temporary: !useSavedChats, url });
+    expect(preparedMode).toBe(useSavedChats);
+  }
+});
+
 test("multipart DOM success recovers browser UI health after an observation timeout", async () => {
   const absent = { last() { return this; }, filter() { return this; }, locator() { return this; },
     getByTestId() { return this; }, getByText() { return this; }, isVisible: async () => false };

@@ -114,12 +114,41 @@ domTest("automatic approval waits for the requesting message to finish streaming
   });
 }, 20_000);
 
+domTest("persistent Stop exposes manual approval and never auto-clicks its button", async () => {
+  await withPage(async page => {
+    await page.setContent(card() + '<button data-testid="stop-button">Stop</button>');
+    const pending: boolean[] = [];
+    const approval = resolveChatGptToolConfirmation(page, "Codex Native2", true,
+      undefined, 2_000, undefined, async value => { pending.push(value); });
+    for (let attempt = 0; attempt < 30 && !pending.includes(true); attempt++) {
+      await page.waitForTimeout(20);
+    }
+    expect(pending).toContain(true);
+    expect(await page.locator("body").getAttribute("data-chosen")).toBeNull();
+    // A human can complete the card while Stop remains visible. The helper must
+    // observe that decision rather than attempting another click or timing out.
+    await page.locator("section").evaluate(element => element.remove());
+    expect(await approval).toBeTrue();
+    expect(pending).toEqual([true, false]);
+    expect(await page.locator("body").getAttribute("data-chosen")).toBeNull();
+  });
+}, 20_000);
+
 domTest("streaming approval timeout and cancellation never click a permission button", async () => {
   await withPage(async page => {
     for (const cancel of [false, true]) {
       await page.setContent(card() + '<button data-testid="stop-button">Stop</button>');
-      const signal = cancel ? AbortSignal.timeout(100) : undefined;
-      await expect(resolveChatGptToolConfirmation(page, "Codex Native2", true, signal, 200)).rejects.toThrow();
+      const controller = new AbortController();
+      const pending: boolean[] = [];
+      const approval = resolveChatGptToolConfirmation(page, "Codex Native2", true,
+        controller.signal, 1_500, undefined, async value => { pending.push(value); });
+      for (let attempt = 0; attempt < 100 && !pending.includes(true); attempt++) {
+        await page.waitForTimeout(20);
+      }
+      expect(pending).toContain(true);
+      if (cancel) controller.abort();
+      await expect(approval).rejects.toThrow();
+      expect(pending).toEqual([true, false]);
       expect(await page.locator("body").getAttribute("data-chosen")).toBeNull();
       expect(await page.locator("section").count()).toBe(1);
     }

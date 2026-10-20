@@ -129,22 +129,10 @@ ChatGPT mode's measured one-message boundary (~70,000–95,000 tokens).
 Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model
 must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent.
 Images, the MCP connector, and the private `turn_token` are attached only to the final part.
-In Full/MCP mode, compaction does not replay the expanded history into an unrelated summarizer. If
-the source Web response is still waiting on a tool boundary, its canonical tool results finish that
-response first without a compaction suffix. If those results are enough for an ordinary final
-answer, that committed answer remains owned by the logical Responses turn across the physical chat
-retirement. If the Web model instead requests another tool, the broker blocks that new execution
-and tells the response to stop; the compacted continuation then resumes the unfinished work. The
-exact retained chat receives one strict checkpoint message with only the one-shot MCP control
-capability and no ordinary work capability. The checkpoint never rides in the tail of a potentially
-huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
-After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
-and waits for its physical launcher settlement before closing the old surface; the next epoch then
-starts a fresh chat. This does not depend on ChatGPT rendering assistant text or a Copy
-action after the control-only response. If the retained private chat was already closed, the bridge
-starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
-has no retained MCP boundary and uses the six-message compaction path so its summarizer receives
-the complete expanded history.
+
+In Full/MCP mode, Bigger Context retains the exact current chat for compaction; in browser-only
+mode, it uses the six-message compaction path to supply the expanded history to its summarizer.
+See the Full/MCP compaction handoff details below.
 
 Any missing or malformed acknowledgement fails the whole transaction. No later part or final
 commit is sent, and a retry starts again from part one in a fresh chat. The model context
@@ -186,6 +174,24 @@ Full Context decouples the logical conversation context from physical browser me
   canonical Codex request history, preventing transport wrappers or checkpoints from skewing usage.
 - **Accepted-Stage Idempotency:** Once a multipart stage is accepted by the browser, it is marked
   submitted and will not be physically re-sent if observation is disrupted.
+
+#### Full/MCP compaction handoff (shared with Bigger Context)
+
+In Full/MCP mode, compaction does not replay expanded history into an unrelated summarizer. If
+the source Web response is waiting on a tool boundary, its canonical tool results finish that
+response first without a compaction suffix. If those results are enough for an ordinary final
+answer, that committed answer remains owned by the logical Responses turn across the physical chat
+retirement. If the Web model instead requests another tool, the broker blocks that execution
+and tells the response to stop; the compacted continuation then resumes the unfinished work.
+
+The exact retained chat receives one strict checkpoint message with only the one-shot MCP control
+capability and no ordinary work capability. The checkpoint never rides in the tail of a potentially
+huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
+After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
+and waits for its physical launcher settlement before closing the old surface; the next epoch then
+starts a fresh chat. This does not depend on ChatGPT rendering assistant text or a Copy action after
+the control-only response. If the retained private chat was already closed, the bridge starts one
+read-only fallback chat from the canonical Codex history instead.
 
 Both experiments are intentionally unavailable for Luna (`chatgpt-web/luna`, `chatgpt-web/think`),
 which fails closed and stays pinned to its measured 128,000-token window and 28,000-token rolling

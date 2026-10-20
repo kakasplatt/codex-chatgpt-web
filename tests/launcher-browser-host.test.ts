@@ -436,7 +436,7 @@ test("launcher turn control preserves a lost running helper as a typed signal", 
   }
 });
 
-test("launcher session verification uses the authenticated control channel instead of Bun CDP", async () => {
+for (const savedChats of [false, true]) test(`launcher session verification accepts the selected chat mode (saved=${savedChats})`, async () => {
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -446,10 +446,10 @@ test("launcher session verification uses the authenticated control channel inste
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       authenticated: true,
-      temporary: true,
+      temporary: !savedChats,
       solAvailable: true,
       extraHighAvailable: true, proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      url: savedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true",
     }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -463,7 +463,7 @@ test("launcher session verification uses the authenticated control channel inste
     expect(await inspectLauncherBrowserHost(path, { detectCapabilities: true })).toEqual({
       solAvailable: true,
       extraHighAvailable: true, proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      url: savedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true",
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));

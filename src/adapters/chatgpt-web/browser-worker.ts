@@ -1027,16 +1027,37 @@ export async function resolveChatGptToolConfirmation(
     if (await allowCurrentAction.count() !== 1 || await deny.count() !== 1) {
       throw new Error("ChatGPT approval does not expose a unique one-time Allow and Deny action");
     }
-    // Saved chats can mount the approval before the requesting message finishes
-    // streaming. Submitting it while Stop is present can produce "Invalid conversation body".
+    // Saved chats can mount approval while the request is still streaming. Never
+    // auto-click while Stop is visible ("Invalid conversation body"). If Stop
+    // persists because ChatGPT is awaiting manual approval, expose that state in
+    // the launcher and accept a manually dismissed approval without clicking it.
     const readyDeadline = Date.now() + timeoutMs;
-    while (await chatGptStopButton(page).isVisible()) {
-      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      if (!await dialog.isVisible()) return true;
-      if (Date.now() >= readyDeadline) {
-        throw new Error("ChatGPT is still preparing the tool request; automatic approval was not sent. Wait for Stop to disappear, then approve the request in ChatGPT.");
+    let pendingNotified = false;
+    let waitingError: unknown;
+    try {
+      while (await chatGptStopButton(page).isVisible()) {
+        if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+        if (!pendingNotified) {
+          pendingNotified = true;
+          await onApprovalPending?.(true);
+        }
+        if (!await dialog.isVisible()) return true;
+        if (Date.now() >= readyDeadline) {
+          throw new Error("ChatGPT still shows Stop while requesting tool approval. No automatic permission was granted. Inspect the pending approval in ChatGPT and retry after the request is ready.");
+        }
+        await withBrowserTurnAbort(new Promise(resolveSleep => setTimeout(resolveSleep, 50)), signal);
       }
-      await withBrowserTurnAbort(new Promise(resolveSleep => setTimeout(resolveSleep, 50)), signal);
+    } catch (error) {
+      waitingError = error;
+      throw error;
+    } finally {
+      if (pendingNotified) {
+        try { await onApprovalPending?.(false); }
+        catch (error) {
+          if (waitingError === undefined) throw error;
+          console.warn(`[chatgpt-web] could not clear pending automatic approval: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     }
     if (!await dialog.isVisible()) return true;
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -2759,7 +2780,7 @@ export class ChatGptBrowserWorker {
 
   inspectSession(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    temporary: boolean;
     url: string;
     solAvailable?: boolean;
     extraHighAvailable?: boolean;
@@ -3154,7 +3175,7 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  /** Prepare a new conversation; account inspection still uses an empty Temporary Chat. */
+  /** Prepare a new conversation in the selected chat mode. */
   private async prepareChatSurface(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
@@ -4653,18 +4674,19 @@ export class ChatGptBrowserWorker {
 
   private async inspectSessionExclusive(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    temporary: boolean;
     url: string;
     solAvailable?: boolean;
     extraHighAvailable?: boolean;
     proAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
-    await this.prepareChatSurface(page);
+    const useSavedChats = this.config.useSavedChats;
+    await this.prepareChatSurface(page, undefined, useSavedChats);
     const url = page.url();
-    if (!detectCapabilities) return { authenticated: true, temporary: true, url };
+    if (!detectCapabilities) return { authenticated: true, temporary: !useSavedChats, url };
     const capabilities = await detectChatGptAccountCapabilities(page);
-    return { authenticated: true, temporary: true, url, ...capabilities };
+    return { authenticated: true, temporary: !useSavedChats, url, ...capabilities };
   }
 
   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
