@@ -22,9 +22,9 @@ Do not override an explicit user-selected model merely to follow this matrix. If
 
 ## 2. Runtime snapshot used by this policy
 
-This policy was written against the local Codex model catalog, the installed Claude Code CLI/help and changelog, the installed Antigravity workspace/runtime, the local ECC Antigravity documentation, and the Superpowers installation observed on 2026-10-03.
+This policy was written against the local Codex model catalog, the installed Claude Code CLI/help and changelog, the installed Antigravity workspace/runtime, the local ECC Antigravity documentation, and the Superpowers installation observed on 2026-10-03. The Superpowers version, Codex catalog, and Claude Code model set were re-checked on 2026-10-21.
 
-Superpowers version: `6.4.2`.
+Superpowers version: `7.0.0` (same skill set as `6.4.2`).
 
 Available Superpowers skills:
 
@@ -70,7 +70,7 @@ The installed Claude UI in this environment currently exposes the following mode
 | `Fable 5.1` | Pro or Max | Highest-tier option for the hardest architecture, diagnosis, planning, and final-review work |
 | `Opus 5.5` | Pro | Frontier option for complex work, difficult debugging, and adversarial review |
 | `Sonnet 5.5` | Available in the captured picker | Default Claude workhorse for implementation, normal planning, and most reviews |
-| `Haiku 4.5` | Available in the captured picker | Fast option for routing, repository inspection, and deterministic verification |
+| `Haiku 5.5` | Available | Fast option for routing, repository inspection, and deterministic verification |
 | `Fable 5` | Pro or Max | Previous Fable generation; compatibility/fallback only when Fable 5.1 is unavailable |
 | `Opus 5` | Pro | Previous Opus generation |
 | `Opus 4.8` | Pro | Older Opus compatibility option |
@@ -79,8 +79,9 @@ The installed Claude UI in this environment currently exposes the following mode
 | `Opus 3` | Pro | Legacy Opus option; avoid for new routing |
 | `Sonnet 5` | Available in More models | Previous Sonnet generation |
 | `Sonnet 4.6` | Available in More models | Older Sonnet compatibility option |
+| `Haiku 4.5` | Available in More models | Previous Haiku generation; compatibility/fallback only |
 
-The Claude CLI accepts `--model` plus `--effort low|medium|high|xhigh|max`. In examples below, the guide names the UI model generation explicitly; when starting a standalone CLI session, use the matching model ID or current alias exposed by that installation.
+The Claude CLI accepts `--model` plus `--effort low|medium|high|xhigh|max`. Claude Code subagent dispatch (the Agent tool) accepts the aliases `fable`, `opus`, `sonnet` and `haiku`, which resolve to the current generation of each family. Always pass one explicitly, because an omitted model inherits the coordinator's model. In examples below, the guide names the UI model generation explicitly; when starting a standalone CLI session, use the matching model ID or current alias exposed by that installation.
 
 ### Antigravity models
 
@@ -140,14 +141,14 @@ Use these defaults before consulting the per-skill matrix. Every phase includes 
 
 | Phase | Codex | Claude Code | Antigravity | Guidance |
 | --- | --- | --- | --- | --- |
-| Intent/routing | `gpt-6-luna` / `medium` | `Haiku 4.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Cheap classification and skill selection |
+| Intent/routing | `gpt-6-luna` / `medium` | `Haiku 5.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Cheap classification and skill selection |
 | Brainstorming/design | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Escalate when architecture or requirements remain ambiguous |
 | Detailed implementation planning | `gpt-6.1-sol` / `xhigh` | `Fable 5.1` / `max` if entitled; otherwise `Opus 5.5` / `xhigh` | `Claude Opus 4.6 (Thinking)` | Plans must be precise enough for another agent to execute |
 | Atomic implementation | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Keep one bounded task per agent |
 | Difficult debugging | `gpt-6.1-sol` / `xhigh` | `Opus 5.5` / `xhigh`; `Fable 5.1` / `max` for the hardest cases | `Claude Opus 4.6 (Thinking)` | Evidence first; escalate after failed hypotheses or cross-system ambiguity |
 | Independent code review | `gpt-6-astra` / `high` | `Opus 5.5` / `high` | `Claude Opus 4.6 (Thinking)` | Prefer a reviewer family/model different from the implementer when practical |
 | Review feedback evaluation | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Verify reviewer claims against code and tests |
-| Mechanical verification | `gpt-6-luna` / `medium` | `Haiku 4.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Verification is evidence collection |
+| Mechanical verification | `gpt-6-luna` / `medium` | `Haiku 5.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Verification is evidence collection |
 | Final difficult review | `gpt-6-astra` / `xhigh` | `Fable 5.1` / `max` if entitled; otherwise `Opus 5.5` / `xhigh` | `Claude Opus 4.6 (Thinking)` | Use after implementation when blast radius is material |
 
 ## 5. Per-skill model matrix
@@ -156,7 +157,7 @@ Each row below provides one concrete choice for **Codex**, **Claude Code**, and 
 
 | Superpowers skill | Codex model / effort | Claude model / effort | Antigravity model / visible variant | Why |
 | --- | --- | --- | --- | --- |
-| `using-superpowers` | `gpt-6-luna` / `medium` | `Haiku 4.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Mostly discovery, routing, precedence, and workflow selection. |
+| `using-superpowers` | `gpt-6-luna` / `medium` | `Haiku 5.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Mostly discovery, routing, precedence, and workflow selection. |
 | `brainstorming` | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Requires intent discovery, scope classification, trade-offs, and recognition of hidden architectural complexity. |
 | `writing-plans` | `gpt-6.1-sol` / `xhigh` | `Fable 5.1` / `max` if entitled; otherwise `Opus 5.5` / `xhigh` | `Claude Opus 4.6 (Thinking)` | Plans must preserve design intent, exact files, interfaces, TDD order, verification, and task independence. |
 | `executing-plans` | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Execution needs reliable coding judgment, scoped edits, and continuous verification. |
@@ -164,11 +165,11 @@ Each row below provides one concrete choice for **Codex**, **Claude Code**, and 
 | `dispatching-parallel-agents` | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Independence analysis matters more than raw speed when deciding whether work can safely run in parallel. |
 | `systematic-debugging` | `gpt-6.1-sol` / `xhigh` | `Opus 5.5` / `xhigh` | `Claude Opus 4.6 (Thinking)` | Root-cause work benefits from hypothesis discipline and evidence correlation. |
 | `test-driven-development` | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Once behavior is known, TDD is normally bounded implementation with a clear oracle. |
-| `using-git-worktrees` | `gpt-6-luna` / `medium` | `Haiku 4.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Primarily deterministic repository inspection and workspace setup. |
+| `using-git-worktrees` | `gpt-6-luna` / `medium` | `Haiku 5.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Primarily deterministic repository inspection and workspace setup. |
 | `requesting-code-review` | `gpt-6-astra` / `high` | `Opus 5.5` / `high` | `Claude Opus 4.6 (Thinking)` | Independent review should have enough judgment to find regressions, requirement gaps, and incorrect assumptions. |
 | `receiving-code-review` | `gpt-6.1-sol` / `high` | `Sonnet 5.5` / `high` | `Gemini 3.8 Flash High` (Fast) | Feedback must be checked against code and tests before implementation. |
-| `verification-before-completion` | `gpt-6-luna` / `medium` | `Haiku 4.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Core activity is fresh evidence collection and claim matching. |
-| `finishing-a-development-branch` | `gpt-6-luna` / `medium` | `Haiku 4.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Mostly deterministic Git, test, worktree, and integration-state handling. |
+| `verification-before-completion` | `gpt-6-luna` / `medium` | `Haiku 5.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Core activity is fresh evidence collection and claim matching. |
+| `finishing-a-development-branch` | `gpt-6-luna` / `medium` | `Haiku 5.5` / `medium` | `Gemini 3.6 Flash Medium` (Fast) | Mostly deterministic Git, test, worktree, and integration-state handling. |
 | `writing-skills` | `gpt-6.1-sol` / `xhigh` | `Fable 5.1` / `max` if entitled; otherwise `Opus 5.5` / `xhigh` | `Claude Opus 4.6 (Thinking)` | Skill authoring is process-level TDD and requires anticipating loopholes and pressure scenarios. |
 | `diagnosing-superpowers` | `gpt-6.1-sol` / `xhigh` | `Fable 5.1` / `max` if entitled; otherwise `Opus 5.5` / `xhigh` | `Claude Opus 4.6 (Thinking)` | Transcript diagnosis requires provenance, evidence reconstruction, and reconciliation of independent analyses. |
 
@@ -205,7 +206,7 @@ Default atomic worker:
 - Claude Code: `Sonnet 5.5` / `high`.
 - Antigravity: `Gemini 3.8 Flash High` (Fast).
 
-For a very mechanical task, prefer the fast tier: Codex `gpt-6-luna high`, Claude `Haiku 4.5 high`, or Antigravity `Gemini 3.6 Flash Medium` (Fast) when all of these are true:
+For a very mechanical task, prefer the fast tier: Codex `gpt-6-luna high`, Claude `Haiku 5.5 high`, or Antigravity `Gemini 3.6 Flash Medium` (Fast) when all of these are true:
 
 - the plan is explicit;
 - the task is confined to one clear behavior or a small file set;
@@ -241,7 +242,7 @@ Worker selection is per task:
 
 | Worker type | Codex | Claude Code | Antigravity |
 | --- | --- | --- | --- |
-| Mechanical repository inspection | `gpt-6-luna medium` | `Haiku 4.5 medium` | `Gemini 3.6 Flash Medium` (Fast) |
+| Mechanical repository inspection | `gpt-6-luna medium` | `Haiku 5.5 medium` | `Gemini 3.6 Flash Medium` (Fast) |
 | Straightforward atomic implementation | `gpt-6-luna high` or `gpt-6.1-sol high` | `Sonnet 5.5 high` | `Gemini 3.8 Flash High` (Fast) |
 | Complex implementation | `gpt-6.1-sol high|xhigh` | `Sonnet 5.5 high|xhigh` | `Gemini 3.8 Flash High` (Fast) |
 | Independent review | `gpt-6-astra high` | `Opus 5.5 high` | `Claude Opus 4.6 (Thinking)` |
@@ -272,7 +273,7 @@ Escalate from the fast tier to the workhorse tier when:
 - failures are not explained by one obvious cause;
 - code review requires semantic understanding rather than checklist verification.
 
-Examples of this escalation are Codex `gpt-6-luna -> gpt-6.1-sol`, Claude `Haiku 4.5 -> Sonnet 5.5`, and Antigravity `Gemini 3.6 Flash Medium -> Gemini 3.8 Flash High`.
+Examples of this escalation are Codex `gpt-6-luna -> gpt-6.1-sol`, Claude `Haiku 5.5 -> Sonnet 5.5`, and Antigravity `Gemini 3.6 Flash Medium -> Gemini 3.8 Flash High`.
 
 Escalate from the workhorse tier to the frontier/reviewer tier when:
 
@@ -302,7 +303,7 @@ De-escalate when:
 Typical flow:
 
 - Codex: `gpt-6-astra xhigh` design -> `gpt-6.1-sol xhigh` plan -> `gpt-6.1-sol high` implementation -> `gpt-6-astra high` independent review -> `gpt-6-luna medium` verification.
-- Claude Code: `Opus 5.5 xhigh` or `Fable 5.1 max` design/plan -> `Sonnet 5.5 high` implementation -> `Opus 5.5 high` independent review -> `Haiku 4.5 medium` verification.
+- Claude Code: `Opus 5.5 xhigh` or `Fable 5.1 max` design/plan -> `Sonnet 5.5 high` implementation -> `Opus 5.5 high` independent review -> `Haiku 5.5 medium` verification.
 - Antigravity: `Claude Opus 4.6 (Thinking)` design/plan -> `Gemini 3.8 Flash High` implementation -> `Claude Opus 4.6 (Thinking)` independent review -> `Gemini 3.6 Flash Medium` (Fast) verification.
 
 ## 11. Model fallback rules
@@ -342,7 +343,7 @@ For frontier/review work:
 2. `Opus 5.5` at `high|xhigh|max`, according to task difficulty and supported effort.
 3. `Sonnet 5.5` at the same effort or next-higher supported effort when the frontier models are unavailable.
 4. Older Opus generations only as compatibility fallbacks.
-5. `Haiku 4.5` only for deterministic/mechanical work, not as a silent substitute for architecture or final adversarial review.
+5. `Haiku 5.5` only for deterministic/mechanical work, not as a silent substitute for architecture or final adversarial review.
 
 For normal implementation:
 
@@ -350,7 +351,7 @@ For normal implementation:
 2. `Opus 5.5` at the same effort when higher quality is preferable to lower cost and the entitlement is available.
 3. `Sonnet 5` as the first previous-generation fallback.
 4. `Sonnet 4.6` only as an older compatibility fallback.
-5. `Haiku 4.5` when the task is mechanically specified and low ambiguity.
+5. `Haiku 5.5` when the task is mechanically specified and low ambiguity.
 
 ### Antigravity fallback
 
@@ -416,7 +417,7 @@ Review findings are hypotheses until verified. Apply `receiving-code-review` bef
 
 Use `verification-before-completion` before claiming success, committing, creating a PR, or moving past a task when the skill requires it.
 
-The verification agent may use the fast tier when the work is deterministic: Codex `gpt-6-luna medium`, Claude `Haiku 4.5 medium`, or Antigravity `Gemini 3.6 Flash Medium` (Fast). It must still gather fresh evidence itself; a stronger implementation agent's statement that tests passed is not verification.
+The verification agent may use the fast tier when the work is deterministic: Codex `gpt-6-luna medium`, Claude `Haiku 5.5 medium`, or Antigravity `Gemini 3.6 Flash Medium` (Fast). It must still gather fresh evidence itself; a stronger implementation agent's statement that tests passed is not verification.
 
 Verification should answer concrete claims:
 
@@ -466,7 +467,7 @@ Task: a parser mishandles one known input and there is an existing test suite.
 Routing:
 
 - Codex: `systematic-debugging = gpt-6.1-sol high`, TDD worker `gpt-6-luna high`, review `gpt-6-astra high`, verification `gpt-6-luna medium`.
-- Claude Code: `systematic-debugging = Sonnet 5.5 high`, TDD worker `Sonnet 5.5 high`, review `Opus 5.5 high`, verification `Haiku 4.5 medium`.
+- Claude Code: `systematic-debugging = Sonnet 5.5 high`, TDD worker `Sonnet 5.5 high`, review `Opus 5.5 high`, verification `Haiku 5.5 medium`.
 - Antigravity: `systematic-debugging = Gemini 3.8 Flash High`, TDD worker `Gemini 3.8 Flash High`, review `Claude Opus 4.6 (Thinking)`, verification `Gemini 3.6 Flash Medium` (Fast).
 
 Do not keep the frontier reviewer model for implementation merely because it performed the review.
@@ -490,7 +491,7 @@ Task: an approved plan contains six independent feature tasks.
 Routing:
 
 - Codex coordinator: `gpt-6.1-sol high`; straightforward workers: `gpt-6-luna high`; complex workers: `gpt-6.1-sol high`.
-- Claude coordinator: `Sonnet 5.5 high`; straightforward workers: `Haiku 4.5 high` when the task is truly mechanical, otherwise `Sonnet 5.5 high`; complex workers: `Sonnet 5.5 high|xhigh`.
+- Claude coordinator: `Sonnet 5.5 high`; straightforward workers: `Haiku 5.5 high` when the task is truly mechanical, otherwise `Sonnet 5.5 high`; complex workers: `Sonnet 5.5 high|xhigh`.
 - Antigravity coordinator: `Gemini 3.8 Flash High`; straightforward workers: `Gemini 3.6 Flash Medium` (Fast); complex workers: `Gemini 3.8 Flash High`.
 - Parallel dispatch only for non-overlapping files/state.
 - Each meaningful task gets independent review.
@@ -517,7 +518,7 @@ Task: determine why a long Superpowers session repeated work and ignored plan bo
 Routing:
 
 - Codex: `gpt-6.1-sol xhigh` coordinator; `gpt-6-luna high` or `gpt-6.1-sol high` analysts; `gpt-6-astra max` only for materially conflicting cited evidence.
-- Claude Code: `Opus 5.5 xhigh` coordinator; `Sonnet 5.5 high` or `Haiku 4.5 high` analysts; `Fable 5.1 max` reconciliation only for real evidence conflicts when entitled.
+- Claude Code: `Opus 5.5 xhigh` coordinator; `Sonnet 5.5 high` or `Haiku 5.5 high` analysts; `Fable 5.1 max` reconciliation only for real evidence conflicts when entitled.
 - Antigravity: `Claude Opus 4.6 (Thinking)` coordinator; `Gemini 3.6 Flash Medium` (Fast) extraction analysts; `Claude Opus 4.6 (Thinking)` for conflict reconciliation.
 
 The diagnosis remains evidence-based: model strength does not replace transcript path/line citations required by the skill.
@@ -548,7 +549,7 @@ Use Superpowers phase-based routing and keep all three harness families explicit
 Codex: GPT-6.1 Sol/high implementation, GPT-6.1 Sol/xhigh planning/debugging,
 GPT-6 Astra/high|xhigh review, GPT-6 Luna/medium mechanical verification.
 Claude Code: Sonnet 5.5/high implementation, Opus 5.5/xhigh or Fable 5.1/max
-planning/debugging/review when entitled, Haiku 4.5/medium verification.
+planning/debugging/review when entitled, Haiku 5.5/medium verification.
 Antigravity: Gemini 3.8 Flash High for implementation/general reasoning,
 Gemini 3.6 Flash Medium (Fast) for mechanical verification, and Claude Opus
 4.6 (Thinking) for the deepest planning/debugging/review. Keep implementation

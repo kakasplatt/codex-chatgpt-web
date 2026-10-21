@@ -114,6 +114,22 @@ includes the persistent `data-turn-id-container` wrappers of virtualized history
 messages therefore cannot count as a new submission or another user's turn. Missing or duplicate
 logical identities fail explicitly; accepted messages are never resent to repair their DOM.
 
+A reused retained tab is checked for paint before any composer work. An idle retained view is hidden
+and background-throttled, and a reused view can stop producing animation frames; Playwright's
+actionability checks then never pass. After the lease, the helper samples `requestAnimationFrame`
+in the stage `retained_tab_paint`. Below two frames in 500 ms it climbs a ladder:
+1. It asks the launcher to repaint the view through the existing `refreshViewport` heartbeat
+   (`setBackgroundThrottling(false)` and `invalidate()`).
+2. If the view is still not painting, and only for a saved `/c/<id>` conversation with saved chats
+   enabled, it reloads that same URL. It then re-verifies the composer and session without
+   navigating to a new chat.
+3. If the tab still does not paint, the turn fails before submission with an explicit error, and the
+   normal retry opens a fresh tab.
+
+Each verdict logs one `retained_tab_frames` line containing counts only. Separately, an
+effort-control click that times out on actionability falls back to the existing primary
+`pointerdown`.
+
 Sign-in uses that same persistent Electron partition. ChatGPT login pages and allowed identity-
 provider popups are adopted into a temporary `WebContentsView` inside the launcher instead of being
 redirected to another browser. After the provider returns to ChatGPT, the launcher requires both a

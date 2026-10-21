@@ -62,6 +62,13 @@ Run this list on a maintained Windows 11 x64 machine with a real ChatGPT account
    that the existing private MCP credentials are reused rather than replaced.
 11. Upgrade from the previous public release and prove that launcher state, browser state, Codex
     settings, and MCP configuration survive the updater transaction.
+12. With saved chats enabled, leave one task idle for at least two minutes between turns, including
+    one turn that generates images, then send a follow-up. Prove that:
+    - the follow-up reuses the retained chat;
+    - the exported Activity log has one `retained_tab_frames` line for that reused turn;
+    - effort selection never fails with `locator.click: Timeout`.
+
+    Record the logged outcome (`painting`, `repainted`, `reloaded` or `stalled`).
 
 Any failed or unexecuted item blocks a stable release. An alpha may ship with a named failed item
 only when the release notes describe the limitation and recovery path explicitly.
@@ -76,7 +83,7 @@ clear completion action; v3.0.0 changes it to an assisted installer with a final
 
 ## macOS gate
 
-Repeat items 2 through 10 on the oldest supported macOS version or the closest maintained machine.
+Repeat items 2 through 10 and item 12 on the oldest supported macOS version or the closest maintained machine.
 Packaging smoke and code-signing verification remain separate gates; neither substitutes for the
 interactive account flow.
 
