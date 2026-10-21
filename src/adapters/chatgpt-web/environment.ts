@@ -73,6 +73,15 @@ function pathIdentity(value: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+/** Resolve and dedupe absolute paths, keeping each path's first spelling and order. */
+function dedupeResolvedPaths(paths: string[]): string[] {
+  const unique = new Map<string, string>();
+  for (const path of paths.map(value => resolve(value))) {
+    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
+  }
+  return [...unique.values()];
+}
+
 function clientTurnMetadataFromBody(value: unknown): Record<string, unknown> | undefined {
   const body = record(value);
   const metadata = record(body?.client_metadata);
@@ -532,11 +541,7 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
       catch { return undefined; }
       if (roots.some(root => !isAbsolute(root))) return undefined;
       // Keep the native spelling: these roots can become the task's workspace context.
-      const unique = new Map<string, string>();
-      for (const path of roots.map(root => resolve(root))) {
-        if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
-      }
-      workspaceRoots.push([...unique.values()]);
+      workspaceRoots.push(dedupeResolvedPaths(roots));
     }
     deltas += 1;
   }
@@ -949,11 +954,7 @@ function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
   if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
   if (decoded.some(path => !isAbsolute(path))) throw new Error(`ChatGPT web ${field} must contain absolute paths`);
-  const unique = new Map<string, string>();
-  for (const path of decoded.map(value => resolve(value))) {
-    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
-  }
-  return [...unique.values()];
+  return dedupeResolvedPaths(decoded);
 }
 
 function matchesPath(root: string, path: string): boolean {
