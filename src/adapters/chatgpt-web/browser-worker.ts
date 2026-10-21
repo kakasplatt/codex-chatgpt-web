@@ -304,6 +304,14 @@ class ChatGptPersonalizationDeadlineError extends Error {
   }
 }
 
+/** Named so the retained-tab ladder's name-only `reloadError` log can tell it from a navigation failure. */
+class RetainedConversationUrlChangedError extends Error {
+  constructor() {
+    super("The retained ChatGPT conversation changed URL after reload");
+    this.name = "RetainedConversationUrlChangedError";
+  }
+}
+
 class ChatGptPersistentBrowserStateError extends AggregateError {
   constructor(errors: Iterable<unknown>, message: string) {
     super(errors, message);
@@ -3192,7 +3200,7 @@ export class ChatGptBrowserWorker {
     await this.activeComposer(page, 30_000, signal);
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
-    if (page.url() !== before) throw new Error("The retained ChatGPT conversation changed URL after reload");
+    if (page.url() !== before) throw new RetainedConversationUrlChangedError();
   }
 
   /** Prepare a new conversation in the selected chat mode. */

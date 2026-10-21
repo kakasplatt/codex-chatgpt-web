@@ -190,7 +190,7 @@ The worker samples again after each rung and stops at the first one that paints.
 - [ ] **Step 1: Run** `bun run verify`. Expected: exit 0.
 - [ ] **Step 2: Build and run the launcher** (`bun run app`). Hold a long conversation with a retained tab: several turns, at least one with generated images. Leave it idle for at least 2 min between turns so the retained tab stays hidden and throttled.
 - [ ] **Step 3: Export logs** from the launcher, then run `grep retained_tab_frames` on the export. Expected:
-  - one line per reused turn;
+  - one line per reused turn that reached a verdict (none if aborted first);
   - every `"repainted"` or `"reloaded"` line is followed by a successful `effort_selection` on the **same** tab (no `browser.tab_created` for that trace);
   - no `locator.click: Timeout` during `effort_selection`;
   - no `"reloaded"` outcome on a line with `"reloadEligible":false`.
