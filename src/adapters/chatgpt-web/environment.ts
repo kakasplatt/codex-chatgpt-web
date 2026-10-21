@@ -68,9 +68,21 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+// Only Windows folds case. macOS stays case-sensitive on purpose: folding would merge distinct
+// paths on case-sensitive APFS volumes, and realpath would change symlink semantics. A case
+// mismatch therefore fails closed.
 function pathIdentity(value: string): string {
   const normalized = resolve(value);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** Resolve and dedupe absolute paths, keeping each path's first spelling and order. */
+export function dedupeResolvedPaths(paths: string[]): string[] {
+  const unique = new Map<string, string>();
+  for (const path of paths.map(value => resolve(value))) {
+    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
+  }
+  return [...unique.values()];
 }
 
 function clientTurnMetadataFromBody(value: unknown): Record<string, unknown> | undefined {
@@ -471,6 +483,19 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
   return undefined;
 }
 
+const CODEX_THREAD_ID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const CALENDAR_SUBAGENT_INVENTORY_SOURCE = "<subagents>\\s*(?:"
+  + "(?:<agent name=\"[^<>\"\\r\\n]+\"\\s*\\/>\\s*)*"
+  // A required line break ends each name, keeping a rejected inventory linear to match.
+  // Names carry no other line or page separators.
+  + `|(?:-[ \\t]+${CODEX_THREAD_ID_SOURCE}:[ \\t]+[^<>\\s][^<>\\r\\n\\u2028\\u2029\\v\\f]*(?:\\r\\n|\\n)\\s*)+`
+  + ")<\\/subagents>\\s*";
+const CALENDAR_ENVIRONMENT_DELTA = new RegExp("^<environment_context>\\s*<current_date>\\d{4}-\\d{2}-\\d{2}<\\/current_date>\\s*"
+  + "(?:<timezone>[^<>]+<\\/timezone>\\s*)?<filesystem>\\s*"
+  + "(?:<workspace_roots>((?:\\s*<root>[^<>]+<\\/root>\\s*)+)<\\/workspace_roots>\\s*)?"
+  + "(<permission_profile type=\"(?:disabled|managed)\">[\\s\\S]*?<\\/permission_profile>)\\s*<\\/filesystem>\\s*"
+  + `(?:${CALENDAR_SUBAGENT_INVENTORY_SOURCE})?<\\/environment_context>$`);
+
 /**
  * Native world-state diffs omit unchanged cwd/shell at midnight but repeat the filesystem
  * profile. Recognize the calendar fragment as a claim only: the store
@@ -500,9 +525,11 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
     const text = rawMessageText(item).trim();
     // Match the whole native fragment, not just the presence of a permission profile: another
     // profile, a malformed cwd, or any additional permission declaration must fail closed.
-    // Native midnight updates can also repeat a worker inventory. Its exact name-only
-    // shape is contextual; it grants neither filesystem authority nor child ownership.
-    const match = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>((?:\s*<root>[^<>]+<\/root>\s*)+)<\/workspace_roots>\s*)?(<permission_profile type="(?:disabled|managed)">[\s\S]*?<\/permission_profile>)\s*<\/filesystem>\s*(?:<subagents>\s*(?:<agent name="[^<>"\r\n]+"\s*\/>\s*)*<\/subagents>\s*)?<\/environment_context>$/.exec(text);
+    // Native midnight updates can also repeat a worker inventory, either as name-only agent
+    // tags or (Codex 0.163) as one "- <thread id>: <nickname>" line per worker. Each block
+    // uses one exact shape; it is contextual and grants neither filesystem authority nor
+    // child ownership.
+    const match = CALENDAR_ENVIRONMENT_DELTA.exec(text);
     if (!match
       || !sandboxMetadataMatchesEnvironment(canonicalSandboxMetadata(metadata), text)
       || [metadata.sandbox_mode, metadata.sandbox].some(value => (
@@ -516,7 +543,8 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
       try { roots = [...match[1].matchAll(/<root>([^<]+)<\/root>/g)].map(root => decodeXmlText(root[1]!.trim())); }
       catch { return undefined; }
       if (roots.some(root => !isAbsolute(root))) return undefined;
-      workspaceRoots.push([...new Set(roots.map(pathIdentity))]);
+      // Keep the native spelling: these roots can become the task's workspace context.
+      workspaceRoots.push(dedupeResolvedPaths(roots));
     }
     deltas += 1;
   }
@@ -929,11 +957,7 @@ function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
   if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
   if (decoded.some(path => !isAbsolute(path))) throw new Error(`ChatGPT web ${field} must contain absolute paths`);
-  const unique = new Map<string, string>();
-  for (const path of decoded.map(value => resolve(value))) {
-    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
-  }
-  return [...unique.values()];
+  return dedupeResolvedPaths(decoded);
 }
 
 function matchesPath(root: string, path: string): boolean {

@@ -191,6 +191,57 @@ describe("explicit trusted Codex homes (#851)", () => {
     expect(existsSync(freshCache)).toBe(false);
   });
 
+  test("a corrupt single-home cache does not block a shared-home turn", () => {
+    const cache = join(root, "environments.json");
+    writeFileSync(cache, "{broken");
+    rollout(secondary);
+    expect(sharedStore(cache).resolve(request()).sandboxPolicy).toEqual({ type: "readOnly", networkAccess: false });
+    expect(readFileSync(cache, "utf8")).toBe("{broken");
+  });
+
+  test("a single-home workspace-write task still repairs a corrupt cache", () => {
+    const cache = join(root, "environments.json");
+    writeFileSync(cache, "{broken");
+    rollout(primary, { mode: "workspace-write" });
+    const store = new ChatGptThreadEnvironmentStore(cache, Date.now, primary);
+    expect(store.resolve(request({ mode: "workspace-write" })).sandboxPolicy.type).toBe("workspaceWrite");
+    expect(Object.keys(JSON.parse(readFileSync(cache, "utf8")).threads)).toEqual([threadId]);
+  });
+
+  // Decision D1(b): the turn-start envelope keeps the context roots Codex sent, here a trusted home.
+  test("a shared-home turn start keeps a Codex-sent broad context root", () => {
+    rollout(secondary, { mode: "danger-full-access" });
+    const parsed = request({ mode: "danger-full-access" });
+    const start = (parsed._rawBody as { input: Array<{ content: Array<{ text: string }> }> }).input[0]!.content[0]!;
+    start.text = start.text.replace(`<root>${cwd}</root>`, `<root>${cwd}</root><root>${secondary}</root>`);
+    expect(sharedStore().resolve(parsed).roots).toEqual([cwd, secondary]);
+  });
+
+  // Shared homes keep no cache, so no cached parent can widen a child: the broad-root guard does not
+  // apply, and the turn-start roots must survive midnight for the broker's pinned environment.
+  test("a shared-home broad root from the turn start survives a midnight delta", () => {
+    rollout(secondary, { mode: "danger-full-access" });
+    const parsed = request({ mode: "danger-full-access" });
+    const input = (parsed._rawBody as { input: Array<Record<string, unknown>> }).input;
+    const start = (input[0]!.content as Array<{ text: string }>)[0]!;
+    start.text = start.text.replace(`<root>${cwd}</root>`, `<root>${cwd}</root><root>${secondary}</root>`);
+    input[0]!.id = "msg_start";
+    input[1]!.id = "msg_instruction";
+    input.push(
+      { type: "function_call", id: "fc_1", call_id: "call_1", name: "fixture", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_1", output: "done" },
+      {
+        type: "message", role: "user", id: "msg_calendar_delta",
+        internal_chat_message_metadata_passthrough: { turn_id: turnId, content_item_kinds: ["environments.environment_context"] },
+        content: [{ type: "input_text", text: "<environment_context><current_date>2026-10-21</current_date><filesystem>"
+          + `<workspace_roots><root>${cwd}</root><root>${secondary}</root></workspace_roots>`
+          + '<permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile>'
+          + "</filesystem></environment_context>" }],
+      },
+    );
+    expect(sharedStore().resolve(parsed).roots).toEqual([cwd, secondary]);
+  });
+
   test("request and native permission, cwd and root conflicts remain errors", () => {
     rollout(secondary);
     expect(() => sharedStore().resolve(request({ network: true }))).toThrow("network_access");

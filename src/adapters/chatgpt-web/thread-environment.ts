@@ -1,9 +1,11 @@
 import { existsSync, readFileSync, renameSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
-import { atomicWriteFile } from "../../config";
+import { homedir } from "node:os";
+import { isAbsolute, parse, relative, resolve } from "node:path";
+import { atomicWriteFile, getConfigDir } from "../../config";
 import { getCodexHome, getTrustedCodexHomes } from "../../codex-integration-shared";
 import type { CodexParsedRequest } from "../../types";
 import {
+  dedupeResolvedPaths,
   extractChatGptTurnEnvironmentClaim,
   extractChatGptCompactionSourceRevision,
   extractChatGptContinuationEnvironmentClaim,
@@ -50,6 +52,9 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+// Only Windows folds case. macOS stays case-sensitive on purpose: folding would merge distinct
+// paths on case-sensitive APFS volumes, and realpath would change symlink semantics. A case
+// mismatch therefore fails closed.
 function pathIdentity(value: string): string {
   const normalized = resolve(value);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -60,15 +65,27 @@ function contains(root: string, path: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/**
+ * An extra workspace context root that a recovery claim (steering, compaction or a midnight delta)
+ * may not introduce. Adopted roots become the thread's own environment, persisted in the cache;
+ * children without an envelope inherit parent.roots and are checked against them. So a recovery
+ * claim may not add a filesystem root, a Windows namespaced or device spelling, or a root that
+ * equals or contains a trusted Codex home, the bridge data directory or the user home. Roots the
+ * turn start already established from Codex's own envelope are kept by the caller. Shared homes
+ * keep no cache and no cached parent, so the caller applies no refusal there.
+ */
+function isBroadContextRoot(path: string, nativeRoots: Set<string>, protectedRoots: readonly string[]): boolean {
+  if (nativeRoots.has(pathIdentity(path))) return false;
+  return (process.platform === "win32" && /^[\\/]{2}[?.][\\/]/.test(path))
+    || pathIdentity(parse(path).root) === pathIdentity(path)
+    || protectedRoots.some(protectedRoot => contains(path, protectedRoot));
+}
+
 function absolutePaths(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length === 0 || value.some(path => typeof path !== "string" || !isAbsolute(path))) {
     throw new Error(`Invalid persisted ChatGPT thread ${field}`);
   }
-  const unique = new Map<string, string>();
-  for (const path of value.map(path => resolve(path as string))) {
-    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
-  }
-  return [...unique.values()];
+  return dedupeResolvedPaths(value as string[]);
 }
 
 function sandboxPolicy(value: unknown, roots: string[], writableRoots: string[]): ChatGptSandboxPolicy {
@@ -166,6 +183,7 @@ export class ChatGptThreadEnvironmentStore {
   private readonly threads = new Map<string, StoredThreadEnvironment>();
   private lastPersistedAt = Number.NEGATIVE_INFINITY;
   private readonly codexHomes: readonly string[];
+  private readonly protectedRoots: readonly string[];
 
   constructor(
     private readonly path?: string,
@@ -175,6 +193,7 @@ export class ChatGptThreadEnvironmentStore {
     additionalCodexHomes?: readonly string[],
   ) {
     this.codexHomes = getTrustedCodexHomes(codexHome, additionalCodexHomes);
+    this.protectedRoots = [...this.codexHomes, getConfigDir(), homedir()];
   }
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
@@ -236,6 +255,15 @@ export class ChatGptThreadEnvironmentStore {
         });
         if (rollout) {
           let rolloutEnvironment = rollout.environment;
+          // Roots this thread already established at turn start stay valid context (D1). Read the
+          // cache only when a broad root needs it, so an ordinary turn can still repair a corrupt
+          // cache file through set(). Shared homes keep no cache, so nothing is refused there.
+          let established: Set<string> | undefined;
+          const isEstablished = (path: string) => (
+            established ??= new Set((this.get(rolloutIdentity.threadId)?.roots ?? []).map(pathIdentity))
+          ).has(pathIdentity(path));
+          const refusesContext = (roots: string[], nativeRoots: Set<string>) => this.codexHomes.length === 1
+            && roots.some(path => isBroadContextRoot(path, nativeRoots, this.protectedRoots) && !isEstablished(path));
           // After a restart Codex can omit workspace_roots while still explicitly
           // granting unrestricted access. In that case [cwd] is not a native
           // restriction. Keep the current envelope's workspace context; permissions
@@ -243,7 +271,8 @@ export class ChatGptThreadEnvironmentStore {
           if (!rollout.workspaceRootsDeclared
             && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
             && currentClaim?.environment.sandboxPolicy.type === "dangerFullAccess"
-            && pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd)) {
+            && pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd)
+            && !refusesContext(currentClaim.environment.roots, new Set(rolloutEnvironment.roots.map(pathIdentity)))) {
             rolloutEnvironment = {
               ...rolloutEnvironment,
               roots: [...currentClaim.environment.roots],
@@ -252,9 +281,26 @@ export class ChatGptThreadEnvironmentStore {
           }
           if (calendarDelta) {
             const nativeRoots = new Set(rolloutEnvironment.roots.map(pathIdentity));
-            if (calendarDelta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)
-              || calendarDelta.workspaceRoots.some(roots => roots.length !== nativeRoots.size
-                || roots.some(root => !nativeRoots.has(root)))) {
+            const deltaRoots = calendarDelta.workspaceRoots.map(roots => new Set(roots.map(pathIdentity)));
+            const sameRoots = (left: Set<string>, right: Set<string>) => left.size === right.size
+              && [...left].every(root => right.has(root));
+            if (calendarDelta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)) {
+              throw new Error("Calendar environment delta conflicts with its current Codex rollout");
+            }
+            // As above, an omitted unrestricted rollout root list is not a native restriction. The
+            // current turn's repeated roots stay its workspace context (the broker pins the start
+            // envelope for the whole tool loop) only when they agree with each other and keep every
+            // native root exactly. Permissions and cwd still come from the native record.
+            const contextRoots = !rollout.workspaceRootsDeclared
+              && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
+              && deltaRoots.length > 0
+              && deltaRoots.every(roots => sameRoots(roots, deltaRoots[0]!))
+              && [...nativeRoots].every(root => deltaRoots[0]!.has(root))
+              && !refusesContext(calendarDelta.workspaceRoots.at(-1)!, nativeRoots)
+              ? calendarDelta.workspaceRoots.at(-1)! : undefined;
+            if (contextRoots) {
+              rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };
+            } else if (deltaRoots.some(roots => !sameRoots(roots, nativeRoots))) {
               throw new Error("Calendar environment delta conflicts with its current Codex rollout");
             }
           }

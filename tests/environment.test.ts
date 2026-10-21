@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve, toNamespacedPath } from "node:path";
+import { dirname, join, parse, resolve, toNamespacedPath } from "node:path";
 import { chatGptTurnUserRevisionHistory, extractChatGptCompactionSourceRevision, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, isChatGptCompactionContinuation } from "../src/adapters/chatgpt-web/environment";
 import { chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 import { rememberCompactionContinuation } from "../src/adapters/chatgpt-web/compaction-continuation";
@@ -911,6 +911,22 @@ describe("trusted Codex task environment continuity", () => {
     expect(new ChatGptThreadEnvironmentStore(statePath).resolve(continuation).cwd).toBe(root);
   });
 
+  test.skipIf(process.platform !== "win32")("a persisted thread environment loads case-duplicated roots once", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-case-duplicated-environment-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    const roots = [root, root.toUpperCase()];
+    writeFileSync(statePath, JSON.stringify({ version: 1, threads: { thread_current: {
+      cwd: root, roots, writableRoots: roots, sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    } } }));
+    const continuation = currentWire();
+    (continuation._rawBody as { input: unknown[] }).input = [{
+      type: "message", role: "user", content: [{ type: "input_text", text: "Continue" }],
+    }];
+    const store = new ChatGptThreadEnvironmentStore(statePath, Date.now, join(stateRoot, "codex"));
+    expect(store.resolve(continuation)).toMatchObject({ cwd: root, roots: [root], writableRoots: [root] });
+  });
+
   test("fresh trusted tasks do not erase unfamiliar or invalid permission records", () => {
     const stateRoot = mkdtempSync(join(tmpdir(), "codex-invalid-environment-"));
     temporaryRoots.push(stateRoot);
@@ -1381,6 +1397,191 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  // Codex 0.163 can omit workspace_roots from the turn context while its envelopes still list the
+  // task's visualization output directory next to the project.
+  function undeclaredRolloutMidnightFixture() {
+    const fixture = midnightRolloutFixture();
+    const native = readFileSync(fixture.rolloutPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+    for (const entry of native) if (entry.type === "turn_context") delete entry.payload.workspace_roots;
+    writeFileSync(fixture.rolloutPath, native.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const visualizationRoot = join(fixture.codexHome, "visualizations", "2026", "10", "20", rolloutThreadId);
+    const repeatRoots = (delta: { content: Array<{ text: string }> }, ...roots: string[]) => {
+      delta.content[0]!.text = delta.content[0]!.text.replace("<filesystem>",
+        `<filesystem><workspace_roots>${roots.map(path => `<root>${path}</root>`).join("")}</workspace_roots>`);
+    };
+    return { ...fixture, visualizationRoot, repeatRoots };
+  }
+
+  test("a midnight delta keeps its repeated workspace context when a full-access rollout omits workspace_roots", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root, visualizationRoot);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+      cwd: root,
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
+  test.skipIf(process.platform !== "win32")("a midnight delta that repeats the cwd in another case does not add it as an extra root", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root, root.toUpperCase());
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots).toEqual([root]);
+  });
+
+  // The turn-start envelope uses the delta's spelling, and the broker compares environments exactly.
+  test.skipIf(process.platform !== "win32")("adopted midnight roots keep the delta spelling while cwd keeps the rollout spelling", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root.toUpperCase(), visualizationRoot);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toMatchObject({
+      cwd: root,
+      roots: [root.toUpperCase(), visualizationRoot],
+      writableRoots: [root.toUpperCase(), visualizationRoot],
+    });
+  });
+
+  // Decision D2: macOS path identity stays case-sensitive, so a case mismatch fails closed.
+  test.skipIf(process.platform !== "darwin")("macOS keeps root identity case-sensitive and fails closed on a case mismatch", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root.toUpperCase());
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("a midnight delta without the rollout cwd cannot replace omitted full-access roots", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, visualizationRoot);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  // Adopted context roots are cached for children; they may not widen the parent overlap check.
+  test("a midnight delta cannot add a filesystem root as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root, parse(root).root);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  // Codex projectless tasks run in <Documents>/Codex/<date>/<slug> and list <Documents>/Codex too.
+  test("a midnight delta keeps a projectless task parent root as workspace context", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, resolve(root, ".."), root, visualizationRoot);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots)
+      .toEqual([resolve(root, ".."), root, visualizationRoot]);
+  });
+
+  function withEnvironment<T>(values: Record<string, string>, run: () => T): T {
+    const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+    Object.assign(process.env, values);
+    try { return run(); } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  // The turn start already cached this broad root from Codex's own envelope; midnight keeps it.
+  test("a broad root already established for the thread survives a midnight delta", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-established-broad-root-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    writeFileSync(statePath, JSON.stringify({ version: 1, threads: { [rolloutThreadId]: {
+      cwd: root, roots: [root, codexHome], writableRoots: [root, codexHome],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    } } }));
+    repeatRoots(delta, root, codexHome);
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request).roots)
+      .toEqual([root, codexHome]);
+  });
+
+  test("a midnight delta cannot add a trusted Codex home as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root, codexHome);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("a midnight delta cannot add the bridge data directory as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const bridgeHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-bridge-home-"));
+    temporaryRoots.push(bridgeHome);
+    repeatRoots(delta, root, bridgeHome);
+    withEnvironment({ CODEX_CHATGPT_WEB_HOME: bridgeHome }, () => {
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+        .toThrow("Calendar environment delta conflicts");
+    });
+  });
+
+  test("a midnight delta cannot add the user home directory as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const fakeHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-user-home-"));
+    const bridgeHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-bridge-home-"));
+    temporaryRoots.push(fakeHome, bridgeHome);
+    repeatRoots(delta, root, fakeHome);
+    // Keep the bridge data directory outside the fake home so only the home rule can refuse it.
+    withEnvironment({ USERPROFILE: fakeHome, HOME: fakeHome, CODEX_CHATGPT_WEB_HOME: bridgeHome }, () => {
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+        .toThrow("Calendar environment delta conflicts");
+    });
+  });
+
+  // Windows-only spellings: another drive or share root does not contain the cwd, and the
+  // namespaced forms must not hide an ancestor or a share root from the guard.
+  for (const [label, extra] of [
+    ["another drive root", () => parse(root).root.toUpperCase().startsWith("C") ? "D:\\" : "C:\\"],
+    ["a network share root", () => "\\\\server\\share"],
+    ["a namespaced ancestor of the rollout cwd", () => toNamespacedPath(resolve(root, ".."))],
+    ["a namespaced network share root", () => "\\\\?\\UNC\\server\\share"],
+    ["a device-namespace path", () => "\\\\.\\C:\\outside"],
+  ] as const) {
+    test.skipIf(process.platform !== "win32")(`a midnight delta cannot add ${label} as workspace context`, () => {
+      const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+      repeatRoots(delta, root, extra());
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+        .toThrow("Calendar environment delta conflicts");
+    });
+  }
+
+  test("a midnight delta keeps a sibling output root as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const sibling = resolve(root, "..", "sibling-output");
+    repeatRoots(delta, root, sibling);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots).toEqual([root, sibling]);
+  });
+
+  test("a midnight delta cannot replace the rollout cwd with an ancestor root", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, resolve(root, ".."));
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("competing midnight deltas cannot replace omitted full-access roots", () => {
+    const { codexHome, request, body, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const second = structuredClone(delta);
+    second.id = "msg_calendar_delta_2";
+    repeatRoots(delta, root);
+    repeatRoots(second, root, visualizationRoot);
+    body.input.push(second);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("a managed midnight delta still cannot add roots when the rollout omits workspace_roots", () => {
+    const { codexHome, request, delta, rolloutPath } = managedMidnightFixture("workspace-write", false);
+    const native = readFileSync(rolloutPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+    for (const entry of native) if (entry.type === "turn_context") delete entry.payload.workspace_roots;
+    writeFileSync(rolloutPath, native.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    delta.content[0]!.text = delta.content[0]!.text.replace("<filesystem>",
+      `<filesystem><workspace_roots><root>${root}</root><root>${join(codexHome, "visualizations", "2026", "10", "20", rolloutThreadId)}</root></workspace_roots>`);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
   for (const afterAssistant of [false, true]) for (const repeatRoots of [false, true]) {
     test(`calendar update ${afterAssistant ? "after a tool" : "immediately after the instruction"} with ${repeatRoots ? "repeated" : "omitted"} roots uses the current native environment (#812)`, () => {
       const { codexHome, request, body, delta } = midnightRolloutFixture();
@@ -1407,6 +1608,49 @@ describe("trusted Codex task environment continuity", () => {
     });
   }
 
+  // Codex 0.163 renders the worker inventory as a list of native thread ids and nicknames.
+  const nativeBulletInventory = "  <subagents>\n"
+    + "    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: Kierkegaard\n"
+    + "    - 01a15c3f-a4cb-75f2-ad4c-3fbe33e7a273: Hubble\n"
+    + "  </subagents>\n";
+
+  for (const afterAssistant of [false, true]) for (const repeatRoots of [false, true]) {
+    test(`calendar update with a native bullet worker inventory ${afterAssistant ? "after a tool" : "before assistant output"} and ${repeatRoots ? "repeated" : "omitted"} roots resolves current native authority (#27)`, () => {
+      const { codexHome, request, body, delta, rolloutPath } = midnightRolloutFixture();
+      if (!afterAssistant) body.input.splice(1, body.input.length - 2);
+      if (repeatRoots) delta.content[0]!.text = delta.content[0]!.text.replace("<filesystem>",
+        `<filesystem><workspace_roots><root>${root}</root></workspace_roots>`);
+      delta.content[0]!.text = delta.content[0]!.text.replace("</environment_context>",
+        `${nativeBulletInventory}</environment_context>`);
+      const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+      expect(store.resolve(request).cwd).toBe(root);
+      // The inventory is contextual, not workspace authority or evidence of child ownership.
+      rmSync(rolloutPath);
+      expect(() => store.resolve(request)).toThrow("missing cwd");
+    });
+  }
+
+  test("a rejected bullet worker inventory fails closed without exponential backtracking", () => {
+    const { codexHome, request, delta } = midnightRolloutFixture();
+    const original = delta.content[0]!.text;
+    // Trailing spaces let a name and the line separator share characters; an unknown trailing
+    // field then forces the whole fragment to fail after every split has been tried.
+    const lines = Array.from({ length: 30 }, (_, index) => `    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: Worker${index} \n`).join("");
+    delta.content[0]!.text = original.replace("</environment_context>",
+      `<subagents>\n${lines}</subagents>\n<network />\n</environment_context>`);
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    const started = performance.now();
+    expect(() => store.resolve(request)).toThrow("missing cwd");
+    // The exponential form measured about 1 s (JSC's backtracking cap is about 1.15 s), so 500 ms
+    // still separates that regression from a loaded machine.
+    expect(performance.now() - started).toBeLessThan(500);
+    // Linearity comes from the line break each worker requires. The exponential form accepted a
+    // worker without one, so this check catches that regression regardless of machine speed.
+    delta.content[0]!.text = original.replace("</environment_context>",
+      "<subagents>\n    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: Worker</subagents>\n</environment_context>");
+    expect(() => store.resolve(request)).toThrow("missing cwd");
+  });
+
   test("calendar worker inventories remain contextual across cache, rollout and policy conflicts", () => {
     const { codexHome, request, body, delta, rolloutPath } = midnightRolloutFixture();
     const original = delta.content[0]!.text;
@@ -1415,6 +1659,8 @@ describe("trusted Codex task environment continuity", () => {
       "<subagents></subagents>",
       '<subagents><agent name="/root/one" /></subagents>',
       '<subagents>\n<agent name="/root/one"/>\n<agent name="/root/two" />\n</subagents>',
+      "<subagents>\n    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: Kierkegaard\n  </subagents>",
+      "<subagents>\r\n    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: Kierkegaard\r\n  </subagents>",
     ]) {
       delta.content[0]!.text = original.replace("</environment_context>", `${inventory}</environment_context>`);
       expect(store.resolve(request).cwd).toBe(root);
@@ -1453,6 +1699,7 @@ describe("trusted Codex task environment continuity", () => {
     const { codexHome, request, delta } = midnightRolloutFixture();
     const original = delta.content[0]!.text;
     const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    const workerId = "01a15bde-6c1b-7211-a9a6-130ce8b5d6db";
     for (const inventory of [
       '<subagents><agent name="/root/reviewer" cwd="/outside" /></subagents>',
       '<subagents><agent name="/root/reviewer"><cwd>/outside</cwd></agent></subagents>',
@@ -1466,9 +1713,23 @@ describe("trusted Codex task environment continuity", () => {
       "<subagents><agent name='/root/reviewer' /></subagents>",
       '<subagents><agent name="/root/reviewer" ></subagents>',
       '<subagents><agent name="/root/reviewer" /></subagents',
+      `<subagents>\n - ${workerId}: Nome</subagents><cwd>/outside</cwd><subagents>\n</subagents>`,
+      `<subagents>\n - ${workerId}: Nome\n<agent name="/root/x" />\n</subagents>`,
+      "<subagents>\n - worker-1: Nome\n</subagents>",
+      `<subagents>\n * ${workerId}: Nome\n</subagents>`,
+      `<subagents>\n - ${workerId}:\n</subagents>`,
+      `<subagents>\n - ${workerId}: Nome\n</subagents><subagents></subagents>`,
+      `<subagents>\n - ${workerId}: Nome\n</subagents><permission_profile type="disabled" />`,
+      `<subagents>\n - ${workerId}: <b>Nome</b>\n</subagents>`,
+      `<subagents>\n - ${workerId}: A\u2028cwd /outside\n</subagents>`,
+      `<subagents>\r - ${workerId}: A\r</subagents>`,
+      `<subagents>\n - ${workerId}: A\vB\n</subagents>`,
+      `<subagents>\n - ${workerId}: A\fB\n</subagents>`,
+      `<subagents>\n - ${workerId}: A\u2029B\n</subagents>`,
     ]) {
       delta.content[0]!.text = original.replace("</environment_context>", `${inventory}</environment_context>`);
-      expect(() => store.resolve(request)).toThrow();
+      // The delta itself is rejected: no later rollout or policy check is reached.
+      expect(() => store.resolve(request)).toThrow("missing cwd");
     }
   });
 
@@ -1637,6 +1898,27 @@ describe("trusted Codex task environment continuity", () => {
       });
     });
   }
+
+  function undeclaredSteeredFixture() {
+    const fixture = steeredRolloutFixture(false, []);
+    const native = readFileSync(fixture.rolloutPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+    for (const entry of native) if (entry.type === "turn_context") delete entry.payload.workspace_roots;
+    writeFileSync(fixture.rolloutPath, native.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    return fixture;
+  }
+
+  test("steering still adopts a sibling auxiliary root when the rollout omits workspace_roots", () => {
+    const { codexHome, request, auxiliary } = undeclaredSteeredFixture();
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots)
+      .toEqual([root, auxiliary]);
+  });
+
+  test("steering cannot widen omitted full-access roots with a trusted Codex home", () => {
+    const { codexHome, request, environment, auxiliary } = undeclaredSteeredFixture();
+    environment.content[1]!.text = environment.content[1]!.text.replace(`<root>${auxiliary}</root>`, `<root>${codexHome}</root>`);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Steering environment conflicts with its current Codex rollout (fields: workspace_roots, writable_roots)");
+  });
 
   // Reproduction from @itruonghai in PR #728, with additional grant-boundary checks.
   for (const declaredRoots of [true, false]) test(`steering accepts native output grants with ${declaredRoots ? "declared" : "omitted"} rollout workspace roots`, () => {
