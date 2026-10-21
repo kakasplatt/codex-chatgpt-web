@@ -4,6 +4,7 @@ import { atomicWriteFile } from "../../config";
 import { getCodexHome, getTrustedCodexHomes } from "../../codex-integration-shared";
 import type { CodexParsedRequest } from "../../types";
 import {
+  dedupeResolvedPaths,
   extractChatGptTurnEnvironmentClaim,
   extractChatGptCompactionSourceRevision,
   extractChatGptContinuationEnvironmentClaim,
@@ -64,11 +65,7 @@ function absolutePaths(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length === 0 || value.some(path => typeof path !== "string" || !isAbsolute(path))) {
     throw new Error(`Invalid persisted ChatGPT thread ${field}`);
   }
-  const unique = new Map<string, string>();
-  for (const path of value.map(path => resolve(path as string))) {
-    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
-  }
-  return [...unique.values()];
+  return dedupeResolvedPaths(value as string[]);
 }
 
 function sandboxPolicy(value: unknown, roots: string[], writableRoots: string[]): ChatGptSandboxPolicy {

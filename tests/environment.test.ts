@@ -911,6 +911,22 @@ describe("trusted Codex task environment continuity", () => {
     expect(new ChatGptThreadEnvironmentStore(statePath).resolve(continuation).cwd).toBe(root);
   });
 
+  test.skipIf(process.platform !== "win32")("a persisted thread environment loads case-duplicated roots once", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-case-duplicated-environment-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    const roots = [root, root.toUpperCase()];
+    writeFileSync(statePath, JSON.stringify({ version: 1, threads: { thread_current: {
+      cwd: root, roots, writableRoots: roots, sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    } } }));
+    const continuation = currentWire();
+    (continuation._rawBody as { input: unknown[] }).input = [{
+      type: "message", role: "user", content: [{ type: "input_text", text: "Continue" }],
+    }];
+    const store = new ChatGptThreadEnvironmentStore(statePath, Date.now, join(stateRoot, "codex"));
+    expect(store.resolve(continuation)).toMatchObject({ cwd: root, roots: [root], writableRoots: [root] });
+  });
+
   test("fresh trusted tasks do not erase unfamiliar or invalid permission records", () => {
     const stateRoot = mkdtempSync(join(tmpdir(), "codex-invalid-environment-"));
     temporaryRoots.push(stateRoot);

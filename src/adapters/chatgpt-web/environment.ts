@@ -74,7 +74,7 @@ function pathIdentity(value: string): string {
 }
 
 /** Resolve and dedupe absolute paths, keeping each path's first spelling and order. */
-function dedupeResolvedPaths(paths: string[]): string[] {
+export function dedupeResolvedPaths(paths: string[]): string[] {
   const unique = new Map<string, string>();
   for (const path of paths.map(value => resolve(value))) {
     if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
