@@ -3,7 +3,13 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { observeChatGptAttachmentUploads } from "./attachment-upload";
 import { chatGptResponseStructureLogEntries, chatGptResponseStructures } from "./browser-response-structure";
-import { chatGptInteractionState } from "./browser-interaction-state";
+import { chatGptAnimationFrameSample, chatGptInteractionState } from "./browser-interaction-state";
+import {
+  ensureRetainedTabPaints,
+  isReloadableRetainedConversation,
+  RETAINED_TAB_FRAME_WINDOW_MS,
+  sampleRetainedTabFrames,
+} from "./retained-tab-paint";
 import { BrowserDiagnosticHistory } from "./browser-diagnostic-history";
 import { readChatGptUserMessage } from "./browser-user-message";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
@@ -3175,6 +3181,20 @@ export class ChatGptBrowserWorker {
     );
   }
 
+  /**
+   * Reload a retained saved conversation in place. This deliberately does not prepare a chat surface:
+   * that navigates to a new chat and would abandon the conversation the lease owns.
+   */
+  private async reloadRetainedConversation(page: Page, signal?: AbortSignal): Promise<void> {
+    const before = page.url();
+    await withBrowserTurnAbort(page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }), signal);
+    await waitForOperationalChatGptViewport(page, signal);
+    await this.activeComposer(page, 30_000, signal);
+    await throwIfChatGptSessionFailureAlert(page);
+    await assertAuthenticatedChatGptPage(page);
+    if (page.url() !== before) throw new Error("The retained ChatGPT conversation changed URL after reload");
+  }
+
   /** Prepare a new conversation in the selected chat mode. */
   private async prepareChatSurface(
     page: Page,
@@ -5925,6 +5945,52 @@ export class ChatGptBrowserWorker {
       const launcherObservationRecovery = launcherSurfaceId !== undefined
         && this.config.browserHostDescriptorPath !== undefined;
       await diagnostics.capture(page, "browser-page-acquired");
+      // A reused tab can stop producing animation frames, which leaves Playwright's click stability
+      // check pending forever. Prove it paints before any prompt or attachment touches the composer.
+      // Only a launcher lease supplies a retained tab; a caller-provided maintenance page never does.
+      if (
+        reuseConversation
+        && launcherSurfaceId !== undefined
+        && maintenancePage === undefined
+        && this.config.browserHostDescriptorPath !== undefined
+      ) {
+        const retainedPage = page;
+        const reloadable = isReloadableRetainedConversation(retainedPage.url(), this.config.useSavedChats);
+        const paint = await this.runStage(
+          turn.traceId,
+          "retained_tab_paint",
+          browserStageTimeouts.temporaryChatPreparation,
+          async (stageSignal) => {
+            const signal = turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal;
+            return ensureRetainedTabPaints({
+              sample: () => sampleRetainedTabFrames(
+                () => retainedPage.evaluate(chatGptAnimationFrameSample, { windowMs: RETAINED_TAB_FRAME_WINDOW_MS }),
+                RETAINED_TAB_FRAME_WINDOW_MS + 1_500,
+              ),
+              refresh: async () => {
+                const renderer = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+                  phase: "heartbeat",
+                  traceId: turn.traceId,
+                  helperPid: process.pid,
+                  refreshViewport: true,
+                });
+                if (renderer) {
+                  browserUiHealth.record(
+                    renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
+                    renderer.rendererStateChangedAt ?? undefined,
+                  );
+                }
+              },
+              ...(reloadable ? { reload: () => this.reloadRetainedConversation(retainedPage, signal) } : {}),
+              signal,
+              log: console.info,
+              traceId: turn.traceId,
+            });
+          },
+        );
+        if (paint === "repainted") await diagnostics.capture(page, "retained-tab-repainted");
+        if (paint === "reloaded") await diagnostics.capture(page, "retained-tab-reloaded");
+      }
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.multipart ? `multipart-${prepared.multipart.parts.length}` : "inline"}, maxMessageChars=${maxMessageChars}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length}, compactionTrimmedMessages=${prepared.trimmedCompactionMessages ?? 0})`,
       );
