@@ -1632,10 +1632,11 @@ describe("trusted Codex task environment continuity", () => {
 
   test("a rejected bullet worker inventory fails closed without exponential backtracking", () => {
     const { codexHome, request, delta } = midnightRolloutFixture();
+    const original = delta.content[0]!.text;
     // Trailing spaces let a name and the line separator share characters; an unknown trailing
     // field then forces the whole fragment to fail after every split has been tried.
     const lines = Array.from({ length: 30 }, (_, index) => `    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: Worker${index} \n`).join("");
-    delta.content[0]!.text = delta.content[0]!.text.replace("</environment_context>",
+    delta.content[0]!.text = original.replace("</environment_context>",
       `<subagents>\n${lines}</subagents>\n<network />\n</environment_context>`);
     const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
     const started = performance.now();
@@ -1643,6 +1644,11 @@ describe("trusted Codex task environment continuity", () => {
     // The exponential form measured about 1 s (JSC's backtracking cap is about 1.15 s), so 500 ms
     // still separates that regression from a loaded machine.
     expect(performance.now() - started).toBeLessThan(500);
+    // Linearity comes from the line break each worker requires. The exponential form accepted a
+    // worker without one, so this check catches that regression regardless of machine speed.
+    delta.content[0]!.text = original.replace("</environment_context>",
+      "<subagents>\n    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: Worker</subagents>\n</environment_context>");
+    expect(() => store.resolve(request)).toThrow("missing cwd");
   });
 
   test("calendar worker inventories remain contextual across cache, rollout and policy conflicts", () => {
