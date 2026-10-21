@@ -1449,17 +1449,62 @@ describe("trusted Codex task environment continuity", () => {
   });
 
   // Adopted context roots are cached for children; they may not widen the parent overlap check.
-  for (const [label, extra] of [
-    ["an ancestor of the rollout cwd", () => resolve(root, "..")],
-    ["a filesystem root", () => parse(root).root],
-  ] as const) {
-    test(`a midnight delta cannot add ${label} as workspace context`, () => {
-      const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
-      repeatRoots(delta, root, extra());
+  test("a midnight delta cannot add a filesystem root as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root, parse(root).root);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  // Codex projectless tasks run in <Documents>/Codex/<date>/<slug> and list <Documents>/Codex too.
+  test("a midnight delta keeps a projectless task parent root as workspace context", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, resolve(root, ".."), root, visualizationRoot);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots)
+      .toEqual([resolve(root, ".."), root, visualizationRoot]);
+  });
+
+  function withEnvironment<T>(values: Record<string, string>, run: () => T): T {
+    const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+    Object.assign(process.env, values);
+    try { return run(); } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  test("a midnight delta cannot add a trusted Codex home as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root, codexHome);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("a midnight delta cannot add the bridge data directory as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const bridgeHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-bridge-home-"));
+    temporaryRoots.push(bridgeHome);
+    repeatRoots(delta, root, bridgeHome);
+    withEnvironment({ CODEX_CHATGPT_WEB_HOME: bridgeHome }, () => {
       expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
         .toThrow("Calendar environment delta conflicts");
     });
-  }
+  });
+
+  test("a midnight delta cannot add the user home directory as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const fakeHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-user-home-"));
+    const bridgeHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-bridge-home-"));
+    temporaryRoots.push(fakeHome, bridgeHome);
+    repeatRoots(delta, root, fakeHome);
+    // Keep the bridge data directory outside the fake home so only the home rule can refuse it.
+    withEnvironment({ USERPROFILE: fakeHome, HOME: fakeHome, CODEX_CHATGPT_WEB_HOME: bridgeHome }, () => {
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+        .toThrow("Calendar environment delta conflicts");
+    });
+  });
 
   // Windows-only spellings: another drive or share root does not contain the cwd, and the
   // namespaced forms must not hide an ancestor or a share root from the guard.

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, renameSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, parse, relative, resolve } from "node:path";
-import { atomicWriteFile } from "../../config";
+import { atomicWriteFile, getConfigDir } from "../../config";
 import { getCodexHome, getTrustedCodexHomes } from "../../codex-integration-shared";
 import type { CodexParsedRequest } from "../../types";
 import {
@@ -59,6 +60,14 @@ function pathIdentity(value: string): string {
 function contains(root: string, path: string): boolean {
   const rel = relative(pathIdentity(root), pathIdentity(path));
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/** An extra workspace context root that a recovery claim may not introduce. */
+function isBroadContextRoot(path: string, nativeRoots: Set<string>, protectedRoots: readonly string[]): boolean {
+  if (nativeRoots.has(pathIdentity(path))) return false;
+  return (process.platform === "win32" && /^[\\/]{2}[?.][\\/]/.test(path))
+    || pathIdentity(parse(path).root) === pathIdentity(path)
+    || protectedRoots.some(protectedRoot => contains(path, protectedRoot));
 }
 
 function absolutePaths(value: unknown, field: string): string[] {
@@ -163,6 +172,7 @@ export class ChatGptThreadEnvironmentStore {
   private readonly threads = new Map<string, StoredThreadEnvironment>();
   private lastPersistedAt = Number.NEGATIVE_INFINITY;
   private readonly codexHomes: readonly string[];
+  private readonly protectedRoots: readonly string[];
 
   constructor(
     private readonly path?: string,
@@ -172,6 +182,7 @@ export class ChatGptThreadEnvironmentStore {
     additionalCodexHomes?: readonly string[],
   ) {
     this.codexHomes = getTrustedCodexHomes(codexHome, additionalCodexHomes);
+    this.protectedRoots = [...this.codexHomes, getConfigDir(), homedir()];
   }
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
@@ -258,20 +269,13 @@ export class ChatGptThreadEnvironmentStore {
             // As above, an omitted unrestricted rollout root list is not a native restriction. The
             // current turn's repeated roots stay its workspace context (the broker pins the start
             // envelope for the whole tool loop) only when they agree with each other and keep every
-            // native root exactly. Permissions and cwd still come from the native record. These
-            // roots are cached for children, so an extra may not be a filesystem root or contain a
-            // native root: that would widen the overlap check against the cached parent. Windows
-            // namespaced and device spellings (\\?\, \\.\) can hide either shape, so refuse them.
-            const broadRoot = (path: string) => !nativeRoots.has(pathIdentity(path))
-              && ((process.platform === "win32" && /^[\\/]{2}[?.][\\/]/.test(path))
-                || pathIdentity(parse(path).root) === pathIdentity(path)
-                || [...nativeRoots].some(root => contains(path, root)));
+            // native root exactly. Permissions and cwd still come from the native record.
             const contextRoots = !rollout.workspaceRootsDeclared
               && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
               && deltaRoots.length > 0
               && deltaRoots.every(roots => sameRoots(roots, deltaRoots[0]!))
               && [...nativeRoots].every(root => deltaRoots[0]!.has(root))
-              && !calendarDelta.workspaceRoots.at(-1)!.some(broadRoot)
+              && !calendarDelta.workspaceRoots.at(-1)!.some(path => isBroadContextRoot(path, nativeRoots, this.protectedRoots))
               ? calendarDelta.workspaceRoots.at(-1)! : undefined;
             if (contextRoots) {
               rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };
