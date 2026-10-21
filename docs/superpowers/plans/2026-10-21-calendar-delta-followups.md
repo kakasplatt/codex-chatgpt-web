@@ -16,7 +16,7 @@
 ## Evidência do achado 3
 
 O rollout é `~/.codex/sessions/2026/10/19/rollout-2026-10-19T23-50-41-01a15737-dc1e-7a02-8903-779b0cad3868.jsonl`, turno `01a15739-…`.
-- Às 03:00:39Z, o delta de meia-noite repete `<workspace_roots>` com dois roots: `C:\Work\game` e `C:\Users\kakas\.codex\visualizations\2026\10\20\01a15737-…`. O perfil é `disabled/unrestricted`.
+- Às 03:00:39Z, o delta de meia-noite repete `<workspace_roots>` com dois roots: `C:\Work\game` e `C:\Users\<user>\.codex\visualizations\2026\10\20\01a15737-…`. O perfil é `disabled/unrestricted`.
 - `resolveCurrentCodexRolloutEnvironment` sobre o rollout real retorna `roots = [C:\Work\game]` e `workspaceRootsDeclared = false`. O `turn_context` não tem `workspace_roots`.
 - `thread-environment.ts:253-259` compara os roots do delta com `[cwd]` e lança o conflito. A substituição das linhas 243-252 só ocorre com `currentClaim`, e o delta de calendário não produz claim, porque não tem `<cwd>`.
 

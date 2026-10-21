@@ -44,7 +44,7 @@ A regra "contém root nativo" sai. Um root amplo só é recusado quando é **nov
 
 - Foram 787 listas de roots e 97 roots extras (diferentes do cwd).
 - **Nenhum** extra é raiz de filesystem, usa `\\?\` ou `\\.\`, nem contém `~/.codex`, `~/.codex-chatgpt-web` ou o home.
-- Seis tarefas sem projeto têm `cwd = C:\Users\kakas\Documents\Codex\<data>\<slug>` e o extra `C:\Users\kakas\Documents\Codex`, **ancestral do cwd**. Uma delas é `rollout-…-01a14bb5-…` (2026-10-17, `chatgpt-web/gpt-6-sol`, `danger-full-access`, rollout **sem** `workspace_roots`). Se ela atravessar a meia-noite, a regra atual de `daf08fc` recusa o delta e o turno falha. A regra precisa sair.
+- Seis tarefas sem projeto têm `cwd = C:\Users\<user>\Documents\Codex\<data>\<slug>` e o extra `C:\Users\<user>\Documents\Codex`, **ancestral do cwd**. Uma delas é `rollout-…-01a14bb5-…` (2026-10-17, `chatgpt-web/gpt-6-sol`, `danger-full-access`, rollout **sem** `workspace_roots`). Se ela atravessar a meia-noite, a regra atual de `daf08fc` recusa o delta e o turno falha. A regra precisa sair.
 - O `os.homedir()` do Bun segue `USERPROFILE`/`HOME` em tempo de execução: com `USERPROFILE = C:/tmp-fake-home`, ele retorna esse valor. O diretório da ponte vem de `getConfigDir()` (`src/config.ts:157`), controlado por `CODEX_CHATGPT_WEB_HOME`. As duas regras podem ser testadas de forma isolada.
 
 ## Global Constraints

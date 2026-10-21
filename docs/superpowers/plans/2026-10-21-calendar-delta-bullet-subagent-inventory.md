@@ -135,7 +135,7 @@ git commit -m "fix: accept bullet worker inventories in native calendar updates 
 
 ## Fora de escopo (achado relacionado, propor issue separada)
 
-Em `rollout-2026-10-19T23-50-41-01a15737-…` (2026-10-20T03:00:39Z), um delta de meia-noite **sem** `<subagents>` repetiu dois roots: `C:\Work\game` e `C:\Users\kakas\.codex\visualizations\2026\10\20\<thread_id>`. Ele falhou com `Calendar environment delta conflicts with its current Codex rollout`.
+Em `rollout-2026-10-19T23-50-41-01a15737-…` (2026-10-20T03:00:39Z), um delta de meia-noite **sem** `<subagents>` repetiu dois roots: `C:\Work\game` e `C:\Users\<user>\.codex\visualizations\2026\10\20\<thread_id>`. Ele falhou com `Calendar environment delta conflicts with its current Codex rollout`.
 
 O `turn_context` desse rollout não declara `workspace_roots`, então `rollout.environment.roots = [cwd]`. A substituição por roots do envelope (`thread-environment.ts:243-252`) só ocorre quando há `currentClaim`, e o delta de calendário não produz claim. Por isso a comparação em `thread-environment.ts:253-259` rejeita o root de visualizações.
 
