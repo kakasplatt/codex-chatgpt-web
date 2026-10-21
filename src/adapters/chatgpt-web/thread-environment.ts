@@ -252,9 +252,25 @@ export class ChatGptThreadEnvironmentStore {
           }
           if (calendarDelta) {
             const nativeRoots = new Set(rolloutEnvironment.roots.map(pathIdentity));
-            if (calendarDelta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)
-              || calendarDelta.workspaceRoots.some(roots => roots.length !== nativeRoots.size
-                || roots.some(root => !nativeRoots.has(root)))) {
+            const deltaRoots = calendarDelta.workspaceRoots.map(roots => new Set(roots.map(pathIdentity)));
+            const sameRoots = (left: Set<string>, right: Set<string>) => left.size === right.size
+              && [...left].every(root => right.has(root));
+            if (calendarDelta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)) {
+              throw new Error("Calendar environment delta conflicts with its current Codex rollout");
+            }
+            // As above, an omitted unrestricted rollout root list is not a native restriction. The
+            // current turn's repeated roots stay its workspace context (the broker pins the start
+            // envelope for the whole tool loop) only when they agree with each other and keep every
+            // native root exactly. Permissions and cwd still come from the native record.
+            const contextRoots = !rollout.workspaceRootsDeclared
+              && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
+              && deltaRoots.length > 0
+              && deltaRoots.every(roots => sameRoots(roots, deltaRoots[0]!))
+              && [...nativeRoots].every(root => deltaRoots[0]!.has(root))
+              ? calendarDelta.workspaceRoots.at(-1)! : undefined;
+            if (contextRoots) {
+              rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };
+            } else if (deltaRoots.some(roots => !sameRoots(roots, nativeRoots))) {
               throw new Error("Calendar environment delta conflicts with its current Codex rollout");
             }
           }

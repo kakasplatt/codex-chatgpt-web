@@ -1381,6 +1381,68 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  // Codex 0.163 can omit workspace_roots from the turn context while its envelopes still list the
+  // task's visualization output directory next to the project.
+  function undeclaredRolloutMidnightFixture() {
+    const fixture = midnightRolloutFixture();
+    const native = readFileSync(fixture.rolloutPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+    for (const entry of native) if (entry.type === "turn_context") delete entry.payload.workspace_roots;
+    writeFileSync(fixture.rolloutPath, native.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    const visualizationRoot = join(fixture.codexHome, "visualizations", "2026", "10", "20", rolloutThreadId);
+    const repeatRoots = (delta: { content: Array<{ text: string }> }, ...roots: string[]) => {
+      delta.content[0]!.text = delta.content[0]!.text.replace("<filesystem>",
+        `<filesystem><workspace_roots>${roots.map(path => `<root>${path}</root>`).join("")}</workspace_roots>`);
+    };
+    return { ...fixture, visualizationRoot, repeatRoots };
+  }
+
+  test("a midnight delta keeps its repeated workspace context when a full-access rollout omits workspace_roots", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root, visualizationRoot);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+      cwd: root,
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
+  test("a midnight delta without the rollout cwd cannot replace omitted full-access roots", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, visualizationRoot);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("a midnight delta cannot replace the rollout cwd with an ancestor root", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, resolve(root, ".."));
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("competing midnight deltas cannot replace omitted full-access roots", () => {
+    const { codexHome, request, body, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const second = structuredClone(delta);
+    second.id = "msg_calendar_delta_2";
+    repeatRoots(delta, root);
+    repeatRoots(second, root, visualizationRoot);
+    body.input.push(second);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("a managed midnight delta still cannot add roots when the rollout omits workspace_roots", () => {
+    const { codexHome, request, delta, rolloutPath } = managedMidnightFixture("workspace-write", false);
+    const native = readFileSync(rolloutPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+    for (const entry of native) if (entry.type === "turn_context") delete entry.payload.workspace_roots;
+    writeFileSync(rolloutPath, native.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    delta.content[0]!.text = delta.content[0]!.text.replace("<filesystem>",
+      `<filesystem><workspace_roots><root>${root}</root><root>${join(codexHome, "visualizations", "2026", "10", "20", rolloutThreadId)}</root></workspace_roots>`);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow();
+  });
+
   for (const afterAssistant of [false, true]) for (const repeatRoots of [false, true]) {
     test(`calendar update ${afterAssistant ? "after a tool" : "immediately after the instruction"} with ${repeatRoots ? "repeated" : "omitted"} roots uses the current native environment (#812)`, () => {
       const { codexHome, request, body, delta } = midnightRolloutFixture();

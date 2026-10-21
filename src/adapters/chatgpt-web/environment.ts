@@ -531,7 +531,12 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
       try { roots = [...match[1].matchAll(/<root>([^<]+)<\/root>/g)].map(root => decodeXmlText(root[1]!.trim())); }
       catch { return undefined; }
       if (roots.some(root => !isAbsolute(root))) return undefined;
-      workspaceRoots.push([...new Set(roots.map(pathIdentity))]);
+      // Keep the native spelling: these roots can become the task's workspace context.
+      const unique = new Map<string, string>();
+      for (const path of roots.map(root => resolve(root))) {
+        if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
+      }
+      workspaceRoots.push([...unique.values()]);
     }
     deltas += 1;
   }
