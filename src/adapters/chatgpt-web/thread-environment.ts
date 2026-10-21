@@ -263,9 +263,11 @@ export class ChatGptThreadEnvironmentStore {
             // envelope for the whole tool loop) only when they agree with each other and keep every
             // native root exactly. Permissions and cwd still come from the native record. These
             // roots are cached for children, so an extra may not be a filesystem root or contain a
-            // native root: that would widen the overlap check against the cached parent.
+            // native root: that would widen the overlap check against the cached parent. Windows
+            // namespaced and device spellings (\\?\, \\.\) can hide either shape, so refuse them.
             const broadRoot = (path: string) => !nativeRoots.has(pathIdentity(path))
-              && (pathIdentity(parse(path).root) === pathIdentity(path)
+              && ((process.platform === "win32" && /^[\\/]{2}[?.][\\/]/.test(path))
+                || pathIdentity(parse(path).root) === pathIdentity(path)
                 || [...nativeRoots].some(root => contains(path, root)));
             const contextRoots = !rollout.workspaceRootsDeclared
               && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"

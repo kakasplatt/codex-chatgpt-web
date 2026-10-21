@@ -1428,6 +1428,23 @@ describe("trusted Codex task environment continuity", () => {
     });
   }
 
+  // Windows-only spellings: another drive or share root does not contain the cwd, and the
+  // namespaced forms must not hide an ancestor or a share root from the guard.
+  for (const [label, extra] of [
+    ["another drive root", () => parse(root).root.toUpperCase().startsWith("C") ? "D:\\" : "C:\\"],
+    ["a network share root", () => "\\\\server\\share"],
+    ["a namespaced ancestor of the rollout cwd", () => toNamespacedPath(resolve(root, ".."))],
+    ["a namespaced network share root", () => "\\\\?\\UNC\\server\\share"],
+    ["a device-namespace path", () => "\\\\.\\C:\\outside"],
+  ] as const) {
+    test.skipIf(process.platform !== "win32")(`a midnight delta cannot add ${label} as workspace context`, () => {
+      const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+      repeatRoots(delta, root, extra());
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+        .toThrow("Calendar environment delta conflicts");
+    });
+  }
+
   test("a midnight delta keeps a sibling output root as workspace context", () => {
     const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
     const sibling = resolve(root, "..", "sibling-output");
