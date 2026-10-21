@@ -1640,7 +1640,9 @@ describe("trusted Codex task environment continuity", () => {
     const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
     const started = performance.now();
     expect(() => store.resolve(request)).toThrow("missing cwd");
-    expect(performance.now() - started).toBeLessThan(100);
+    // The exponential form measured about 1 s (JSC's backtracking cap is about 1.15 s), so 500 ms
+    // still separates that regression from a loaded machine.
+    expect(performance.now() - started).toBeLessThan(500);
   });
 
   test("calendar worker inventories remain contextual across cache, rollout and policy conflicts", () => {
