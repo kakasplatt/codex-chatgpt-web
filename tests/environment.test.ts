@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve, toNamespacedPath } from "node:path";
+import { dirname, join, parse, resolve, toNamespacedPath } from "node:path";
 import { chatGptTurnUserRevisionHistory, extractChatGptCompactionSourceRevision, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, isChatGptCompactionContinuation } from "../src/adapters/chatgpt-web/environment";
 import { chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 import { rememberCompactionContinuation } from "../src/adapters/chatgpt-web/compaction-continuation";
@@ -1413,6 +1413,26 @@ describe("trusted Codex task environment continuity", () => {
     repeatRoots(delta, visualizationRoot);
     expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
       .toThrow("Calendar environment delta conflicts");
+  });
+
+  // Adopted context roots are cached for children; they may not widen the parent overlap check.
+  for (const [label, extra] of [
+    ["an ancestor of the rollout cwd", () => resolve(root, "..")],
+    ["a filesystem root", () => parse(root).root],
+  ] as const) {
+    test(`a midnight delta cannot add ${label} as workspace context`, () => {
+      const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+      repeatRoots(delta, root, extra());
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+        .toThrow("Calendar environment delta conflicts");
+    });
+  }
+
+  test("a midnight delta keeps a sibling output root as workspace context", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const sibling = resolve(root, "..", "sibling-output");
+    repeatRoots(delta, root, sibling);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots).toEqual([root, sibling]);
   });
 
   test("a midnight delta cannot replace the rollout cwd with an ancestor root", () => {
