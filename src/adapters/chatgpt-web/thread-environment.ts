@@ -71,7 +71,8 @@ function contains(root: string, path: string): boolean {
  * children without an envelope inherit parent.roots and are checked against them. So a recovery
  * claim may not add a filesystem root, a Windows namespaced or device spelling, or a root that
  * equals or contains a trusted Codex home, the bridge data directory or the user home. Roots the
- * turn start already established from Codex's own envelope are kept by the caller.
+ * turn start already established from Codex's own envelope are kept by the caller. Shared homes
+ * keep no cache and no cached parent, so the caller applies no refusal there.
  */
 function isBroadContextRoot(path: string, nativeRoots: Set<string>, protectedRoots: readonly string[]): boolean {
   if (nativeRoots.has(pathIdentity(path))) return false;
@@ -255,15 +256,14 @@ export class ChatGptThreadEnvironmentStore {
         if (rollout) {
           let rolloutEnvironment = rollout.environment;
           // Roots this thread already established at turn start stay valid context (D1). Read the
-          // single-home cache only when a broad root needs it: shared homes never use the cache,
-          // and an ordinary turn must still be able to repair a corrupt cache file through set().
+          // cache only when a broad root needs it, so an ordinary turn can still repair a corrupt
+          // cache file through set(). Shared homes keep no cache, so nothing is refused there.
           let established: Set<string> | undefined;
-          const isEstablished = (path: string) => this.codexHomes.length === 1
-            && (established ??= new Set((this.get(rolloutIdentity.threadId)?.roots ?? []).map(pathIdentity)))
-              .has(pathIdentity(path));
-          const refusesContext = (roots: string[], nativeRoots: Set<string>) => roots.some(path => (
-            isBroadContextRoot(path, nativeRoots, this.protectedRoots) && !isEstablished(path)
-          ));
+          const isEstablished = (path: string) => (
+            established ??= new Set((this.get(rolloutIdentity.threadId)?.roots ?? []).map(pathIdentity))
+          ).has(pathIdentity(path));
+          const refusesContext = (roots: string[], nativeRoots: Set<string>) => this.codexHomes.length === 1
+            && roots.some(path => isBroadContextRoot(path, nativeRoots, this.protectedRoots) && !isEstablished(path));
           // After a restart Codex can omit workspace_roots while still explicitly
           // granting unrestricted access. In that case [cwd] is not a native
           // restriction. Keep the current envelope's workspace context; permissions
@@ -272,10 +272,7 @@ export class ChatGptThreadEnvironmentStore {
             && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
             && currentClaim?.environment.sandboxPolicy.type === "dangerFullAccess"
             && pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd)
-            // The turn-start envelope (the initial claim in shared-home mode) is Codex's own
-            // context and stays unchanged (D1); only recovery claims are guarded.
-            && (currentClaim === initialClaim
-              || !refusesContext(currentClaim.environment.roots, new Set(rolloutEnvironment.roots.map(pathIdentity))))) {
+            && !refusesContext(currentClaim.environment.roots, new Set(rolloutEnvironment.roots.map(pathIdentity)))) {
             rolloutEnvironment = {
               ...rolloutEnvironment,
               roots: [...currentClaim.environment.roots],

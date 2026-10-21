@@ -217,6 +217,31 @@ describe("explicit trusted Codex homes (#851)", () => {
     expect(sharedStore().resolve(parsed).roots).toEqual([cwd, secondary]);
   });
 
+  // Shared homes keep no cache, so no cached parent can widen a child: the broad-root guard does not
+  // apply, and the turn-start roots must survive midnight for the broker's pinned environment.
+  test("a shared-home broad root from the turn start survives a midnight delta", () => {
+    rollout(secondary, { mode: "danger-full-access" });
+    const parsed = request({ mode: "danger-full-access" });
+    const input = (parsed._rawBody as { input: Array<Record<string, unknown>> }).input;
+    const start = (input[0]!.content as Array<{ text: string }>)[0]!;
+    start.text = start.text.replace(`<root>${cwd}</root>`, `<root>${cwd}</root><root>${secondary}</root>`);
+    input[0]!.id = "msg_start";
+    input[1]!.id = "msg_instruction";
+    input.push(
+      { type: "function_call", id: "fc_1", call_id: "call_1", name: "fixture", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_1", output: "done" },
+      {
+        type: "message", role: "user", id: "msg_calendar_delta",
+        internal_chat_message_metadata_passthrough: { turn_id: turnId, content_item_kinds: ["environments.environment_context"] },
+        content: [{ type: "input_text", text: "<environment_context><current_date>2026-10-21</current_date><filesystem>"
+          + `<workspace_roots><root>${cwd}</root><root>${secondary}</root></workspace_roots>`
+          + '<permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile>'
+          + "</filesystem></environment_context>" }],
+      },
+    );
+    expect(sharedStore().resolve(parsed).roots).toEqual([cwd, secondary]);
+  });
+
   test("request and native permission, cwd and root conflicts remain errors", () => {
     rollout(secondary);
     expect(() => sharedStore().resolve(request({ network: true }))).toThrow("network_access");
