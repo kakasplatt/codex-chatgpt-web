@@ -95,12 +95,25 @@ test("fails fast when the reloaded tab still does not paint", async () => {
 });
 
 test("a failed reload fails fast", async () => {
-  const { deps, calls, lines } = ladder([0, 0], { reload: async () => { throw new Error("net::ERR_ABORTED"); } });
+  const reloadFailure = new Error("net::ERR_ABORTED");
+  const { deps, calls, lines } = ladder([0, 0], { reload: async () => { throw reloadFailure; } });
   const failure = await ensureRetainedTabPaints(deps).catch(error => error);
+  expect(failure.constructor).toBe(Error);
   expect(failure.message).toBe(CHATGPT_RETAINED_TAB_NOT_PAINTING_MESSAGE);
   expect(failure.message).not.toContain("ERR_ABORTED");
+  expect(failure.cause).toBe(reloadFailure);
   expect(calls).toEqual(["sample", "refresh", "sample"]);
-  expect(loggedFrames(lines)).toMatchObject({ afterReload: null, reloadEligible: true, outcome: "stalled" });
+  expect(loggedFrames(lines)).toMatchObject({
+    afterReload: null, reloadEligible: true, reloadError: "Error", outcome: "stalled",
+  });
+  expect(lines[0]).not.toContain("ERR_ABORTED");
+});
+
+test("a stalled tab without a reload failure carries no cause", async () => {
+  const { deps, lines } = ladder([0, 0, 1]);
+  const failure = await ensureRetainedTabPaints(deps).catch(error => error);
+  expect(failure.cause).toBeUndefined();
+  expect(loggedFrames(lines)).not.toHaveProperty("reloadError");
 });
 
 test("abort wins over the ladder", async () => {

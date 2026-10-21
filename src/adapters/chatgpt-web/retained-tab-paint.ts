@@ -95,14 +95,20 @@ export async function ensureRetainedTabPaints(deps: {
   const frames: { first: number | null; afterRepaint: number | null; afterReload: number | null } = {
     first: null, afterRepaint: null, afterReload: null,
   };
-  const finish = (outcome: RetainedTabPaintOutcome | "stalled") => {
+  const finish = (outcome: RetainedTabPaintOutcome | "stalled", reloadError?: unknown) => {
     deps.log(`[chatgpt-web] retained_tab_frames ${JSON.stringify({
       traceId: deps.traceId,
       ...frames,
       reloadEligible: deps.reload !== undefined,
+      // The error name only: a message can carry page or account text.
+      ...(reloadError !== undefined ? { reloadError: reloadError instanceof Error ? reloadError.name : typeof reloadError } : {}),
       outcome,
     })}`);
-    if (outcome === "stalled") throw new Error(CHATGPT_RETAINED_TAB_NOT_PAINTING_MESSAGE);
+    if (outcome === "stalled") {
+      throw reloadError === undefined
+        ? new Error(CHATGPT_RETAINED_TAB_NOT_PAINTING_MESSAGE)
+        : new Error(CHATGPT_RETAINED_TAB_NOT_PAINTING_MESSAGE, { cause: reloadError });
+    }
     return outcome;
   };
 
@@ -119,7 +125,7 @@ export async function ensureRetainedTabPaints(deps: {
     if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
       throw retainedTabAbortError();
     }
-    return finish("stalled");
+    return finish("stalled", error);
   }
   frames.afterReload = await run(deps.sample);
   return finish(frames.afterReload >= RETAINED_TAB_MIN_FRAMES ? "reloaded" : "stalled");

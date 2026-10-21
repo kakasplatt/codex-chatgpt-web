@@ -5834,6 +5834,21 @@ export class ChatGptBrowserWorker {
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
+      // Ask the launcher to repaint the leased surface and record the renderer health it reports.
+      const refreshLauncherViewport = async (): Promise<void> => {
+        const renderer = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+          phase: "heartbeat",
+          traceId: turn.traceId,
+          helperPid: process.pid,
+          refreshViewport: true,
+        });
+        if (renderer) {
+          browserUiHealth.record(
+            renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
+            renderer.rendererStateChangedAt ?? undefined,
+          );
+        }
+      };
       const rebindLauncherPage = async (
         attempt: number,
         cause: Error,
@@ -5863,18 +5878,7 @@ export class ChatGptBrowserWorker {
                   : turn.abortSignal
                     ? AbortSignal.any([stageSignal, turn.abortSignal])
                     : stageSignal;
-                const renderer = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-                  phase: "heartbeat",
-                  traceId: turn.traceId,
-                  helperPid: process.pid,
-                  refreshViewport: true,
-                });
-                if (renderer) {
-                  browserUiHealth.record(
-                    renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
-                    renderer.rendererStateChangedAt ?? undefined,
-                  );
-                }
+                await refreshLauncherViewport();
                 const rebound = await connectLauncherBrowserHost(
                   this.config.browserHostDescriptorPath!,
                   browserStageTimeouts.browserPage,
@@ -5967,20 +5971,7 @@ export class ChatGptBrowserWorker {
                 () => retainedPage.evaluate(chatGptAnimationFrameSample, { windowMs: RETAINED_TAB_FRAME_WINDOW_MS }),
                 RETAINED_TAB_FRAME_WINDOW_MS + 1_500,
               ),
-              refresh: async () => {
-                const renderer = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-                  phase: "heartbeat",
-                  traceId: turn.traceId,
-                  helperPid: process.pid,
-                  refreshViewport: true,
-                });
-                if (renderer) {
-                  browserUiHealth.record(
-                    renderer.rendererHealth === "unresponsive" ? "renderer-unresponsive" : "renderer-responsive",
-                    renderer.rendererStateChangedAt ?? undefined,
-                  );
-                }
-              },
+              refresh: refreshLauncherViewport,
               ...(reloadable ? { reload: () => this.reloadRetainedConversation(retainedPage, signal) } : {}),
               signal,
               log: console.info,
