@@ -191,6 +191,32 @@ describe("explicit trusted Codex homes (#851)", () => {
     expect(existsSync(freshCache)).toBe(false);
   });
 
+  test("a corrupt single-home cache does not block a shared-home turn", () => {
+    const cache = join(root, "environments.json");
+    writeFileSync(cache, "{broken");
+    rollout(secondary);
+    expect(sharedStore(cache).resolve(request()).sandboxPolicy).toEqual({ type: "readOnly", networkAccess: false });
+    expect(readFileSync(cache, "utf8")).toBe("{broken");
+  });
+
+  test("a single-home workspace-write task still repairs a corrupt cache", () => {
+    const cache = join(root, "environments.json");
+    writeFileSync(cache, "{broken");
+    rollout(primary, { mode: "workspace-write" });
+    const store = new ChatGptThreadEnvironmentStore(cache, Date.now, primary);
+    expect(store.resolve(request({ mode: "workspace-write" })).sandboxPolicy.type).toBe("workspaceWrite");
+    expect(Object.keys(JSON.parse(readFileSync(cache, "utf8")).threads)).toEqual([threadId]);
+  });
+
+  // Decision D1(b): the turn-start envelope keeps the context roots Codex sent, here a trusted home.
+  test("a shared-home turn start keeps a Codex-sent broad context root", () => {
+    rollout(secondary, { mode: "danger-full-access" });
+    const parsed = request({ mode: "danger-full-access" });
+    const start = (parsed._rawBody as { input: Array<{ content: Array<{ text: string }> }> }).input[0]!.content[0]!;
+    start.text = start.text.replace(`<root>${cwd}</root>`, `<root>${cwd}</root><root>${secondary}</root>`);
+    expect(sharedStore().resolve(parsed).roots).toEqual([cwd, secondary]);
+  });
+
   test("request and native permission, cwd and root conflicts remain errors", () => {
     rollout(secondary);
     expect(() => sharedStore().resolve(request({ network: true }))).toThrow("network_access");

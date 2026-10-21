@@ -254,10 +254,15 @@ export class ChatGptThreadEnvironmentStore {
         });
         if (rollout) {
           let rolloutEnvironment = rollout.environment;
-          // Roots this thread already established at turn start stay valid context (D1).
-          const established = new Set((this.get(rolloutIdentity.threadId)?.roots ?? []).map(pathIdentity));
+          // Roots this thread already established at turn start stay valid context (D1). Read the
+          // single-home cache only when a broad root needs it: shared homes never use the cache,
+          // and an ordinary turn must still be able to repair a corrupt cache file through set().
+          let established: Set<string> | undefined;
+          const isEstablished = (path: string) => this.codexHomes.length === 1
+            && (established ??= new Set((this.get(rolloutIdentity.threadId)?.roots ?? []).map(pathIdentity)))
+              .has(pathIdentity(path));
           const refusesContext = (roots: string[], nativeRoots: Set<string>) => roots.some(path => (
-            isBroadContextRoot(path, nativeRoots, this.protectedRoots) && !established.has(pathIdentity(path))
+            isBroadContextRoot(path, nativeRoots, this.protectedRoots) && !isEstablished(path)
           ));
           // After a restart Codex can omit workspace_roots while still explicitly
           // granting unrestricted access. In that case [cwd] is not a native
@@ -267,7 +272,10 @@ export class ChatGptThreadEnvironmentStore {
             && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
             && currentClaim?.environment.sandboxPolicy.type === "dangerFullAccess"
             && pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd)
-            && !refusesContext(currentClaim.environment.roots, new Set(rolloutEnvironment.roots.map(pathIdentity)))) {
+            // The turn-start envelope (the initial claim in shared-home mode) is Codex's own
+            // context and stays unchanged (D1); only recovery claims are guarded.
+            && (currentClaim === initialClaim
+              || !refusesContext(currentClaim.environment.roots, new Set(rolloutEnvironment.roots.map(pathIdentity))))) {
             rolloutEnvironment = {
               ...rolloutEnvironment,
               roots: [...currentClaim.environment.roots],
