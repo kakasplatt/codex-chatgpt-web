@@ -205,7 +205,13 @@ export async function activateChatGptEffortMenu(
   await clearGhostEffortState(page, control);
   // Let Playwright wait for stable layout and hit testing after navigation.
   // A forced click can be delivered before the new renderer's viewport is usable.
-  await control.click({ timeout: Math.max(1, settleMs) });
+  try {
+    await control.click({ timeout: Math.max(1, settleMs) });
+  } catch (error) {
+    // A retained tab that stopped producing animation frames never satisfies the
+    // actionability wait. Fall through to the primary pointerdown, which does not need one.
+    if (!(error instanceof Error && error.name === "TimeoutError")) throw error;
+  }
   const clickedSurface = await waitForEffortSurface(page, control, settleMs);
   if (clickedSurface) return { method: "click", ...clickedSurface };
 

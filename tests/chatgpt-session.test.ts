@@ -161,6 +161,89 @@ test("effort activation retries one ghost click with a primary pointerdown", asy
   ]);
 });
 
+const playwrightTimeout = () =>
+  Object.assign(new Error("locator.click: Timeout 3000ms exceeded."), { name: "TimeoutError" });
+
+test("effort activation falls back to pointerdown when the click times out", async () => {
+  let pointerOpened = false;
+  const events: unknown[] = [];
+  const ownedMenu = { isVisible: async () => pointerOpened };
+  const hiddenSurface = {
+    filter() { return this; },
+    last() { return this; },
+    locator() { return this; },
+    isVisible: async () => false,
+  };
+  // A retained tab that stopped producing animation frames never delivers the click,
+  // so the rejected click leaves the control closed (no ghost state to clear).
+  const control = {
+    getAttribute: async (name: string) => {
+      if (name === "aria-controls") return pointerOpened ? "radix-effort-menu" : null;
+      if (name === "aria-expanded") return pointerOpened ? "true" : "false";
+      if (name === "data-state") return pointerOpened ? "open" : "closed";
+      return null;
+    },
+    click: async (options: unknown) => {
+      events.push(["click", options]);
+      throw playwrightTimeout();
+    },
+    dispatchEvent: async (name: string, detail: unknown) => {
+      events.push([name, detail]);
+      pointerOpened = true;
+    },
+  };
+  const page = {
+    locator: (selector: string) => selector === '[id="radix-effort-menu"]' ? ownedMenu : hiddenSurface,
+    keyboard: { press: async (key: string) => { events.push(["keyboard", key]); } },
+  };
+
+  const activation = await activateChatGptEffortMenu(page as never, control as never, { settleMs: 0 });
+  expect(activation.method).toBe("pointerdown");
+  expect(activation.menu).toBe(ownedMenu as never);
+  expect(events).toEqual([
+    ["click", { timeout: 1 }],
+    ["pointerdown", { button: 0, buttons: 1, pointerType: "mouse", isPrimary: true }],
+  ]);
+});
+
+test("effort activation still propagates non-timeout click errors", async () => {
+  let dispatched = 0;
+  const hiddenSurface = {
+    filter() { return this; },
+    last() { return this; },
+    locator() { return this; },
+    isVisible: async () => false,
+  };
+  const control = {
+    getAttribute: async () => null,
+    click: async () => { throw new Error("Target closed"); },
+    dispatchEvent: async () => { dispatched++; },
+  };
+  const page = { locator: () => hiddenSurface, keyboard: { press: async () => {} } };
+
+  await expect(activateChatGptEffortMenu(page as never, control as never, { settleMs: 0 }))
+    .rejects.toThrow("Target closed");
+  expect(dispatched).toBe(0);
+});
+
+test("effort activation reports the structural error after a timed-out click and a dead pointerdown", async () => {
+  const hiddenSurface = {
+    filter() { return this; },
+    last() { return this; },
+    locator() { return this; },
+    isVisible: async () => false,
+  };
+  const control = {
+    getAttribute: async () => null,
+    click: async () => { throw playwrightTimeout(); },
+    dispatchEvent: async () => {},
+  };
+  const page = { locator: () => hiddenSurface, keyboard: { press: async () => {} } };
+
+  await expect(activateChatGptEffortMenu(page as never, control as never, { settleMs: 0 }))
+    .rejects.toThrow("did not expose its owned menu or structural slider");
+});
+
 test("effort activation fails closed when neither event exposes a structural surface", async () => {
   const hiddenSurface = {
     filter() { return this; },
