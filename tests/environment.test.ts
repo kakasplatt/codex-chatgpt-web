@@ -1440,7 +1440,8 @@ describe("trusted Codex task environment continuity", () => {
     writeFileSync(rolloutPath, native.map(entry => JSON.stringify(entry)).join("\n") + "\n");
     delta.content[0]!.text = delta.content[0]!.text.replace("<filesystem>",
       `<filesystem><workspace_roots><root>${root}</root><root>${join(codexHome, "visualizations", "2026", "10", "20", rolloutThreadId)}</root></workspace_roots>`);
-    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow();
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
   });
 
   for (const afterAssistant of [false, true]) for (const repeatRoots of [false, true]) {
@@ -1578,6 +1579,7 @@ describe("trusted Codex task environment continuity", () => {
       `<subagents>\r - ${workerId}: A\r</subagents>`,
       `<subagents>\n - ${workerId}: A\vB\n</subagents>`,
       `<subagents>\n - ${workerId}: A\fB\n</subagents>`,
+      `<subagents>\n - ${workerId}: A B\n</subagents>`,
     ]) {
       delta.content[0]!.text = original.replace("</environment_context>", `${inventory}</environment_context>`);
       // The delta itself is rejected: no later rollout or policy check is reached.
