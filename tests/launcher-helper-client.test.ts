@@ -187,6 +187,7 @@ test("a delayed helper Send activation acknowledgement cannot make the timeout r
     ChatGptBrowserWorker.prototype.run = async function(turn) {
       await turn.onPreparedSelected?.(false);
       const page = Object.assign(new EventEmitter(), {
+        evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
         url: () => "https://chatgpt.com/",
         isClosed: () => false,
         evaluate: async () => { throw new Error("No real browser in the helper fixture"); },

@@ -913,6 +913,7 @@ test("two-part saved chats re-prove unchanged effort after the first message cre
   const page = Object.assign(new EventEmitter(), {
     url: () => url, isClosed: () => false,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
   });
   let sends = 0;
   const finished = new Error("final send reached with a current effort proof");
@@ -966,6 +967,7 @@ test("Bigger Context retries one rejected low stage in medium and keeps later st
   });
   const frame = {};
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1070,6 +1072,7 @@ test("Bigger Context does not count a rejected staging Send when adaptive retry 
   });
   const frame = {};
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1143,6 +1146,7 @@ test("Bigger Context propagates a second size rejection after the one medium ret
   });
   const frame = {};
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1211,6 +1215,7 @@ test("Bigger Context promotes a rejected medium staging part to max when Pro is 
   });
   const frame = {};
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1282,6 +1287,7 @@ test("Bigger Context does not retry a size rejection after the browser turn is c
   });
   const frame = {};
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => frame,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1340,6 +1346,7 @@ test("Bigger Context does not promote staging effort for a non-size failure", as
     adapter: "chatgpt-web", baseUrl: `browser://${root}`, chatgptWeb: { browserDiagnosticsPath: root },
   });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => ({}),
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1393,6 +1400,7 @@ test("Full Context staging progresses across 7+ parts and notifies each stage ac
     chatgptWeb: { browserDiagnosticsPath: root, experimentalFullContext: true },
   });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => ({}),
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1450,6 +1458,7 @@ test("Full Context staging supports the 12-part maximum boundary", async () => {
     chatgptWeb: { browserDiagnosticsPath: root, experimentalFullContext: true },
   });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => ({}),
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -1514,6 +1523,7 @@ test("accepted multipart stage with disappearing ACK/DOM surface rebinds and kee
     chatgptWeb: { browserDiagnosticsPath: root, browserHostDescriptorPath: descriptorPath },
   });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => ({}),
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
     locator: () => ({ count: async () => 0 }),
@@ -1593,6 +1603,7 @@ test("accepted multipart stage never resends after acknowledgement timeout or fa
     chatgptWeb: { browserDiagnosticsPath: root },
   });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/", isClosed: () => false, mainFrame: () => ({}),
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
   });
@@ -4169,13 +4180,15 @@ test("manual ChatGPT connector approval pauses and resumes the same browser turn
   expect(fixture.pressed).toEqual([]);
 });
 
-test("an unanswered ChatGPT connector approval is denied instead of aborting the turn", async () => {
+test("an unanswered ChatGPT connector approval explains the permission setting without choosing Deny", async () => {
   const fixture = toolConfirmationPage();
   const pending: boolean[] = [];
-  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2,
-    undefined, async value => { pending.push(value); })).toBeTrue();
+  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2,
+    undefined, async value => { pending.push(value); })).rejects.toMatchObject({
+      code: "chatgpt_tool_approval_required", retryable: false,
+    });
   expect(pending).toEqual([true, false]);
-  expect(fixture.pressed).toEqual(["Deny:click"]);
+  expect(fixture.pressed).toEqual([]);
 });
 
 test("explicit connector auto-approval still selects Allow once", async () => {
@@ -6231,6 +6244,7 @@ test("runBrowserTurn keeps a send timeout ambiguous after the real activation bo
     chatgptWeb: { browserDiagnosticsPath: root },
   });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/",
     isClosed: () => false,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
@@ -6296,6 +6310,7 @@ test("runBrowserTurn stays ambiguous while the send activation acknowledgement i
     chatgptWeb: { browserDiagnosticsPath: root },
   });
   const page = Object.assign(new EventEmitter(), {
+    evaluateHandle: async () => ({ evaluate: async () => false, dispose: async () => {} }),
     url: () => "https://chatgpt.com/",
     isClosed: () => false,
     evaluate: async () => { throw new Error("No real browser in the transport fixture"); },
@@ -6485,14 +6500,18 @@ test("a staged Bigger Context part gets an acknowledgement window sized to its p
 });
 
 test("the suspension clock charges only tick gaps that mean the process was frozen", () => {
-  const clock = new ChatGptSuspensionClock(1_000, 5_000);
-  clock.tick(1_000);
-  clock.tick(2_000);
-  clock.tick(3_100);
+  let now = 0;
+  const clock = new ChatGptSuspensionClock(1_000, 5_000, () => now);
+  clock.tick(now = 1_000);
+  clock.tick(now = 2_000);
+  clock.tick(now = 3_100);
   expect(clock.suspendedMs()).toBe(0);
 
   // Fifteen minutes without a tick is a sleep; the ordinary interval is refunded from the charge.
-  clock.tick(3_100 + 15 * 60_000);
+  now = 3_100 + 15 * 60_000;
+  // The deadline reads before the delayed interval gets a chance to tick.
+  expect(clock.suspendedMs()).toBe(15 * 60_000 - 1_000);
+  clock.tick(now);
   expect(clock.suspendedMs()).toBe(15 * 60_000 - 1_000);
 });
 
