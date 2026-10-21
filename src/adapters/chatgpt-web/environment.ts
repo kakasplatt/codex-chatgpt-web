@@ -474,7 +474,8 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
 const CODEX_THREAD_ID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const CALENDAR_SUBAGENT_INVENTORY_SOURCE = "<subagents>\\s*(?:"
   + "(?:<agent name=\"[^<>\"\\r\\n]+\"\\s*\\/>\\s*)*"
-  + `|(?:-[ \\t]+${CODEX_THREAD_ID_SOURCE}:[ \\t]+[^<>\\s][^<>\\r\\n]*\\s*)+`
+  // A required line break ends each name, keeping a rejected inventory linear to match.
+  + `|(?:-[ \\t]+${CODEX_THREAD_ID_SOURCE}:[ \\t]+[^<>\\s][^<>\\r\\n]*(?:\\r\\n|\\r|\\n)\\s*)+`
   + ")<\\/subagents>\\s*";
 const CALENDAR_ENVIRONMENT_DELTA = new RegExp("^<environment_context>\\s*<current_date>\\d{4}-\\d{2}-\\d{2}<\\/current_date>\\s*"
   + "(?:<timezone>[^<>]+<\\/timezone>\\s*)?<filesystem>\\s*"
