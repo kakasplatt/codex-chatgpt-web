@@ -2385,7 +2385,15 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
     status: "running",
     lastHeartbeatAt: 1,
     deviceEmulationDirty: false,
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        setBackgroundThrottling: value => calls.push(["throttle", value]),
+        invalidate: () => calls.push(["invalidate"]),
+      },
+    },
   };
+  const calls = [];
   let visibilitySyncs = 0;
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[tab.id, tab]]),
@@ -2393,6 +2401,9 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
     syncViewVisibility: () => { visibilitySyncs += 1; },
     snapshot: () => ({ activeTabId: tab.id }),
   });
+
+  BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid);
+  assert.deepEqual(calls, []);
 
   const before = Date.now();
   const heartbeat = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
@@ -2404,6 +2415,7 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   assert.ok(tab.lastHeartbeatAt >= before);
   assert.equal(tab.deviceEmulationDirty, true);
   assert.equal(visibilitySyncs, 1);
+  assert.deepEqual(calls, [["throttle", false], ["invalidate"]]);
   assert.throws(
     () => BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, 445),
     /ownership mismatch: expected 444, received 445/,
@@ -2412,6 +2424,39 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
     () => BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, "yes"),
     /refreshViewport is invalid/,
   );
+});
+
+test("refresh heartbeat skips invalidate on destroyed contents", () => {
+  const calls = [];
+  const tab = {
+    id: "tab-heartbeat-destroyed",
+    traceId: "trace_heartbeat_destroyed",
+    helperPid: 447,
+    status: "running",
+    lastHeartbeatAt: 1,
+    deviceEmulationDirty: false,
+    view: {
+      webContents: {
+        isDestroyed: () => true,
+        setBackgroundThrottling: value => calls.push(["throttle", value]),
+        invalidate: () => calls.push(["invalidate"]),
+      },
+    },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    syncViewVisibility: () => {},
+    snapshot: () => ({ activeTabId: tab.id }),
+  });
+
+  const heartbeat = BrowserHost.prototype.heartbeatTurn.call(fixture, tab.traceId, tab.helperPid, true);
+
+  assert.deepEqual(heartbeat, {
+    rendererHealth: "responsive",
+    rendererStateChangedAt: null,
+  });
+  assert.deepEqual(calls, []);
 });
 
 test("a viewport-refresh heartbeat reapplies hidden emulation before CDP reconnect", () => {
@@ -2431,6 +2476,9 @@ test("a viewport-refresh heartbeat reapplies hidden emulation before CDP reconne
       webContents: {
         enableDeviceEmulation: options => events.push(["emulate", options]),
         disableDeviceEmulation: () => events.push(["disable-emulation"]),
+        isDestroyed: () => false,
+        setBackgroundThrottling: () => {},
+        invalidate: () => {},
       },
     },
   };
