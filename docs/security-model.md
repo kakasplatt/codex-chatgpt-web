@@ -108,6 +108,13 @@ external browser.
 Browser turns use at most five independent task-bound tabs in one private login partition. Every
 outer Codex task owns an exact launcher surface lease and retains its ChatGPT conversation only across
 sequential messages in the same model/effort/compaction epoch; chats are never reused across tasks.
+A retained tab that stops painting can be reloaded only under these conditions:
+- at its own current saved-conversation URL;
+- inside its own lease;
+- before any new message is submitted.
+
+The reload never opens another conversation and never applies to Temporary Chat. It fails closed if
+the URL changes.
 Closing a running tab destroys its page and terminates that turn. The five-tab limit bounds parallel
 account traffic. Tool calls remain in the same ChatGPT response. The
 bounded local continuation cache is private, expires, and exists only to implement Codex

@@ -340,6 +340,23 @@ Do not assume that a generic 502 means the Tunnel is broken. Since v4.0.7, a nat
 outlives its turn binding is reported explicitly as `codex_tool_timeout` and retired rather than
 being presented as an ambiguous proxy success.
 
+## `The retained ChatGPT tab stopped rendering frames; the turn will be retried in a new tab.`
+
+The bridge reused the ChatGPT tab from the previous turn, but that tab stopped painting. ChatGPT
+controls cannot be clicked reliably in that state. Before it placed any prompt or attachment, the
+bridge first asked the launcher to repaint the tab. With saved chats enabled and the tab on a saved
+conversation, it then reloaded that same conversation. Temporary chats are never reloaded, because
+reloading one would destroy it. The repaint did not restore painting, and neither did the reload when
+a reload was allowed (saved chats only), so the turn is retried in a new tab and the full context is
+sent again. Nothing was submitted twice.
+
+The safe log has one `[chatgpt-web] retained_tab_frames` line per reused turn that reached a verdict
+(none if the turn was aborted or the probe itself failed first). It shows the frame count at each
+step (`first`, `afterRepaint`, `afterReload`), whether a reload was allowed (`reloadEligible`), and
+the `outcome`. When the reload itself failed, the optional `reloadError` field carries only the
+error's name, never its message. If `stalled` keeps appearing, include that line, the launcher
+version and whether the launcher window was minimized or hidden in your report.
+
 ## Saved task environment cannot be read
 
 If an interrupted shutdown damages `runtime/thread-environments.json`, start a fresh Codex task.

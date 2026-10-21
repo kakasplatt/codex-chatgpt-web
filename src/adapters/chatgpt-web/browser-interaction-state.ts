@@ -18,6 +18,7 @@ export async function chatGptInteractionState({ selector, sampleFrames }: { sele
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
     };
   });
+  // Keep this rAF loop in sync with chatGptAnimationFrameSample below; page.evaluate serializes each function alone.
   const frames = sampleFrames ? await new Promise<{ count: number; elapsedMs: number }>(resolve => {
     const start = performance.now();
     let count = 0;
@@ -29,4 +30,22 @@ export async function chatGptInteractionState({ selector, sampleFrames }: { sele
     }, 500);
   }) : undefined;
   return { documentHidden: document.hidden, documentFocused: document.hasFocus(), controls, ...(frames ? { frames } : {}) };
+}
+
+/**
+ * Runs in the page. Count animation frames over a window, without labels or conversation text.
+ * Self-contained on purpose: page.evaluate serializes this function alone. Keep the rAF loop in sync
+ * with the `frames` block of chatGptInteractionState above.
+ */
+export async function chatGptAnimationFrameSample({ windowMs }: { windowMs: number }): Promise<{ count: number; elapsedMs: number }> {
+  return new Promise<{ count: number; elapsedMs: number }>(resolve => {
+    const start = performance.now();
+    let count = 0;
+    let frameId = requestAnimationFrame(tick);
+    function tick() { count++; frameId = requestAnimationFrame(tick); }
+    setTimeout(() => {
+      cancelAnimationFrame(frameId);
+      resolve({ count, elapsedMs: Math.round(performance.now() - start) });
+    }, windowMs);
+  });
 }

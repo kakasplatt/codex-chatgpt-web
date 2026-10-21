@@ -1584,6 +1584,14 @@ class BrowserHost {
       // the existing hidden-surface contract before a replacement CDP session is allowed to open.
       tab.deviceEmulationDirty = true;
       this.syncViewVisibility();
+      // A retained tab that was hidden with background throttling can stop producing animation
+      // frames after reuse. The worker only asks for a refresh when the tab does not paint, so
+      // lift the throttle and force a repaint for the exact owned tab.
+      const contents = tab.view?.webContents;
+      if (contents && !contents.isDestroyed()) {
+        contents.setBackgroundThrottling(false);
+        contents.invalidate();
+      }
     }
     return {
       rendererHealth: tab.rendererHealth === "unresponsive" ? "unresponsive" : "responsive",
