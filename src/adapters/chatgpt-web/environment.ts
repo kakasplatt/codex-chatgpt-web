@@ -475,7 +475,8 @@ const CODEX_THREAD_ID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][
 const CALENDAR_SUBAGENT_INVENTORY_SOURCE = "<subagents>\\s*(?:"
   + "(?:<agent name=\"[^<>\"\\r\\n]+\"\\s*\\/>\\s*)*"
   // A required line break ends each name, keeping a rejected inventory linear to match.
-  + `|(?:-[ \\t]+${CODEX_THREAD_ID_SOURCE}:[ \\t]+[^<>\\s][^<>\\r\\n]*(?:\\r\\n|\\r|\\n)\\s*)+`
+  // Names carry no other line or page separators.
+  + `|(?:-[ \\t]+${CODEX_THREAD_ID_SOURCE}:[ \\t]+[^<>\\s][^<>\\r\\n\\u2028\\u2029\\v\\f]*(?:\\r\\n|\\n)\\s*)+`
   + ")<\\/subagents>\\s*";
 const CALENDAR_ENVIRONMENT_DELTA = new RegExp("^<environment_context>\\s*<current_date>\\d{4}-\\d{2}-\\d{2}<\\/current_date>\\s*"
   + "(?:<timezone>[^<>]+<\\/timezone>\\s*)?<filesystem>\\s*"
