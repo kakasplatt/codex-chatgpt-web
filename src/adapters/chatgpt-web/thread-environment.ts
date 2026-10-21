@@ -62,7 +62,14 @@ function contains(root: string, path: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-/** An extra workspace context root that a recovery claim may not introduce. */
+/**
+ * An extra workspace context root that a recovery claim (steering, compaction or a midnight delta)
+ * may not introduce. Adopted roots become the thread's own environment, persisted in the cache;
+ * children without an envelope inherit parent.roots and are checked against them. So a recovery
+ * claim may not add a filesystem root, a Windows namespaced or device spelling, or a root that
+ * equals or contains a trusted Codex home, the bridge data directory or the user home. Roots the
+ * turn start already established from Codex's own envelope are kept by the caller.
+ */
 function isBroadContextRoot(path: string, nativeRoots: Set<string>, protectedRoots: readonly string[]): boolean {
   if (nativeRoots.has(pathIdentity(path))) return false;
   return (process.platform === "win32" && /^[\\/]{2}[?.][\\/]/.test(path))
@@ -244,6 +251,11 @@ export class ChatGptThreadEnvironmentStore {
         });
         if (rollout) {
           let rolloutEnvironment = rollout.environment;
+          // Roots this thread already established at turn start stay valid context (D1).
+          const established = new Set((this.get(rolloutIdentity.threadId)?.roots ?? []).map(pathIdentity));
+          const refusesContext = (roots: string[], nativeRoots: Set<string>) => roots.some(path => (
+            isBroadContextRoot(path, nativeRoots, this.protectedRoots) && !established.has(pathIdentity(path))
+          ));
           // After a restart Codex can omit workspace_roots while still explicitly
           // granting unrestricted access. In that case [cwd] is not a native
           // restriction. Keep the current envelope's workspace context; permissions
@@ -251,7 +263,8 @@ export class ChatGptThreadEnvironmentStore {
           if (!rollout.workspaceRootsDeclared
             && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
             && currentClaim?.environment.sandboxPolicy.type === "dangerFullAccess"
-            && pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd)) {
+            && pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd)
+            && !refusesContext(currentClaim.environment.roots, new Set(rolloutEnvironment.roots.map(pathIdentity)))) {
             rolloutEnvironment = {
               ...rolloutEnvironment,
               roots: [...currentClaim.environment.roots],
@@ -275,7 +288,7 @@ export class ChatGptThreadEnvironmentStore {
               && deltaRoots.length > 0
               && deltaRoots.every(roots => sameRoots(roots, deltaRoots[0]!))
               && [...nativeRoots].every(root => deltaRoots[0]!.has(root))
-              && !calendarDelta.workspaceRoots.at(-1)!.some(path => isBroadContextRoot(path, nativeRoots, this.protectedRoots))
+              && !refusesContext(calendarDelta.workspaceRoots.at(-1)!, nativeRoots)
               ? calendarDelta.workspaceRoots.at(-1)! : undefined;
             if (contextRoots) {
               rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };

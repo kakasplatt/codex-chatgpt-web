@@ -1475,6 +1475,21 @@ describe("trusted Codex task environment continuity", () => {
     }
   }
 
+  // The turn start already cached this broad root from Codex's own envelope; midnight keeps it.
+  test("a broad root already established for the thread survives a midnight delta", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-established-broad-root-"));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    writeFileSync(statePath, JSON.stringify({ version: 1, threads: { [rolloutThreadId]: {
+      cwd: root, roots: [root, codexHome], writableRoots: [root, codexHome],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    } } }));
+    repeatRoots(delta, root, codexHome);
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request).roots)
+      .toEqual([root, codexHome]);
+  });
+
   test("a midnight delta cannot add a trusted Codex home as workspace context", () => {
     const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
     repeatRoots(delta, root, codexHome);
@@ -1867,6 +1882,27 @@ describe("trusted Codex task environment continuity", () => {
       });
     });
   }
+
+  function undeclaredSteeredFixture() {
+    const fixture = steeredRolloutFixture(false, []);
+    const native = readFileSync(fixture.rolloutPath, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+    for (const entry of native) if (entry.type === "turn_context") delete entry.payload.workspace_roots;
+    writeFileSync(fixture.rolloutPath, native.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    return fixture;
+  }
+
+  test("steering still adopts a sibling auxiliary root when the rollout omits workspace_roots", () => {
+    const { codexHome, request, auxiliary } = undeclaredSteeredFixture();
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots)
+      .toEqual([root, auxiliary]);
+  });
+
+  test("steering cannot widen omitted full-access roots with a trusted Codex home", () => {
+    const { codexHome, request, environment, auxiliary } = undeclaredSteeredFixture();
+    environment.content[1]!.text = environment.content[1]!.text.replace(`<root>${auxiliary}</root>`, `<root>${codexHome}</root>`);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Steering environment conflicts with its current Codex rollout (fields: workspace_roots, writable_roots)");
+  });
 
   // Reproduction from @itruonghai in PR #728, with additional grant-boundary checks.
   for (const declaredRoots of [true, false]) test(`steering accepts native output grants with ${declaredRoots ? "declared" : "omitted"} rollout workspace roots`, () => {
