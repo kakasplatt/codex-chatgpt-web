@@ -30,6 +30,8 @@ A regra "contém root nativo" sai. Um root amplo só é recusado quando é **nov
 
 ## Decisões para revisão do usuário
 
+> **Emenda (2026-10-21):** aprovada em `docs/superpowers/plans/2026-10-21-pr28-review-fixes.md`. Com vários Codex homes não há cache nem herança por cache, então nenhuma recusa de root amplo se aplica; a regra abaixo vale só com um único Codex home.
+
 - **D1 — onde aplicar a proteção (recomendado: b).**
   - **(a)** Aplicar também no início do turno (`thread-environment.ts:196`): um workspace com root amplo falha logo ao começar.
   - **(b)** Manter o início do turno como está. Nos ramos de recuperação (claim e delta de calendário), recusar um root amplo **só se ele não estiver** nos roots já estabelecidos para o thread no cache.
