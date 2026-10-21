@@ -68,6 +68,9 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+// Only Windows folds case. macOS stays case-sensitive on purpose: folding would merge distinct
+// paths on case-sensitive APFS volumes, and realpath would change symlink semantics. A case
+// mismatch therefore fails closed.
 function pathIdentity(value: string): string {
   const normalized = resolve(value);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;

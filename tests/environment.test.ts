@@ -1441,6 +1441,14 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  // Decision D2: macOS path identity stays case-sensitive, so a case mismatch fails closed.
+  test.skipIf(process.platform !== "darwin")("macOS keeps root identity case-sensitive and fails closed on a case mismatch", () => {
+    const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
+    repeatRoots(delta, root.toUpperCase());
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
   test("a midnight delta without the rollout cwd cannot replace omitted full-access roots", () => {
     const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
     repeatRoots(delta, visualizationRoot);
