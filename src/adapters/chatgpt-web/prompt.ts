@@ -52,6 +52,11 @@ export interface CompileChatGptWebPromptOptions {
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
   experimentalMultipartMode?: ChatGptWebMultipartContextMode;
   /**
+   * Internal to the multipart planner: token counts keyed by the exact record text, valid for a
+   * single planning call so candidate part counts do not re-tokenize identical records.
+   */
+  multipartRecordTokenCache?: Map<string, number>;
+  /**
    * Manual Zero Risk transport keeps ChatGPT model/effort selection and prompt submission under the
    * user's control. The browser bridge may open the owned tab and copy this prompt, but it never
    * reads or mutates ChatGPT's DOM. Completion is accepted only through the bound Zero Risk MCP tools.
@@ -355,9 +360,17 @@ interface MultipartRecordWeight {
   chars: number;
 }
 
-function multipartRecordWeight(record: MultipartContextRecord): MultipartRecordWeight {
+function multipartRecordWeight(
+  record: MultipartContextRecord,
+  tokenCache?: Map<string, number>,
+): MultipartRecordWeight {
   const text = withoutRetiredTurnHandles(JSON.stringify(record));
-  return { tokens: estimateTokens(text) + 1, chars: text.length + 1 };
+  let tokens = tokenCache?.get(text);
+  if (tokens === undefined) {
+    tokens = estimateTokens(text);
+    tokenCache?.set(text, tokens);
+  }
+  return { tokens: tokens + 1, chars: text.length + 1 };
 }
 
 function partitionMultipartRecordWeights(
@@ -412,11 +425,11 @@ function partitionMultipartRecordWeights(
  */
 function partitionMultipartContext(
   records: readonly MultipartContextRecord[],
+  weights: readonly MultipartRecordWeight[],
   totalParts: ChatGptWebMultipartPartCount,
   budgets: readonly MultipartRecordWeight[],
 ): ChatGptWebMultipartParts {
   if (budgets.length !== totalParts) throw new Error("ChatGPT multipart budget count does not match parts");
-  const weights = records.map(multipartRecordWeight);
   const boundaries = partitionMultipartRecordWeights(weights, budgets);
   let offset = 0;
   const groups = boundaries.map(end => {
@@ -734,6 +747,8 @@ export function compileChatGptWebPrompt(
       const stagingEfforts = backendModel === CHATGPT_WEB_LUNA_MODEL_ID ? ["low"] as const
         : capabilities.proAvailable ? ["max"] as const : ["low", "medium"] as const;
       const emptyParts = multipart.parts;
+      // Record weights do not depend on the staging effort, so weigh each record once.
+      const weights = records.map(record => multipartRecordWeight(record, options?.multipartRecordTokenCache));
       for (const stagingEffort of stagingEfforts) {
         multipart.parts = emptyParts;
         const budgets = multipart.parts.map((payload, index) => {
@@ -758,7 +773,7 @@ export function compileChatGptWebPrompt(
           }
           return { tokens, chars, tokenLimit, charLimit: limits.browserComposerCharLimit ?? Infinity };
         });
-        multipart.parts = partitionMultipartContext(records, multipartParts!, budgets);
+        multipart.parts = partitionMultipartContext(records, weights, multipartParts!, budgets);
         if (stagingEfforts.length > 1 && stagingEffort === "low" && multipart.parts.some((payload, index) => {
           const final = index === multipart.parts.length - 1;
           const text = final ? formatChatGptWebMultipartCommit(multipart, transactionId)
