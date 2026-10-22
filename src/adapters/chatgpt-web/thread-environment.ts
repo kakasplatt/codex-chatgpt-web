@@ -238,6 +238,7 @@ export class ChatGptThreadEnvironmentStore {
       }
       const currentClaim = initialClaim ?? (currentCompaction
         ? extractChatGptContinuationEnvironmentClaim(parsed) : steeringClaim ?? nativeCompaction?.claim);
+      const resolvedCalendarDelta = calendarDelta ?? currentClaim?.calendarDelta;
       const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
       // Automatic compaction has a current turn_context; standalone compaction has only its
       // source turn_context. Either must be the latest native record, never an arbitrary ancestor.
@@ -281,12 +282,12 @@ export class ChatGptThreadEnvironmentStore {
               writableRoots: [...currentClaim.environment.roots],
             };
           }
-          if (calendarDelta) {
+          if (resolvedCalendarDelta) {
             const nativeRoots = new Set(rolloutEnvironment.roots.map(pathIdentity));
-            const deltaRoots = calendarDelta.workspaceRoots.map(roots => new Set(roots.map(pathIdentity)));
+            const deltaRoots = resolvedCalendarDelta.workspaceRoots.map(roots => new Set(roots.map(pathIdentity)));
             const sameRoots = (left: Set<string>, right: Set<string>) => left.size === right.size
               && [...left].every(root => right.has(root));
-            if (calendarDelta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)) {
+            if (resolvedCalendarDelta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)) {
               throw new Error("Calendar environment delta conflicts with its current Codex rollout");
             }
             // As above, an omitted unrestricted rollout root list is not a native restriction. The
@@ -298,8 +299,8 @@ export class ChatGptThreadEnvironmentStore {
               && deltaRoots.length > 0
               && deltaRoots.every(roots => sameRoots(roots, deltaRoots[0]!))
               && [...nativeRoots].every(root => deltaRoots[0]!.has(root))
-              && !refusesContext(calendarDelta.workspaceRoots.at(-1)!, nativeRoots)
-              ? calendarDelta.workspaceRoots.at(-1)! : undefined;
+              && !refusesContext(resolvedCalendarDelta.workspaceRoots.at(-1)!, nativeRoots)
+              ? resolvedCalendarDelta.workspaceRoots.at(-1)! : undefined;
             if (contextRoots) {
               rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };
             } else if (deltaRoots.some(roots => !sameRoots(roots, nativeRoots))) {

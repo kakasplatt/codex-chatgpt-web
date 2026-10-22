@@ -1632,6 +1632,64 @@ describe("trusted Codex task environment continuity", () => {
     });
   }
 
+  // Turns a midnight fixture into a native compaction continuation whose full-access preamble lists preambleRoots.
+  function asCompactionContinuation(fixture: ReturnType<typeof midnightRolloutFixture>, summary: string, preambleRoots: string[]) {
+    const { request, body, delta } = fixture;
+    const previous = body.input[0]!;
+    previous.internal_chat_message_metadata_passthrough = { turn_id: rolloutParentId };
+    rememberCompactionContinuation({ ...request, _compactionRequest: true }, extractChatGptTurnIdentity(request), [
+      { turnId: rolloutParentId, content: previous.content },
+    ], summary);
+    const preamble = `<environment_context>\n  <cwd>${root}</cwd>\n  <filesystem><workspace_roots>${preambleRoots.map(path => `<root>${path}</root>`).join("")}</workspace_roots>${dangerFullAccessProfileXml}</filesystem>\n</environment_context>`;
+    body.input = [{ type: "message", role: "user", id: "msg_compacted_full_access_environment",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: rolloutTurnId, content_item_kinds: ["environments.environment_context"],
+      }, content: [{ type: "input_text", text: preamble }] }, previous,
+    { type: "compaction", encrypted_content: encodeCompactionSummary(summary) }, delta];
+    (request._rawBody as { input: typeof body.input }).input = body.input;
+  }
+
+  // conflictingAuthorityFields bounds a compaction-carried delta to the claim's roots; B and D pin the guards.
+  test("compaction plus midnight keeps repeated workspace context when a full-access rollout omits workspace_roots", () => {
+    const fixture = undeclaredRolloutMidnightFixture();
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = fixture;
+    repeatRoots(delta, root, visualizationRoot);
+    asCompactionContinuation(fixture, "Compaction midnight repeated full-access roots", [root, visualizationRoot]);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+      cwd: root,
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
+  test("compaction plus midnight cannot add a trusted Codex home as workspace context", () => {
+    const fixture = undeclaredRolloutMidnightFixture();
+    const { codexHome, request, delta, repeatRoots } = fixture;
+    repeatRoots(delta, root, codexHome);
+    asCompactionContinuation(fixture, "Compaction midnight Codex home roots", [root, codexHome]);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("compaction plus midnight rejects delta roots beyond its full environment claim", () => {
+    const fixture = undeclaredRolloutMidnightFixture();
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = fixture;
+    repeatRoots(delta, root, visualizationRoot);
+    asCompactionContinuation(fixture, "Compaction midnight roots beyond claim", [root]);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("Compaction continuation environment conflicts with its current Codex rollout (fields: workspace_roots)");
+  });
+
+  test("compaction plus midnight accepts a native bullet worker inventory (#27)", () => {
+    const fixture = midnightRolloutFixture();
+    const { codexHome, request, delta } = fixture;
+    delta.content[0]!.text = delta.content[0]!.text.replace("</environment_context>",
+      `${nativeBulletInventory}</environment_context>`);
+    asCompactionContinuation(fixture, "Compaction midnight bullet inventory", [root]);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+  });
+
   test("a rejected bullet worker inventory fails closed without exponential backtracking", () => {
     const { codexHome, request, delta } = midnightRolloutFixture();
     const original = delta.content[0]!.text;
@@ -2222,6 +2280,99 @@ describe("trusted Codex task environment continuity", () => {
       expect(() => store.resolve(request)).toThrow("missing cwd");
     },
   );
+
+  test.each(["v1", "v2"])("%s compaction continuation validates a later same-turn midnight delta", format => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    const previous = body.input[0]!;
+    previous.internal_chat_message_metadata_passthrough = { turn_id: rolloutParentId };
+    const summary = `Midnight after completed compaction ${format}`;
+    rememberCompactionContinuation({ ...request, _compactionRequest: true }, extractChatGptTurnIdentity(request), [
+      { turnId: rolloutParentId, content: previous.content },
+    ], summary);
+    const current = {
+      type: "message", role: "user", id: "msg_compacted_environment",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: rolloutTurnId, content_item_kinds: ["agents_md.instructions", "environments.environment_context"],
+      },
+      content: [{ type: "input_text", text: "# AGENTS.md instructions\n<INSTRUCTIONS>Preserve work.</INSTRUCTIONS>" },
+        { type: "input_text", text: environmentXml }],
+    };
+    const delta = {
+      type: "message", role: "user", id: "msg_after_compaction_midnight",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: rolloutTurnId, content_item_kinds: ["environments.environment_context"],
+      },
+      content: [{ type: "input_text", text: `<environment_context>
+<current_date>2026-10-21</current_date><timezone>America/New_York</timezone>
+<filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+<subagents><agent name="/root/reviewer" /></subagents></environment_context>` }],
+    };
+    body.input = [current, previous, format === "v1"
+      ? { type: "message", role: "user", content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n${summary}` }] }
+      : { type: "compaction", encrypted_content: encodeCompactionSummary(summary) }, delta];
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    expect(store.resolve(request).cwd).toBe(root);
+    // A second claim in the rebuilt base message must not be skipped by the
+    // calendar scan, which starts after that entire message (#884 review).
+    for (const text of [environmentXml.replaceAll(root, resolve(root, "conflicting-cwd")), environmentXml]) {
+      current.content.push({ type: "input_text", text });
+      expect(() => store.resolve(request)).toThrow();
+      current.content.pop();
+    }
+    expect(store.resolve(request).cwd).toBe(root);
+    const valid = delta.content[0]!.text;
+    for (const malformed of [
+      valid.replaceAll(root, resolve(root, "ungranted")),
+      valid.replace(dangerFullAccessProfileXml, readOnlyProfileXml),
+      valid.replace("</environment_context>", "<cwd>/unexpected</cwd></environment_context>"),
+      valid.replace("</subagents>", '<agent name="bad" cwd="/unexpected" /></subagents>'),
+    ]) {
+      delta.content[0]!.text = malformed;
+      expect(() => store.resolve(request)).toThrow();
+    }
+    delta.content[0]!.text = valid;
+    body.input.push({ ...current, id: "msg_duplicate_full_environment" });
+    expect(() => store.resolve(request)).toThrow();
+    body.input.pop();
+    const native = readFileSync(rolloutPath, "utf8");
+    writeFileSync(rolloutPath, native.replaceAll(rolloutTurnId, rolloutParentId));
+    expect(() => store.resolve(request)).toThrow();
+    writeFileSync(rolloutPath, native);
+    expect(store.resolve(request).cwd).toBe(root);
+    rmSync(rolloutPath);
+    expect(() => store.resolve(request)).toThrow();
+  });
+
+  for (const mode of ["workspace-write", "read-only"] as const) for (const networkAccess of [false, true]) {
+    test(`compaction plus midnight keeps native ${mode} network=${networkAccess}`, () => {
+      const { codexHome, request, body, delta, rolloutPath } = managedMidnightFixture(mode, networkAccess);
+      const previous = body.input[0]!;
+      previous.internal_chat_message_metadata_passthrough = { turn_id: rolloutParentId };
+      const summary = `Managed compaction plus midnight ${mode} ${networkAccess}`;
+      rememberCompactionContinuation({ ...request, _compactionRequest: true }, extractChatGptTurnIdentity(request), [
+        { turnId: rolloutParentId, content: previous.content },
+      ], summary);
+      const profile = mode === "workspace-write" ? workspaceWriteProfileXml : readOnlyProfileXml;
+      body.input = [{ type: "message", role: "user", id: "msg_managed_compacted_environment",
+        internal_chat_message_metadata_passthrough: {
+          turn_id: rolloutTurnId, content_item_kinds: ["environments.environment_context"],
+        }, content: [{ type: "input_text", text: filesystemEnvironmentXml(profile) }] }, previous,
+      { type: "compaction", encrypted_content: encodeCompactionSummary(summary) }, delta];
+      (request._rawBody as { input: typeof body.input }).input = body.input;
+      const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+      const actual = store.resolve(request);
+      expect(actual.sandboxPolicy).toMatchObject({ type: mode === "workspace-write" ? "workspaceWrite" : "readOnly", networkAccess });
+      expect(actual.writableRoots).toEqual(mode === "workspace-write" ? [root] : []);
+      const original = delta.content[0]!.text;
+      delta.content[0]!.text = original.replace('<entry access="read"><special>:root</special></entry>',
+        '<entry access="write"><special>:root</special></entry>');
+      expect(() => store.resolve(request)).toThrow();
+      delta.content[0]!.text = original;
+      rmSync(rolloutPath);
+      expect(() => store.resolve(request)).toThrow();
+    });
+  }
 
   test.each(["v1", "v2"])("%s recovered delegation still requires current rollout environment proof", format => {
     const { codexHome, request, rolloutPath } = resumedRootFixture();
