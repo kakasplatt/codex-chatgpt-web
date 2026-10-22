@@ -7,6 +7,7 @@ coverage
 dist
 launcher/artifacts
 launcher/build
+launcher/node_modules
 launcher/release
 graphify-out
 node_modules
