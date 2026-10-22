@@ -7,8 +7,18 @@ import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
+/**
+ * These fixtures bind a Unix socket under their temp root (`<root>/broker.sock` or the default
+ * `<root>/runtime/turn-broker.sock`). macOS puts TMPDIR at /var/folders/<2 chars>/<30 chars>/T
+ * (about 48 bytes), which pushed the longest fixture path to 106 bytes, past the 103-byte sun_path
+ * limit the broker enforces before listen(). Root them somewhere short so every socket is bindable.
+ */
+function shortSocketTempRoot(): string {
+  return process.platform === "win32" ? tmpdir() : "/tmp";
+}
+
 test.skipIf(process.platform === "win32")("closing a rejected broker leaves the live socket reachable", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-owner-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-owner-"));
   const endpoint = join(root, "broker.sock");
   const server = createServer(socket => {
     socket.once("data", bytes => {
@@ -33,7 +43,7 @@ test.skipIf(process.platform === "win32")("closing a rejected broker leaves the 
 });
 
 test.skipIf(process.platform === "win32")("a broker whose endpoint was busy at startup recovers once it is released", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-retry-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-retry-"));
   const endpoint = join(root, "broker.sock");
   const previousOwner = createServer(socket => socket.destroy());
   const broker = TurnBroker.forSocket(endpoint);
@@ -245,7 +255,7 @@ test("settled replay sessions expire from their last use instead of their creati
 });
 
 test("turn broker creates its private runtime directory on a cold start", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-broker-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-broker-"));
   const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
   try {
@@ -281,7 +291,7 @@ test("turn broker rejects a Unix socket path that leaves no room for sun_path's 
 });
 
 test("turn broker tokens do not expire while their browser turn is still alive", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-broker-unbounded-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-broker-unbounded-"));
   const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
   try {
@@ -302,7 +312,7 @@ test("turn broker tokens do not expire while their browser turn is still alive",
 });
 
 test("turn broker revokes only channels owned by the closed browser trace", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-broker-targeted-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-broker-targeted-"));
   const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
   try {
@@ -327,7 +337,7 @@ test("turn broker revokes only channels owned by the closed browser trace", asyn
 });
 
 function unansweredBrokerEndpoint(name: string, onConnection: (socket: Socket) => void) {
-  const root = mkdtempSync(join(tmpdir(), name));
+  const root = mkdtempSync(join(shortSocketTempRoot(), name));
   const socketPath = defaultBrokerEndpoint(root);
   if (!isWindowsPipeEndpoint(socketPath)) mkdirSync(dirname(socketPath), { recursive: true });
   const server = createServer(onConnection);
@@ -390,7 +400,7 @@ test("bounded broker calls preserve server-owned closure before advancing the li
 });
 
 test("broker shutdown succeeds immediately after a bounded rejected claim", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-broker-rejected-close-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-broker-rejected-close-"));
   const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
   try {
@@ -475,7 +485,7 @@ test("an unbounded broker call outlives the bounded default timeout", async () =
 }, 15_000);
 
 test("turn broker names the finished turn that owns a replayed handle", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-broker-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-broker-"));
   const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
   try {
@@ -527,7 +537,7 @@ test("turn broker names the finished turn that owns a replayed handle", async ()
 });
 
 test("turn broker rejects late or stale compaction handoffs after timeout, abort, or consumption", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cgw-broker-compaction-"));
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-broker-compaction-"));
   const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
   try {

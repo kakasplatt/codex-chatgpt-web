@@ -167,6 +167,8 @@ export function resolveFullContextMultipartPlan(
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
 
+  // Scoped to this planning call: record token counts do not depend on the candidate part count.
+  const multipartRecordTokenCache = new Map<string, number>();
   const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed,
     capabilities,
@@ -177,6 +179,7 @@ export function resolveFullContextMultipartPlan(
       experimentalMultipartMode: "full",
       experimentalSkillAttachments,
       captureCheckpoint: includeFullCheckpoint ? "full" : undefined,
+      multipartRecordTokenCache,
     },
   );
 
