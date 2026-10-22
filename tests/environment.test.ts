@@ -1649,6 +1649,7 @@ describe("trusted Codex task environment continuity", () => {
     (request._rawBody as { input: typeof body.input }).input = body.input;
   }
 
+  // conflictingAuthorityFields bounds a compaction-carried delta to the claim's roots; B and D pin the guards.
   test("compaction plus midnight keeps repeated workspace context when a full-access rollout omits workspace_roots", () => {
     const fixture = undeclaredRolloutMidnightFixture();
     const { codexHome, request, delta, visualizationRoot, repeatRoots } = fixture;
@@ -1677,7 +1678,7 @@ describe("trusted Codex task environment continuity", () => {
     const { codexHome, request, delta, visualizationRoot, repeatRoots } = fixture;
     repeatRoots(delta, root, visualizationRoot);
     asCompactionContinuation(fixture, "Compaction midnight roots beyond claim", [root]);
-    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("Compaction continuation environment conflicts with its current Codex rollout");
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("Compaction continuation environment conflicts with its current Codex rollout (fields: workspace_roots)");
   });
 
   test("compaction plus midnight accepts a native bullet worker inventory (#27)", () => {
