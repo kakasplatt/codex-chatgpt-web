@@ -8,6 +8,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "bun run scripts/dev.cjs",
+    "postinstall": "node node_modules/electron/install.js",
     "audit": "bun audit",
     "typecheck": "tsc --noEmit",
     "build:renderer": "vite build",
@@ -31,7 +32,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "41.10.7",
+    "electron": "43.8.3",
     "electron-builder": "^26.8.1",
     "typescript": "^5.9.3",
     "vite": "^6.4.4"
