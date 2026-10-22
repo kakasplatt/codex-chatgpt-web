@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
-import { isNativeAgentsMdContext } from "../../responses/native-context";
+import { isNativeAgentsMdContext, readNativeThreadDelegation } from "../../responses/native-context";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { isAcceptedCompactionContinuation, recoverCompactionInstruction } from "./compaction-continuation";
 
@@ -215,14 +215,7 @@ function compactionSummaryMessage(value: Record<string, unknown>): boolean {
 
 /** The desktop injects cross-task messages as synthetic tool outputs without a call_id. */
 function isDelegatedInstruction(item: Record<string, unknown> | undefined): boolean {
-  if (item?.type !== "function_call_output" || item.name !== "send_message_to_thread"
-    || item.namespace !== "codex_app" || item.call_id !== undefined
-    || typeof item.id !== "string" || !item.id || !itemTurnId(item)?.trim()
-    || typeof item.output !== "string") return false;
-  // The native producer escapes &, < and > in both fields. Reject extra/nested tags and
-  // malformed entities; keep the original text as task content, never environment authority.
-  const fields = /^<codex_delegation>\s*<source_thread_id>([^<>]+)<\/source_thread_id>\s*<input>([^<>]+)<\/input>\s*<\/codex_delegation>$/.exec(item.output.trim());
-  return fields !== null && fields.slice(1).every(text => text.trim() && !/&(?!amp;|lt;|gt;)/.test(text));
+  return item !== undefined && readNativeThreadDelegation(item) !== undefined;
 }
 
 /** V2 agent_message instructions must still come from this child's direct parent. */
@@ -349,10 +342,18 @@ export function extractChatGptCompactionSourceRevision(
   parsed: CodexParsedRequest,
   options: { recoverCheckpoint?: boolean } = {},
 ): ChatGptTurnUserRevision {
-  if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
-  const revision = latestChatGptTurnUserRevision(parsed, extractChatGptTurnIdentity(parsed).turnId, options.recoverCheckpoint !== false);
+  const revision = findChatGptCompactionSourceRevision(parsed, options);
   if (!revision) throw new Error("ChatGPT web compaction requires a source user message");
   return revision;
+}
+
+/** A retained representation can have context but no instruction; it adds no source alias. */
+export function findChatGptCompactionSourceRevision(
+  parsed: CodexParsedRequest,
+  options: { recoverCheckpoint?: boolean } = {},
+): ChatGptTurnUserRevision | undefined {
+  if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
+  return latestChatGptTurnUserRevision(parsed, extractChatGptTurnIdentity(parsed).turnId, options.recoverCheckpoint !== false);
 }
 
 /** A completed checkpoint identifies the current turn's rebuilt environment preamble. */
@@ -369,6 +370,11 @@ export function isChatGptCompactionContinuation(parsed: CodexParsedRequest): boo
       : isAcceptedCompactionContinuation(parsed, identity, revision));
 }
 
+export interface ChatGptCalendarEnvironmentDelta {
+  workspaceRoots: string[][];
+  filesystemProfiles: string[];
+}
+
 export interface ChatGptEnvironmentClaim {
   environment: ChatGptTurnEnvironment;
   /**
@@ -376,6 +382,8 @@ export interface ChatGptEnvironmentClaim {
    * in the native turn context. Only the legacy sandbox_mode envelope carried a network statement.
    */
   statesNetworkAccess: boolean;
+  /** Later calendar fragments remain claims until the current rollout corroborates them. */
+  calendarDelta?: ChatGptCalendarEnvironmentDelta;
 }
 
 function environmentClaim(parsed: CodexParsedRequest, text: string): ChatGptEnvironmentClaim {
@@ -389,7 +397,7 @@ function environmentClaim(parsed: CodexParsedRequest, text: string): ChatGptEnvi
 export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRequest): ChatGptEnvironmentClaim {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   const body = record(parsed._rawBody);
-  const updates = (Array.isArray(body?.input) ? body.input : []).flatMap(value => {
+  const updates = (Array.isArray(body?.input) ? body.input : []).flatMap((value, index) => {
     const item = record(value);
     if (item?.type !== "message" || item.role !== "user" || itemTurnId(item) !== turnId
       || typeof item.id !== "string" || !item.id) return [];
@@ -400,11 +408,21 @@ export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRe
     return parts.flatMap(value => {
       if (typeof value !== "string") return [];
       const text = value.trim();
-      return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text) ? [text] : [];
+      return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text) ? [{ text, index }] : [];
     });
   });
-  if (updates.length !== 1) throw new Error("Compaction continuation requires one current native environment claim");
-  return environmentClaim(parsed, updates[0]!);
+  if (updates.length === 1) return environmentClaim(parsed, updates[0]!.text);
+  // A rebuilt full preamble followed by midnight's date-only fragment is one
+  // environment plus a delta, not two competing complete grants. Every later
+  // fragment must pass the existing strict calendar parser, and the store must
+  // still compare its roots/profile with the exact current native rollout.
+  const first = updates[0];
+  if (first && updates.some((update, index) => index > 0 && update.index === first.index)) {
+    throw new Error("Compaction continuation requires one current native environment claim");
+  }
+  const calendarDelta = first && extractChatGptCalendarEnvironmentDelta(parsed, { afterEnvironmentIndex: first.index });
+  if (!first || !calendarDelta) throw new Error("Compaction continuation requires one current native environment claim");
+  return { ...environmentClaim(parsed, first.text), calendarDelta };
 }
 
 /**
@@ -502,18 +520,24 @@ const CALENDAR_ENVIRONMENT_DELTA = new RegExp("^<environment_context>\\s*<curren
  * still requires this exact turn's native rollout and corroborating current sandbox metadata.
  * Unknown profiles/fields are deliberately not classified as permission-neutral updates.
  */
-export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): {
-  workspaceRoots: string[][];
-  filesystemProfiles: string[];
-} | undefined {
+export function extractChatGptCalendarEnvironmentDelta(
+  parsed: CodexParsedRequest,
+  options?: { afterEnvironmentIndex: number },
+): ChatGptCalendarEnvironmentDelta | undefined {
   const metadata = clientTurnMetadata(parsed);
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!metadata || !turnId) return undefined;
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
-  const activeIndex = input.findLastIndex(value => isNativeInstruction(record(value), metadata));
+  const activeIndex = options?.afterEnvironmentIndex
+    ?? input.findLastIndex(value => isNativeInstruction(record(value), metadata));
   const active = record(input[activeIndex]);
   if (itemTurnId(active) !== turnId || typeof active?.id !== "string" || !active.id) return undefined;
+  if (options) {
+    const kinds = record(active.internal_chat_message_metadata_passthrough)?.content_item_kinds;
+    if (active.type !== "message" || active.role !== "user" || !Array.isArray(kinds)
+      || !kinds.includes("environments.environment_context")) return undefined;
+  }
 
   let deltas = 0;
   const workspaceRoots: string[][] = [];
