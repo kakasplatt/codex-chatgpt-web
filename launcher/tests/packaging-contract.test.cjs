@@ -25,10 +25,14 @@ test("the full verification gate audits launcher dependencies", () => {
   assert.match(verify, /await run\(\["run", "launcher:audit"\]\);/);
 });
 
-test("launcher tests install the Electron binary once before node --test runs", () => {
-  // Electron 42+ no longer downloads its binary in postinstall; several test files load
-  // browser-host.cjs (require("electron")) in parallel processes, so install it up front.
-  assert.equal(manifest.scripts.pretest, "node node_modules/electron/install.js");
+test("installing launcher dependencies installs the Electron binary before any test or dev run", () => {
+  // Electron 42+ dropped its own postinstall, so the binary is no longer downloaded by
+  // `bun install`. Root tests (tests/compaction-browser-recovery.test.ts and
+  // tests/zero-risk-adapter.test.ts) and launcher tests load browser-host.cjs
+  // (require("electron")), and `bun run verify` runs the root tests before the launcher
+  // tests, so a pretest hook would be too late. Install the binary at install time instead.
+  assert.equal(manifest.scripts.postinstall, "node node_modules/electron/install.js");
+  assert.equal(manifest.scripts.pretest, undefined);
   assert.equal(manifest.scripts.test, "node --test tests/*.test.cjs");
 });
 

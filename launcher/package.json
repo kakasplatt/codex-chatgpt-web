@@ -8,6 +8,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "bun run scripts/dev.cjs",
+    "postinstall": "node node_modules/electron/install.js",
     "audit": "bun audit",
     "typecheck": "tsc --noEmit",
     "build:renderer": "vite build",
@@ -18,7 +19,6 @@
     "package:win": "bun run build && bun run build:runtime && bun run scripts/package.cjs --win",
     "package:linux": "bun run build && bun run build:runtime && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
-    "pretest": "node node_modules/electron/install.js",
     "test": "node --test tests/*.test.cjs",
     "start": "electron ."
   },
