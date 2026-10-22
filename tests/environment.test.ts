@@ -1523,8 +1523,10 @@ describe("trusted Codex task environment continuity", () => {
     temporaryRoots.push(fakeHome, bridgeHome);
     repeatRoots(delta, root, fakeHome);
     // Keep the bridge data directory outside the fake home so only the home rule can refuse it.
-    withEnvironment({ USERPROFILE: fakeHome, HOME: fakeHome, CODEX_CHATGPT_WEB_HOME: bridgeHome }, () => {
-      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+    // The home is injected because Bun on POSIX caches the startup HOME for os.homedir().
+    withEnvironment({ CODEX_CHATGPT_WEB_HOME: bridgeHome }, () => {
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome, undefined, undefined, fakeHome)
+        .resolve(request))
         .toThrow("Calendar environment delta conflicts");
     });
   });

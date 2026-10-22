@@ -191,9 +191,11 @@ export class ChatGptThreadEnvironmentStore {
     codexHome: string = getCodexHome(),
     private readonly sqliteHome?: string,
     additionalCodexHomes?: readonly string[],
+    // Guarded against becoming a broad context root; injectable for tests.
+    userHome: string = homedir(),
   ) {
     this.codexHomes = getTrustedCodexHomes(codexHome, additionalCodexHomes);
-    this.protectedRoots = [...this.codexHomes, getConfigDir(), homedir()];
+    this.protectedRoots = [...this.codexHomes, getConfigDir(), userHome];
   }
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
