@@ -176,8 +176,9 @@ code {
   pointer-events: none;
 }
 
+/* Electron 43 places the overlay controls per the native layout (left on some Linux desktops). */
 .app-root:not([data-platform="darwin"]) .titlebar-left {
-  left: 8px;
+  left: calc(env(titlebar-area-x, 0px) + 8px);
 }
 
 .app-root:not([data-platform="darwin"]) .titlebar-left .icon-button {
@@ -2260,7 +2261,7 @@ code {
 }
 
 .app-root:not([data-platform="darwin"]) .welcome-top {
-  padding-left: 20px;
+  padding-left: calc(env(titlebar-area-x, 0px) + 20px);
 }
 
 .welcome-brand {

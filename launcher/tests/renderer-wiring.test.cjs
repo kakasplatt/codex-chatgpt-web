@@ -971,3 +971,15 @@ test("catalog recovery clears its error banner but preserves a newer unrelated f
   callback({ name: "catalog-verification", status: "completed", message: "Loaded" });
   assert.equal(error, "Setup error");
 });
+
+test("non-darwin title bar insets follow the Window Controls Overlay", () => {
+  assert.match(
+    stylesSource,
+    /\.app-root:not\(\[data-platform="darwin"\]\) \.titlebar-left\s*\{[^}]*left:\s*calc\(env\(titlebar-area-x, 0px\) \+ 8px\);/s,
+  );
+  assert.match(
+    stylesSource,
+    /\.app-root:not\(\[data-platform="darwin"\]\) \.welcome-top\s*\{[^}]*padding-left:\s*calc\(env\(titlebar-area-x, 0px\) \+ 20px\);/s,
+  );
+  assert.match(stylesSource, /\.titlebar-left\s*\{[^}]*left:\s*76px;/s);
+});
