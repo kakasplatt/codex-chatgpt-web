@@ -1632,6 +1632,63 @@ describe("trusted Codex task environment continuity", () => {
     });
   }
 
+  // Turns a midnight fixture into a native compaction continuation whose full-access preamble lists preambleRoots.
+  function asCompactionContinuation(fixture: ReturnType<typeof midnightRolloutFixture>, summary: string, preambleRoots: string[]) {
+    const { request, body, delta } = fixture;
+    const previous = body.input[0]!;
+    previous.internal_chat_message_metadata_passthrough = { turn_id: rolloutParentId };
+    rememberCompactionContinuation({ ...request, _compactionRequest: true }, extractChatGptTurnIdentity(request), [
+      { turnId: rolloutParentId, content: previous.content },
+    ], summary);
+    const preamble = `<environment_context>\n  <cwd>${root}</cwd>\n  <filesystem><workspace_roots>${preambleRoots.map(path => `<root>${path}</root>`).join("")}</workspace_roots>${dangerFullAccessProfileXml}</filesystem>\n</environment_context>`;
+    body.input = [{ type: "message", role: "user", id: "msg_compacted_full_access_environment",
+      internal_chat_message_metadata_passthrough: {
+        turn_id: rolloutTurnId, content_item_kinds: ["environments.environment_context"],
+      }, content: [{ type: "input_text", text: preamble }] }, previous,
+    { type: "compaction", encrypted_content: encodeCompactionSummary(summary) }, delta];
+    (request._rawBody as { input: typeof body.input }).input = body.input;
+  }
+
+  test("compaction plus midnight keeps repeated workspace context when a full-access rollout omits workspace_roots", () => {
+    const fixture = undeclaredRolloutMidnightFixture();
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = fixture;
+    repeatRoots(delta, root, visualizationRoot);
+    asCompactionContinuation(fixture, "Compaction midnight repeated full-access roots", [root, visualizationRoot]);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+      cwd: root,
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    });
+  });
+
+  test("compaction plus midnight cannot add a trusted Codex home as workspace context", () => {
+    const fixture = undeclaredRolloutMidnightFixture();
+    const { codexHome, request, delta, repeatRoots } = fixture;
+    repeatRoots(delta, root, codexHome);
+    asCompactionContinuation(fixture, "Compaction midnight Codex home roots", [root, codexHome]);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("Calendar environment delta conflicts");
+  });
+
+  test("compaction plus midnight rejects delta roots beyond its full environment claim", () => {
+    const fixture = undeclaredRolloutMidnightFixture();
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = fixture;
+    repeatRoots(delta, root, visualizationRoot);
+    asCompactionContinuation(fixture, "Compaction midnight roots beyond claim", [root]);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("Compaction continuation environment conflicts with its current Codex rollout");
+  });
+
+  test("compaction plus midnight accepts a native bullet worker inventory (#27)", () => {
+    const fixture = midnightRolloutFixture();
+    const { codexHome, request, delta } = fixture;
+    delta.content[0]!.text = delta.content[0]!.text.replace("</environment_context>",
+      `${nativeBulletInventory}</environment_context>`);
+    asCompactionContinuation(fixture, "Compaction midnight bullet inventory", [root]);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+  });
+
   test("a rejected bullet worker inventory fails closed without exponential backtracking", () => {
     const { codexHome, request, delta } = midnightRolloutFixture();
     const original = delta.content[0]!.text;
