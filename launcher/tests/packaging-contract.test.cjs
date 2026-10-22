@@ -25,6 +25,13 @@ test("the full verification gate audits launcher dependencies", () => {
   assert.match(verify, /await run\(\["run", "launcher:audit"\]\);/);
 });
 
+test("launcher tests install the Electron binary once before node --test runs", () => {
+  // Electron 42+ no longer downloads its binary in postinstall; several test files load
+  // browser-host.cjs (require("electron")) in parallel processes, so install it up front.
+  assert.equal(manifest.scripts.pretest, "node node_modules/electron/install.js");
+  assert.equal(manifest.scripts.test, "node --test tests/*.test.cjs");
+});
+
 test("launcher publishes native packages for all supported desktop operating systems", () => {
   assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
   assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
