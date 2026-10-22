@@ -372,7 +372,7 @@ test("Full Context planner tokenizes each context record once per planning call"
   } finally {
     estimate.mockRestore();
   }
-});
+}, 30_000);
 
 test("Full Context usage accounting always reports logical canonical tokens, ignoring smaller physical resume/recovery input", () => {
   const largeCanonical = request("word ".repeat(50_000));

@@ -8,10 +8,10 @@ import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-bro
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
 /**
- * These fixtures hand the turn broker a Unix socket under their temp root. macOS puts TMPDIR at
- * /var/folders/<32 chars>/T, which pushes `<root>/runtime/turn-broker.sock` past the 103-byte
- * sun_path limit the broker enforces before listen(). Root them somewhere short so the socket is
- * bindable.
+ * These fixtures bind a Unix socket under their temp root (`<root>/broker.sock` or the default
+ * `<root>/runtime/turn-broker.sock`). macOS puts TMPDIR at /var/folders/<2 chars>/<30 chars>/T
+ * (about 48 bytes), which pushed the longest fixture path to 106 bytes, past the 103-byte sun_path
+ * limit the broker enforces before listen(). Root them somewhere short so every socket is bindable.
  */
 function shortSocketTempRoot(): string {
   return process.platform === "win32" ? tmpdir() : "/tmp";

@@ -54,6 +54,8 @@ export interface CompileChatGptWebPromptOptions {
   /**
    * Internal to the multipart planner: token counts keyed by the exact record text, valid for a
    * single planning call so candidate part counts do not re-tokenize identical records.
+   * Create a fresh Map per planning call and drop it when the call returns: the keys are full
+   * prompt text, which must never be retained between requests.
    */
   multipartRecordTokenCache?: Map<string, number>;
   /**
