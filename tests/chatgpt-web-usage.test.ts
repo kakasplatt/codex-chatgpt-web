@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import {
   estimateChatGptWebInputTokens,
   estimateChatGptWebUsage,
@@ -9,6 +9,7 @@ import { compileChatGptWebPrompt, CHATGPT_FULL_CONTEXT_MAX_PARTS } from "../src/
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_WEB_FULL_CONTEXT_WINDOW } from "../src/chatgpt-web-models";
+import * as tokenEstimate from "../src/lib/token-estimate";
 import { estimateTokens } from "../src/lib/token-estimate";
 import type { CodexParsedRequest } from "../src/types";
 import { resolveChatGptWebMessageTokenBudget, resolveChatGptWebStagingTokenBudget } from "../src/chatgpt-web-models";
@@ -347,6 +348,30 @@ test("Full Context checkpoint overhead does not reduce the canonical 1,050,000-t
 
   expect(resolveFullContextMultipartPlan(parsed, capabilities)).toBe(11);
   expect(resolveFullContextMultipartPlan(parsed, capabilities, false, true)).toBe(11);
+}, 30_000);
+
+test("Full Context planner tokenizes each context record once per planning call", () => {
+  const plus = { ...capabilities, extraHighAvailable: false, proAvailable: false };
+  const parsed = request("");
+  parsed.context.messages = Array.from({ length: 4 }, (_, index) => ({
+    role: "user" as const,
+    content: `chunk ${index}: ${"word ".repeat(60_000)}`,
+    timestamp: index + 1,
+  }));
+
+  // Record weights do not depend on the part count or the staging effort, so one planning call
+  // tries several counts and efforts but must tokenize each record only once.
+  const estimate = spyOn(tokenEstimate, "estimateTokens");
+  try {
+    expect(resolveFullContextMultipartPlan(parsed, plus)).toBe(4);
+    const recordTexts = estimate.mock.calls
+      .map(([text]) => text)
+      .filter(text => text.startsWith('{"kind":'));
+    expect(new Set(recordTexts).size).toBe(4);
+    expect(recordTexts).toHaveLength(4);
+  } finally {
+    estimate.mockRestore();
+  }
 }, 30_000);
 
 test("Full Context usage accounting always reports logical canonical tokens, ignoring smaller physical resume/recovery input", () => {
