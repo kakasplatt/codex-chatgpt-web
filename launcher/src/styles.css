@@ -177,8 +177,13 @@ code {
 }
 
 /* Electron 43 places the overlay controls per the native layout (left on some Linux desktops). */
+.app-root:not([data-platform="darwin"]) {
+  --titlebar-inset-left: env(titlebar-area-x, 0px);
+  --titlebar-inset-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+}
+
 .app-root:not([data-platform="darwin"]) .titlebar-left {
-  left: calc(env(titlebar-area-x, 0px) + 8px);
+  left: calc(var(--titlebar-inset-left) + 8px);
 }
 
 .app-root:not([data-platform="darwin"]) .titlebar-left .icon-button {
@@ -2261,7 +2266,8 @@ code {
 }
 
 .app-root:not([data-platform="darwin"]) .welcome-top {
-  padding-left: calc(env(titlebar-area-x, 0px) + 20px);
+  padding-left: calc(var(--titlebar-inset-left) + 20px);
+  padding-right: calc(var(--titlebar-inset-right) + 20px);
 }
 
 .welcome-brand {
