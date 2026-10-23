@@ -927,6 +927,30 @@ describe("trusted Codex task environment continuity", () => {
     expect(store.resolve(continuation)).toMatchObject({ cwd: root, roots: [root], writableRoots: [root] });
   });
 
+  function resolvePersistedContinuation(prefix: string, cwd: string): ReturnType<ChatGptThreadEnvironmentStore["resolve"]> {
+    const stateRoot = mkdtempSync(join(tmpdir(), prefix));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    writeFileSync(statePath, JSON.stringify({ version: 1, threads: { thread_current: {
+      cwd, roots: [root], writableRoots: [root], sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    } } }));
+    const continuation = currentWire();
+    (continuation._rawBody as { input: unknown[] }).input = [{
+      type: "message", role: "user", content: [{ type: "input_text", text: "Continue" }],
+    }];
+    return new ChatGptThreadEnvironmentStore(statePath, Date.now, join(stateRoot, "codex")).resolve(continuation);
+  }
+
+  // A name that merely starts with ".." is a child, not a parent reference (#29).
+  test("a persisted cwd inside a child named ..notes stays inside its root", () => {
+    expect(resolvePersistedContinuation("codex-dotdot-child-", join(root, "..notes")).cwd).toBe(join(root, "..notes"));
+  });
+
+  test("a sibling reached through .. is still outside its root", () => {
+    expect(() => resolvePersistedContinuation("codex-dotdot-sibling-", resolve(root, "..", "other")))
+      .toThrow("contains invalid workspace or permission records");
+  });
+
   test("fresh trusted tasks do not erase unfamiliar or invalid permission records", () => {
     const stateRoot = mkdtempSync(join(tmpdir(), "codex-invalid-environment-"));
     temporaryRoots.push(stateRoot);

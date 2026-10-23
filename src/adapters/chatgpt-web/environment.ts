@@ -986,7 +986,7 @@ function uniqueAbsolutePaths(values: string[], field: string): string[] {
 
 function matchesPath(root: string, path: string): boolean {
   const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {

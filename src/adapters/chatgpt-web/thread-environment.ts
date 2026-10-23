@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, parse, relative, resolve } from "node:path";
+import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../../config";
 import { getCodexHome, getTrustedCodexHomes } from "../../codex-integration-shared";
 import type { CodexParsedRequest } from "../../types";
@@ -63,7 +63,7 @@ function pathIdentity(value: string): string {
 
 function contains(root: string, path: string): boolean {
   const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /** Replace each path with the first cached spelling of the same identity, keeping the order of paths. */
