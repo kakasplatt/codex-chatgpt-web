@@ -3,13 +3,19 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 /** Maximum number of automatic browser-turn retries after the initial send. */
 export const MAX_CHATGPT_WEB_TURN_RETRIES = 3;
 const RETRY_BUDGET_TTL_MS = 30 * 60_000;
-/** Safety ceiling for an attempt that never records a failure or clears its budget. */
+/**
+ * Retention ceiling for an active entry, counted from the turn's latest request. It bounds entries
+ * whose attempt exits without recording a failure or clearing (abort, early return).
+ */
 export const MAX_ACTIVE_ATTEMPT_MS = 6 * 60 * 60_000;
 
 interface RetryBudgetEntry {
   retries: number;
   updatedAt: number;
-  /** Set while a retry attempt for this key is running; idle expiry does not apply then. */
+  /**
+   * Time of the latest request for this key since its last recorded failure; idle expiry does not
+   * apply while set. Never unset in place: recordRetryableFailure replaces the entry without it.
+   */
   activeSince?: number;
   lastError: {
     message: string;
