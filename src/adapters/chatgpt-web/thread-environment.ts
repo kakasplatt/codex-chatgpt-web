@@ -66,6 +66,11 @@ function contains(root: string, path: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/** Replace each path with the first cached spelling of the same identity, keeping the order of paths. */
+function preferSpelling(paths: string[], cached: readonly string[]): string[] {
+  return paths.map(path => cached.find(spelling => pathIdentity(spelling) === pathIdentity(path)) ?? path);
+}
+
 /**
  * An extra workspace context root that a recovery claim (steering, compaction or a midnight delta)
  * may not introduce. Adopted roots become the thread's own environment, persisted in the cache;
@@ -292,6 +297,18 @@ export class ChatGptThreadEnvironmentStore {
             );
             if (contextRoots) {
               rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };
+            }
+            // The broker compares the pinned turn-start environment exactly. Keep the spelling the
+            // turn start cached for every path whose identity is unchanged.
+            const established = this.peek(rolloutIdentity.threadId);
+            if (established) {
+              const spellings = [established.cwd, ...established.roots, ...established.writableRoots];
+              rolloutEnvironment = {
+                ...rolloutEnvironment,
+                cwd: preferSpelling([rolloutEnvironment.cwd], spellings)[0]!,
+                roots: preferSpelling(rolloutEnvironment.roots, spellings),
+                writableRoots: preferSpelling(rolloutEnvironment.writableRoots, spellings),
+              };
             }
           }
           const conflicts = currentClaim ? conflictingAuthorityFields(currentClaim, rolloutEnvironment) : [];

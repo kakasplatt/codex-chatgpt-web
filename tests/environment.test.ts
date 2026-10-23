@@ -1441,6 +1441,32 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  // The broker pins the turn-start spelling, cached by the store, and compares environments exactly (#29).
+  test.skipIf(process.platform !== "win32")("a midnight delta that differs from the established roots only in case keeps the cached spelling", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const statePath = cachedThreadState("codex-delta-spelling-", {
+      cwd: root, roots: [root, visualizationRoot], writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    });
+    repeatRoots(delta, root.toUpperCase(), visualizationRoot);
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request)).toMatchObject({
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+    });
+  });
+
+  test.skipIf(process.platform !== "win32")("the rollout cwd keeps the cached spelling when only its case differs", () => {
+    const { codexHome, request } = undeclaredRolloutMidnightFixture();
+    const statePath = cachedThreadState("codex-cwd-spelling-", {
+      cwd: root.toUpperCase(), roots: [root.toUpperCase()], writableRoots: [root.toUpperCase()],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    });
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request)).toMatchObject({
+      cwd: root.toUpperCase(),
+      roots: [root.toUpperCase()],
+    });
+  });
+
   // Decision D2: macOS path identity stays case-sensitive, so a case mismatch fails closed.
   test.skipIf(process.platform !== "darwin")("macOS keeps root identity case-sensitive and fails closed on a case mismatch", () => {
     const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
