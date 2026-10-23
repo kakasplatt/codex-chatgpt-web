@@ -1896,6 +1896,31 @@ describe("trusted Codex task environment continuity", () => {
     }
   });
 
+  // Codex nicknames are printable; NEL and bidi controls would let a name reorder or break the inventory (#29).
+  test("a bullet worker name with NEL or a bidi control is not a calendar delta", () => {
+    const { codexHome, request, delta } = midnightRolloutFixture();
+    const original = delta.content[0]!.text;
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    for (const control of ["\u0085", "؜", "‎", "‏", "‪", "‮", "⁦", "⁩"]) {
+      for (const name of [`A${control}B`, `${control}AB`]) {
+        delta.content[0]!.text = original.replace("</environment_context>",
+          `<subagents>\n    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: ${name}\n  </subagents>\n</environment_context>`);
+        expect(() => store.resolve(request)).toThrow("missing cwd");
+      }
+    }
+  });
+
+  test("a realistic Codex bullet worker inventory still matches", () => {
+    const { codexHome, request, delta } = midnightRolloutFixture();
+    const original = delta.content[0]!.text;
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    for (const name of ["Pauli", "Ada Lovelace", "Ünal-2", "Gödel (reviewer)"]) {
+      delta.content[0]!.text = original.replace("</environment_context>",
+        `<subagents>\n    - 01a15bde-6c1b-7211-a9a6-130ce8b5d6db: ${name}\n  </subagents>\n</environment_context>`);
+      expect(store.resolve(request).cwd).toBe(root);
+    }
+  });
+
   test("calendar updates cannot introduce roots or malformed permission fields", () => {
     const { codexHome, request, body, delta, rolloutPath } = midnightRolloutFixture();
     body.input.splice(1, body.input.length - 2);
