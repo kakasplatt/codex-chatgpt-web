@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createHash } from "node:crypto";
@@ -1474,6 +1474,49 @@ describe("ChatGPT outer-native harness v4", () => {
       }
       expect(browserStarts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 1);
     } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("keeps the retry budget when each browser attempt outlasts the idle budget TTL", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h4-long-retry-budget-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-long-retry-budget-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let clock = Date.now();
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      turn.onSendActivated?.();
+      // Each attempt runs longer than the 30-minute idle TTL before ChatGPT shows its alert.
+      clock += 31 * 60_000;
+      setSystemTime(new Date(clock));
+      throw new ChatGptWebAdapterError("ChatGPT stopped this response with an error. Retry the turn.", {
+        status: 502,
+        errorType: "server_error",
+        code: "upstream_server_error",
+        retryable: true,
+      });
+    };
+    try {
+      for (let attempt = 0; attempt <= MAX_CHATGPT_WEB_TURN_RETRIES; attempt += 1) {
+        const events: AdapterEvent[] = [];
+        await createChatGptWebAdapter(provider).runTurn!(
+          rawWireRequest(environmentXml),
+          { headers: new Headers() },
+          event => events.push(event),
+        );
+        expect((events.at(-1) as Extract<AdapterEvent, { type: "error" }>).retryable)
+          .toBe(attempt < MAX_CHATGPT_WEB_TURN_RETRIES);
+      }
+      expect(browserStarts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 1);
+    } finally {
+      setSystemTime();
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();
     }
