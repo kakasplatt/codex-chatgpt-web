@@ -78,6 +78,30 @@ test("remote outer harness owns a turn through the live broker protocol", async 
   }
 });
 
+// The adapter accepts a cwd in a child named "..notes"; the broker must agree (#29).
+test("a remote owner registers a cwd inside a child named ..notes but not a sibling", async () => {
+  const root = scratch("cgw-dev-owner-dotdot");
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  const remote = new RemoteTurnBroker(socketPath);
+  await broker.listen();
+  try {
+    const environment = (cwd: string) => ({
+      cwd,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    });
+    const token = await remote.register(environment(join(root, "..notes")), 60_000, "dotdot-child");
+    await remote.revoke(token);
+    await expect(remote.register(environment(join(root, "..", "sibling")), 60_000, "dotdot-sibling"))
+      .rejects.toThrow("environment is invalid");
+  } finally {
+    await broker.close();
+  }
+});
+
 test("disconnecting a remote owner_next removes its broker waiter", async () => {
   const root = scratch("cgw-dev-owner-waiter");
   const socketPath = defaultBrokerEndpoint(root);

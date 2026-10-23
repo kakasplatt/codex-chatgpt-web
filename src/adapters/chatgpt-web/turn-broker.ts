@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
 import {
   CompactionTransactionStore,
@@ -255,7 +255,7 @@ function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
     || environment.writableRoots.some(path => typeof path !== "string" || !isAbsolute(path))
     || !environment.roots.some(root => {
       const nested = relative(resolve(root), resolve(environment.cwd!));
-      return nested === "" || (!nested.startsWith("..") && !isAbsolute(nested));
+      return nested === "" || (nested !== ".." && !nested.startsWith(`..${sep}`) && !isAbsolute(nested));
     })
     || !environment.sandboxPolicy || !["dangerFullAccess", "workspaceWrite", "readOnly"].includes(environment.sandboxPolicy.type)
     || !Array.isArray(environment.tools)

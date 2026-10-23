@@ -502,11 +502,12 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
 }
 
 const CODEX_THREAD_ID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+// Names carry no markup, no line or page separators (NEL included) and no bidirectional controls.
+const CALENDAR_WORKER_NAME_EXCLUDED = "<>\\r\\n\\u2028\\u2029\\v\\f\\u0085\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069";
 const CALENDAR_SUBAGENT_INVENTORY_SOURCE = "<subagents>\\s*(?:"
   + "(?:<agent name=\"[^<>\"\\r\\n]+\"\\s*\\/>\\s*)*"
   // A required line break ends each name, keeping a rejected inventory linear to match.
-  // Names carry no other line or page separators.
-  + `|(?:-[ \\t]+${CODEX_THREAD_ID_SOURCE}:[ \\t]+[^<>\\s][^<>\\r\\n\\u2028\\u2029\\v\\f]*(?:\\r\\n|\\n)\\s*)+`
+  + `|(?:-[ \\t]+${CODEX_THREAD_ID_SOURCE}:[ \\t]+[^\\s${CALENDAR_WORKER_NAME_EXCLUDED}][^${CALENDAR_WORKER_NAME_EXCLUDED}]*(?:\\r\\n|\\n)\\s*)+`
   + ")<\\/subagents>\\s*";
 const CALENDAR_ENVIRONMENT_DELTA = new RegExp("^<environment_context>\\s*<current_date>\\d{4}-\\d{2}-\\d{2}<\\/current_date>\\s*"
   + "(?:<timezone>[^<>]+<\\/timezone>\\s*)?<filesystem>\\s*"
@@ -986,7 +987,7 @@ function uniqueAbsolutePaths(values: string[], field: string): string[] {
 
 function matchesPath(root: string, path: string): boolean {
   const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {

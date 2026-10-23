@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, parse, relative, resolve } from "node:path";
+import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../../config";
 import { getCodexHome, getTrustedCodexHomes } from "../../codex-integration-shared";
 import type { CodexParsedRequest } from "../../types";
@@ -20,11 +20,12 @@ import {
   unattributedChatGptEnvironmentMessages,
   isChatGptCompactionContinuation,
   MissingTrustedCodexEnvironmentError,
+  type ChatGptCalendarEnvironmentDelta,
   type ChatGptEnvironmentClaim,
   type ChatGptSandboxPolicy,
   type ChatGptTurnEnvironment,
 } from "./environment";
-import { resolveCurrentCodexRolloutEnvironment } from "./codex-rollout-environment";
+import { resolveCurrentCodexRolloutEnvironment, type CodexRolloutEnvironment } from "./codex-rollout-environment";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
 interface StoredThreadEnvironment {
@@ -62,7 +63,12 @@ function pathIdentity(value: string): string {
 
 function contains(root: string, path: string): boolean {
   const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Replace each path with the first cached spelling of the same identity, keeping the order of paths. */
+function preferSpelling(paths: string[], cached: readonly string[]): string[] {
+  return paths.map(path => cached.find(spelling => pathIdentity(spelling) === pathIdentity(path)) ?? path);
 }
 
 /**
@@ -283,28 +289,28 @@ export class ChatGptThreadEnvironmentStore {
             };
           }
           if (resolvedCalendarDelta) {
-            const nativeRoots = new Set(rolloutEnvironment.roots.map(pathIdentity));
-            const deltaRoots = resolvedCalendarDelta.workspaceRoots.map(roots => new Set(roots.map(pathIdentity)));
-            const sameRoots = (left: Set<string>, right: Set<string>) => left.size === right.size
-              && [...left].every(root => right.has(root));
-            if (resolvedCalendarDelta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)) {
-              throw new Error("Calendar environment delta conflicts with its current Codex rollout");
-            }
-            // As above, an omitted unrestricted rollout root list is not a native restriction. The
-            // current turn's repeated roots stay its workspace context (the broker pins the start
-            // envelope for the whole tool loop) only when they agree with each other and keep every
-            // native root exactly. Permissions and cwd still come from the native record.
-            const contextRoots = !rollout.workspaceRootsDeclared
-              && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
-              && deltaRoots.length > 0
-              && deltaRoots.every(roots => sameRoots(roots, deltaRoots[0]!))
-              && [...nativeRoots].every(root => deltaRoots[0]!.has(root))
-              && !refusesContext(resolvedCalendarDelta.workspaceRoots.at(-1)!, nativeRoots)
-              ? resolvedCalendarDelta.workspaceRoots.at(-1)! : undefined;
+            const contextRoots = this.calendarContextRoots(
+              resolvedCalendarDelta,
+              { ...rollout, environment: rolloutEnvironment },
+              // A full environment in this request is newer than the cache; only a bare delta
+              // falls back to the roots established at turn start.
+              currentClaim ? undefined : rolloutIdentity.threadId,
+              refusesContext,
+            );
             if (contextRoots) {
               rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };
-            } else if (deltaRoots.some(roots => !sameRoots(roots, nativeRoots))) {
-              throw new Error("Calendar environment delta conflicts with its current Codex rollout");
+            }
+            // The broker compares the pinned turn-start environment exactly. Keep the spelling the
+            // turn start cached for every path whose identity is unchanged, field by field first.
+            const established = this.peek(rolloutIdentity.threadId);
+            if (established) {
+              const { cwd, roots, writableRoots } = established;
+              rolloutEnvironment = {
+                ...rolloutEnvironment,
+                cwd: preferSpelling([rolloutEnvironment.cwd], [cwd, ...roots, ...writableRoots])[0]!,
+                roots: preferSpelling(rolloutEnvironment.roots, [...roots, ...writableRoots, cwd]),
+                writableRoots: preferSpelling(rolloutEnvironment.writableRoots, [...writableRoots, ...roots, cwd]),
+              };
             }
           }
           const conflicts = currentClaim ? conflictingAuthorityFields(currentClaim, rolloutEnvironment) : [];
@@ -366,6 +372,65 @@ export class ChatGptThreadEnvironmentStore {
       this.set(lineage.threadId, inherited);
       return inherited;
     }
+  }
+
+  /**
+   * The workspace context a midnight delta leaves in place, or undefined to keep the rollout's own
+   * roots. Throws when the delta contradicts its current native rollout.
+   */
+  private calendarContextRoots(
+    delta: ChatGptCalendarEnvironmentDelta,
+    rollout: CodexRolloutEnvironment,
+    threadId: string | undefined,
+    refusesContext: (roots: string[], nativeRoots: Set<string>) => boolean,
+  ): string[] | undefined {
+    const environment = rollout.environment;
+    const nativeRoots = new Set(environment.roots.map(pathIdentity));
+    const deltaRoots = delta.workspaceRoots.map(roots => new Set(roots.map(pathIdentity)));
+    const sameRoots = (left: Set<string>, right: Set<string>) => left.size === right.size
+      && [...left].every(root => right.has(root));
+    if (delta.filesystemProfiles.some(profile => profile !== rollout.filesystemProfileXml)) {
+      throw new Error("Calendar environment delta conflicts with its current Codex rollout");
+    }
+    // As in resolve(), an omitted unrestricted rollout root list is not a native restriction.
+    // Permissions and cwd still come from the native record.
+    const unrestricted = !rollout.workspaceRootsDeclared && environment.sandboxPolicy.type === "dangerFullAccess";
+    if (unrestricted && deltaRoots.length === 0) {
+      // The delta repeats no roots, so the roots this thread established at turn start stay its
+      // context (the broker pins the start envelope for the whole tool loop), provided they keep
+      // the native cwd and every native root.
+      const established = threadId ? this.peek(threadId) : undefined;
+      if (established?.sandboxPolicy.type === "dangerFullAccess"
+        && pathIdentity(established.cwd) === pathIdentity(environment.cwd)
+        && [...nativeRoots].every(root => established.roots.some(path => pathIdentity(path) === root))) {
+        return established.roots;
+      }
+      return undefined;
+    }
+    // The current turn's repeated roots stay its workspace context only when they agree with each
+    // other and keep every native root exactly.
+    const latest = delta.workspaceRoots.at(-1);
+    if (unrestricted && latest
+      && deltaRoots.every(roots => sameRoots(roots, deltaRoots[0]!))
+      && [...nativeRoots].every(root => deltaRoots[0]!.has(root))
+      && !refusesContext(latest, nativeRoots)) {
+      return latest;
+    }
+    if (deltaRoots.some(roots => !sameRoots(roots, nativeRoots))) {
+      throw new Error("Calendar environment delta conflicts with its current Codex rollout");
+    }
+    return undefined;
+  }
+
+  /**
+   * Read a cached entry without evicting or persisting. Call only after current native proof:
+   * like set(), it rebuilds a damaged-JSON cache file instead of failing.
+   */
+  private peek(threadId: string): StoredThreadEnvironment | undefined {
+    if (this.codexHomes.length > 1) return undefined;
+    this.load(true);
+    const stored = this.threads.get(threadId);
+    return stored && this.now() - stored.updatedAt <= THREAD_ENVIRONMENT_TTL_MS ? stored : undefined;
   }
 
   private get(threadId: string): StoredThreadEnvironment | undefined {

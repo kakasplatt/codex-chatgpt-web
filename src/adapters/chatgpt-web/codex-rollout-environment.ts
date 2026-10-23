@@ -10,7 +10,7 @@ import {
   readdirSync,
   realpathSync,
 } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve, toNamespacedPath } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { expandUserPath } from "../../config";
 import { findTopLevelAssignment } from "../../codex-integration-document";
@@ -55,7 +55,7 @@ function pathIdentity(value: string): string {
 
 function contains(root: string, path: string): boolean {
   const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function matchesAgentPath(value: unknown, expected: string): boolean {
