@@ -11,6 +11,12 @@ export const COMPACTION_REQUEST_BODY_LIMITS: RequestBodyLimits = {
   decodedBytes: 256 * 1024 * 1024,
 };
 
+/**
+ * `Bun.serve` cuts a larger body off by closing the socket before the handler runs, so the server
+ * accepts up to twice the compaction encoded ceiling and lets the handler answer with a 400.
+ */
+export const SERVER_MAX_REQUEST_BODY_BYTES = 2 * COMPACTION_REQUEST_BODY_LIMITS.encodedBytes;
+
 export interface RequestSizeLimits {
   standard: RequestBodyLimits;
   compaction: RequestBodyLimits;

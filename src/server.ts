@@ -23,7 +23,8 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
-import { readJsonRequestBody } from "./http-body";
+import { assertRequestBodyWithin, readJsonRequestBodyWithSize, RequestBodyLimitError } from "./http-body";
+import { REQUEST_SIZE_LIMITS, requestBodyLimitsFor, SERVER_MAX_REQUEST_BODY_BYTES, type RequestSizeLimits } from "./request-size-policy";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
@@ -363,6 +364,14 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  /** Tests inject small limits; production uses the policy defaults. */
+  requestSizeLimits?: RequestSizeLimits;
+}
+
+interface ResponseBodyContext {
+  headers: Headers;
+  signal: AbortSignal;
+  nativeRequest: Request;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -620,10 +629,13 @@ export async function responseRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: ResponseRequestOptions = {},
 ): Promise<Response> {
+  const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
   let raw: unknown;
+  let size: Awaited<ReturnType<typeof readJsonRequestBodyWithSize>>;
   try {
-    raw = await readJsonRequestBody(req);
+    size = await readJsonRequestBodyWithSize(req, limits.compaction);
+    raw = size.value;
   } catch (error) {
     return formatErrorResponse(
       400,
@@ -631,6 +643,34 @@ export async function responseRequest(
       error instanceof Error ? error.message : "Request body must be valid JSON",
     );
   }
+  const model = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as { model?: unknown }).model
+    : undefined;
+  const webModel = !(typeof model === "string" && !isChatGptWebModelSlug(model));
+  try {
+    assertRequestBodyWithin(size, requestBodyLimitsFor({ route: "responses", raw, webModel }, limits));
+  } catch (error) {
+    if (error instanceof RequestBodyLimitError) {
+      return formatErrorResponse(400, "invalid_request_error", error.message);
+    }
+    throw error;
+  }
+  return handleResponseBody(
+    raw,
+    { headers: req.headers, signal: req.signal, nativeRequest },
+    config,
+    adapterFactory,
+    options,
+  );
+}
+
+async function handleResponseBody(
+  raw: unknown,
+  context: ResponseBodyContext,
+  config: AppConfig,
+  adapterFactory: ChatGptWebAdapterFactory,
+  options: ResponseRequestOptions,
+): Promise<Response> {
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
@@ -644,7 +684,7 @@ export async function responseRequest(
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
+      return await forwardNativeCodexRequest(context.nativeRequest, "responses", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -782,11 +822,11 @@ export async function responseRequest(
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
-  if (req.signal.aborted) abort.abort();
-  else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
+  if (context.signal.aborted) abort.abort();
+  else context.signal.addEventListener("abort", () => abort.abort(), { once: true });
   const run = async () => {
     try {
-      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => {
+      await adapter.runTurn!(parsed, { headers: context.headers, abortSignal: abort.signal }, event => {
         options.onAdapterEvent?.(event);
         queue.push(event);
       });
@@ -855,14 +895,16 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "requestSizeLimits"> = {},
 ): Promise<Response> {
+  const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
+  let size: Awaited<ReturnType<typeof readJsonRequestBodyWithSize>>;
   try {
-    const parsed = await readJsonRequestBody(req);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-    raw = parsed as Record<string, unknown>;
+    size = await readJsonRequestBodyWithSize(req, limits.compaction);
+    if (!size.value || typeof size.value !== "object" || Array.isArray(size.value)) throw new Error("not an object");
+    raw = size.value as Record<string, unknown>;
   } catch (error) {
     return formatErrorResponse(
       400,
@@ -899,6 +941,14 @@ export async function compactRequest(
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
+      assertRequestBodyWithin(size, limits.standard);
+    } catch (error) {
+      if (error instanceof RequestBodyLimitError) {
+        return formatErrorResponse(400, "invalid_request_error", error.message);
+      }
+      throw error;
+    }
+    try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
@@ -918,15 +968,13 @@ export async function compactRequest(
     );
   }
   const input = Array.isArray(raw.input) ? raw.input : [];
-  const headers = new Headers(req.headers);
-  headers.set("content-type", "application/json");
-  const internal = new Request("http://127.0.0.1/v1/responses", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] }),
-    signal: req.signal,
-  });
-  const response = await responseRequest(internal, config, adapterFactory, options);
+  const response = await handleResponseBody(
+    { ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] },
+    { headers: req.headers, signal: req.signal, nativeRequest },
+    config,
+    adapterFactory,
+    options,
+  );
   if (!response.ok) return response;
   let body: {
     output?: unknown[];
@@ -1012,6 +1060,7 @@ export function startServer(
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
+    maxRequestBodySize: SERVER_MAX_REQUEST_BODY_BYTES,
     async fetch(req) {
       const url = new URL(req.url);
       // Loopback is reachable from any web page, cross-site or same-origin after DNS rebinding,
