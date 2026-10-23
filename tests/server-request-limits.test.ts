@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeEach, expect, spyOn, test } from "bun:test";
 import type { ProviderAdapter } from "../src/adapters/base";
 import { defaultConfig } from "../src/config";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -55,6 +55,16 @@ async function errorMessage(response: Response): Promise<string> {
   return ((await response.json()) as { error: { message: string } }).error.message;
 }
 
+const REJECTION_PREFIX = "This task's request is";
+const COMPACT_ADVICE = "Run /compact to shrink the task history, or start a new task.";
+const NEW_TASK_ADVICE = "Compaction cannot run on a request this large; start a new task to continue.";
+
+// Rejections log a warning per request; capture it so test output stays clean and lines can be asserted.
+const warn = spyOn(console, "warn").mockImplementation(() => {});
+beforeEach(() => warn.mockClear());
+afterAll(() => warn.mockRestore());
+const warnings = () => warn.mock.calls.map(call => call.map(String).join(" "));
+
 test("responses: web v2 compaction between limits is accepted", async () => {
   const body = JSON.stringify({
     model: webModel,
@@ -90,7 +100,10 @@ test("responses: ordinary web body between limits is rejected with the standard 
   const body = JSON.stringify({ model: webModel, stream: false, input: [padding] });
   const response = await respond(post("/v1/responses", body), compactionAdapterFactory(factoryCalls));
   expect(response.status).toBe(400);
-  expect(await errorMessage(response)).toBe("Encoded request body exceeds 4096 bytes");
+  const message = await errorMessage(response);
+  expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
+  expect(message).toContain("over the 0 MiB local request limit");
+  expect(message.endsWith(COMPACT_ADVICE)).toBe(true);
   expect(factoryCalls).toHaveLength(0);
 });
 
@@ -102,7 +115,9 @@ test("responses: native-model body between limits is rejected before forwarding"
   });
   const response = await respond(post("/v1/responses", body));
   expect(response.status).toBe(400);
-  expect(await errorMessage(response)).toBe("Encoded request body exceeds 4096 bytes");
+  const message = await errorMessage(response);
+  expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
+  expect(message.endsWith(NEW_TASK_ADVICE)).toBe(true);
 });
 
 test("responses: body above the compaction ceiling is rejected at read time", async () => {
@@ -113,7 +128,9 @@ test("responses: body above the compaction ceiling is rejected at read time", as
   });
   const response = await respond(post("/v1/responses", body));
   expect(response.status).toBe(400);
-  expect(await errorMessage(response)).toBe("Encoded request body exceeds 32768 bytes");
+  const message = await errorMessage(response);
+  expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
+  expect(message.endsWith(NEW_TASK_ADVICE)).toBe(true);
 });
 
 const compact = (request: Request, factory = compactionAdapterFactory()) =>
@@ -142,7 +159,54 @@ test("compact: native-model body between limits is rejected with the standard li
   const body = JSON.stringify({ model: "gpt-5.6-sol", input: [padding] });
   const response = await compact(post("/v1/responses/compact", body));
   expect(response.status).toBe(400);
-  expect(await errorMessage(response)).toBe("Encoded request body exceeds 4096 bytes");
+  const message = await errorMessage(response);
+  expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
+  expect(message.endsWith(NEW_TASK_ADVICE)).toBe(true);
+});
+
+const REJECTION_LOG_PREFIX = "[codex-chatgpt-web] request_body_rejected";
+
+for (const route of ["responses", "compact"] as const) {
+  test(`${route}: oversized body logs one diagnostic line and returns the actionable message`, async () => {
+    // responses: between the limits (policy stage); compact: above the compaction ceiling (read stage).
+    const body = route === "responses"
+      ? JSON.stringify({ model: webModel, stream: false, input: [padding] })
+      : JSON.stringify({ model: webModel, input: [{ ...padding, content: [{ type: "input_text", text: "x".repeat(40_000) }] }] });
+    const response = route === "responses"
+      ? await respond(post("/v1/responses", body))
+      : await compact(post("/v1/responses/compact", body));
+    expect(response.status).toBe(400);
+    const error = ((await response.json()) as { error: { message: string; code: string; type: string } }).error;
+    expect(error.message.startsWith(REJECTION_PREFIX)).toBe(true);
+    expect(error.type).toBe("invalid_request_error");
+    expect(error.code).toBe("invalid_request_error");
+    const lines = warnings();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.startsWith(REJECTION_LOG_PREFIX)).toBe(true);
+    const logged = JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length)) as { route: string; stage: string };
+    expect(logged.route).toBe(route);
+    expect(logged.stage).toBe(route === "responses" ? "encoded" : "declared");
+  });
+}
+
+test("unreadable body logs one line without body text", async () => {
+  const response = await respond(post("/v1/responses", "{\"secret\":\"SENTINEL_BODY_TEXT\""));
+  expect(response.status).toBe(400);
+  const lines = warnings();
+  expect(lines).toHaveLength(1);
+  expect(lines[0]!.startsWith("[codex-chatgpt-web] request_body_unreadable")).toBe(true);
+  expect(lines.some(line => line.includes("SENTINEL_BODY_TEXT"))).toBe(false);
+});
+
+test("an ordinary web body under the ceiling advises /compact; one above it advises a new task", async () => {
+  const under = await respond(post("/v1/responses", JSON.stringify({ model: webModel, stream: false, input: [padding] })));
+  expect((await errorMessage(under)).endsWith(COMPACT_ADVICE)).toBe(true);
+  const above = await respond(post("/v1/responses", JSON.stringify({
+    model: webModel,
+    stream: false,
+    input: [{ ...padding, content: [{ type: "input_text", text: "x".repeat(40_000) }] }],
+  })));
+  expect((await errorMessage(above)).endsWith(NEW_TASK_ADVICE)).toBe(true);
 });
 
 test("server: a 129 MiB body gets an HTTP 400 instead of a closed socket", async () => {
@@ -155,7 +219,10 @@ test("server: a 129 MiB body gets an HTTP 400 instead of a closed socket", async
       body: new Uint8Array(129 * MiB),
     });
     expect(response.status).toBe(400);
-    expect(await errorMessage(response)).toContain("134217728");
+    const message = await errorMessage(response);
+    expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
+    expect(message).toContain("over the 128 MiB local request limit");
+    expect(message.endsWith(NEW_TASK_ADVICE)).toBe(true);
   } finally {
     await server.stop(true);
   }

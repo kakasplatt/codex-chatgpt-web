@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { ProviderAdapter } from "../src/adapters/base";
 import { defaultConfig } from "../src/config";
@@ -117,15 +117,25 @@ test("v1 /compact of the same history succeeds and the replacement history is sm
 }, 60_000);
 
 test("an ordinary oversized follow-up is still rejected", async () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
   const factoryCalls: CodexProviderConfig[] = [];
-  const response = await responseRequest(
-    post("/v1/responses", ordinaryEncodedBody!),
-    defaultConfig("full"),
-    recordingAdapterFactory([], factoryCalls),
-    { rememberState: false },
-  );
+  let response: Response;
+  try {
+    response = await responseRequest(
+      post("/v1/responses", ordinaryEncodedBody!),
+      defaultConfig("full"),
+      recordingAdapterFactory([], factoryCalls),
+      { rememberState: false },
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+  } finally {
+    warn.mockRestore();
+  }
   expect(response.status).toBe(400);
   const error = (await response.json() as { error: { message: string } }).error.message;
-  expect(error).toBe("Encoded request body exceeds 67108864 bytes");
+  expect(error.startsWith("This task's request is")).toBe(true);
+  expect(error).toContain(`mostly image tool results (${IMAGE_PAIRS} images`);
+  expect(error).toContain("over the 64 MiB local request limit");
+  expect(error.endsWith("Run /compact to shrink the task history, or start a new task.")).toBe(true);
   expect(factoryCalls).toHaveLength(0);
 }, 60_000);

@@ -24,7 +24,19 @@ import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { assertRequestBodyWithin, readJsonRequestBodyWithSize, RequestBodyLimitError } from "./http-body";
-import { REQUEST_SIZE_LIMITS, requestBodyLimitsFor, SERVER_MAX_REQUEST_BODY_BYTES, type RequestSizeLimits } from "./request-size-policy";
+import {
+  formatRequestBodyRejection,
+  logRequestBodyRejection,
+  logUnreadableRequestBody,
+  measureImagePayloads,
+  REQUEST_SIZE_LIMITS,
+  requestBodyLimitsFor,
+  SERVER_MAX_REQUEST_BODY_BYTES,
+  type RequestRejectionContext,
+  type RequestRejectionRemedy,
+  type RequestRoute,
+  type RequestSizeLimits,
+} from "./request-size-policy";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
@@ -623,6 +635,35 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
   return { toolNsMap, freeformToolNames, toolSearchToolNames };
 }
 
+/**
+ * `/compact` helps only a Web-model, non-compaction body that the policy (not the read ceiling)
+ * rejected. Compaction bodies, native models and bodies above the ceiling cannot be compacted.
+ */
+function rejectionRemedy(
+  _error: RequestBodyLimitError,
+  stage: "read" | "policy",
+  webModel: boolean,
+): RequestRejectionRemedy {
+  return stage === "policy" && webModel ? "compact" : "new_task";
+}
+
+/** Logs a size-only line and answers with the actionable 400. `raw` is given once the body was parsed. */
+function requestBodyRejectionResponse(
+  error: RequestBodyLimitError,
+  route: RequestRoute,
+  stage: "read" | "policy",
+  webModel: boolean,
+  raw?: unknown,
+): Response {
+  const context: RequestRejectionContext = {
+    route,
+    remedy: rejectionRemedy(error, stage, webModel),
+    ...(stage === "policy" ? { images: measureImagePayloads(raw) } : {}),
+  };
+  logRequestBodyRejection(error, context);
+  return formatErrorResponse(400, "invalid_request_error", formatRequestBodyRejection(error, context));
+}
+
 export async function responseRequest(
   req: Request,
   config: AppConfig,
@@ -637,6 +678,10 @@ export async function responseRequest(
     size = await readJsonRequestBodyWithSize(req, limits.compaction);
     raw = size.value;
   } catch (error) {
+    if (error instanceof RequestBodyLimitError) {
+      return requestBodyRejectionResponse(error, "responses", "read", false);
+    }
+    logUnreadableRequestBody("responses", req, error);
     return formatErrorResponse(
       400,
       "invalid_request_error",
@@ -651,7 +696,7 @@ export async function responseRequest(
     assertRequestBodyWithin(size, requestBodyLimitsFor({ route: "responses", raw, webModel }, limits));
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
-      return formatErrorResponse(400, "invalid_request_error", error.message);
+      return requestBodyRejectionResponse(error, "responses", "policy", webModel, raw);
     }
     throw error;
   }
@@ -906,6 +951,10 @@ export async function compactRequest(
     if (!size.value || typeof size.value !== "object" || Array.isArray(size.value)) throw new Error("not an object");
     raw = size.value as Record<string, unknown>;
   } catch (error) {
+    if (error instanceof RequestBodyLimitError) {
+      return requestBodyRejectionResponse(error, "compact", "read", false);
+    }
+    logUnreadableRequestBody("compact", req, error);
     return formatErrorResponse(
       400,
       "invalid_request_error",
@@ -944,7 +993,7 @@ export async function compactRequest(
       assertRequestBodyWithin(size, limits.standard);
     } catch (error) {
       if (error instanceof RequestBodyLimitError) {
-        return formatErrorResponse(400, "invalid_request_error", error.message);
+        return requestBodyRejectionResponse(error, "compact", "policy", false, raw);
       }
       throw error;
     }
