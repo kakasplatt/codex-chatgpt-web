@@ -991,6 +991,7 @@ export function createChatGptWebAdapter(
           });
           return;
         }
+        chatGptWebTurnRetryPolicy.markAttempt(retryKey);
         let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
         if (mode.localTools) {
           try {
