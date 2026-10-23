@@ -971,3 +971,22 @@ test("catalog recovery clears its error banner but preserves a newer unrelated f
   callback({ name: "catalog-verification", status: "completed", message: "Loaded" });
   assert.equal(error, "Setup error");
 });
+
+test("non-darwin title bar insets follow the Window Controls Overlay", () => {
+  // env(titlebar-area-*) is only defined while the overlay is enabled.
+  assert.match(electronMain, /titleBarStyle: isMac \? "hiddenInset" : "hidden"/);
+  assert.match(electronMain, /titleBarOverlay:\s*\{/);
+  assert.match(
+    stylesSource,
+    /\.app-root:not\(\[data-platform="darwin"\]\)\s*\{[^}]*--titlebar-inset-left:\s*env\(titlebar-area-x, 0px\);[^}]*--titlebar-inset-right:\s*calc\(100vw - env\(titlebar-area-x, 0px\) - env\(titlebar-area-width, 100vw\)\);/s,
+  );
+  assert.match(
+    stylesSource,
+    /\.app-root:not\(\[data-platform="darwin"\]\) \.titlebar-left\s*\{[^}]*left:\s*calc\(var\(--titlebar-inset-left\) \+ 8px\);/s,
+  );
+  assert.match(
+    stylesSource,
+    /\.app-root:not\(\[data-platform="darwin"\]\) \.welcome-top\s*\{[^}]*padding-left:\s*calc\(var\(--titlebar-inset-left\) \+ 20px\);[^}]*padding-right:\s*calc\(var\(--titlebar-inset-right\) \+ 20px\);/s,
+  );
+  assert.match(stylesSource, /\.titlebar-left\s*\{[^}]*left:\s*76px;/s);
+});
