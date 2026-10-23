@@ -1498,6 +1498,59 @@ describe("trusted Codex task environment continuity", () => {
       .toEqual([root, codexHome]);
   });
 
+  function cachedThreadState(prefix: string, entry: unknown): string {
+    const stateRoot = mkdtempSync(join(tmpdir(), prefix));
+    temporaryRoots.push(stateRoot);
+    const statePath = join(stateRoot, "thread-environments.json");
+    writeFileSync(statePath, typeof entry === "string" ? entry : JSON.stringify({ version: 1, threads: { [rolloutThreadId]: entry } }));
+    return statePath;
+  }
+
+  // A delta without <workspace_roots> repeats no context; the turn start's roots stay (#29).
+  test("a midnight delta without workspace_roots keeps the roots established at turn start", () => {
+    const { codexHome, request, visualizationRoot } = undeclaredRolloutMidnightFixture();
+    const statePath = cachedThreadState("codex-rootless-delta-", {
+      cwd: root, roots: [root, visualizationRoot], writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    });
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request)).toMatchObject({
+      cwd: root,
+      roots: [root, visualizationRoot],
+      writableRoots: [root, visualizationRoot],
+    });
+    expect(JSON.parse(readFileSync(statePath, "utf8")).threads[rolloutThreadId].roots).toEqual([root, visualizationRoot]);
+  });
+
+  test("a midnight delta without workspace_roots falls back to the rollout cwd without a cache", () => {
+    const { codexHome, request } = undeclaredRolloutMidnightFixture();
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots).toEqual([root]);
+  });
+
+  test("a midnight delta without workspace_roots ignores an expired cache entry", () => {
+    const { codexHome, request, visualizationRoot } = undeclaredRolloutMidnightFixture();
+    const statePath = cachedThreadState("codex-rootless-delta-expired-", {
+      cwd: root, roots: [root, visualizationRoot], writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: 0,
+    });
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request).roots).toEqual([root]);
+  });
+
+  test("a midnight delta without workspace_roots ignores a cache for another cwd", () => {
+    const { codexHome, request, visualizationRoot } = undeclaredRolloutMidnightFixture();
+    const statePath = cachedThreadState("codex-rootless-delta-cwd-", {
+      cwd: visualizationRoot, roots: [root, visualizationRoot], writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    });
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request).roots).toEqual([root]);
+  });
+
+  test("a midnight delta without workspace_roots repairs a corrupt cache", () => {
+    const { codexHome, request } = undeclaredRolloutMidnightFixture();
+    const statePath = cachedThreadState("codex-rootless-delta-corrupt-", "{");
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request).roots).toEqual([root]);
+    expect(readdirSync(dirname(statePath)).some(name => name.startsWith("thread-environments.json.corrupt-"))).toBe(true);
+  });
+
   test("a midnight delta cannot add a trusted Codex home as workspace context", () => {
     const { codexHome, request, delta, repeatRoots } = undeclaredRolloutMidnightFixture();
     repeatRoots(delta, root, codexHome);
