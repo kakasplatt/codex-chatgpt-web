@@ -292,22 +292,24 @@ export class ChatGptThreadEnvironmentStore {
             const contextRoots = this.calendarContextRoots(
               resolvedCalendarDelta,
               { ...rollout, environment: rolloutEnvironment },
-              rolloutIdentity.threadId,
+              // A full environment in this request is newer than the cache; only a bare delta
+              // falls back to the roots established at turn start.
+              currentClaim ? undefined : rolloutIdentity.threadId,
               refusesContext,
             );
             if (contextRoots) {
               rolloutEnvironment = { ...rolloutEnvironment, roots: [...contextRoots], writableRoots: [...contextRoots] };
             }
             // The broker compares the pinned turn-start environment exactly. Keep the spelling the
-            // turn start cached for every path whose identity is unchanged.
+            // turn start cached for every path whose identity is unchanged, field by field first.
             const established = this.peek(rolloutIdentity.threadId);
             if (established) {
-              const spellings = [established.cwd, ...established.roots, ...established.writableRoots];
+              const { cwd, roots, writableRoots } = established;
               rolloutEnvironment = {
                 ...rolloutEnvironment,
-                cwd: preferSpelling([rolloutEnvironment.cwd], spellings)[0]!,
-                roots: preferSpelling(rolloutEnvironment.roots, spellings),
-                writableRoots: preferSpelling(rolloutEnvironment.writableRoots, spellings),
+                cwd: preferSpelling([rolloutEnvironment.cwd], [cwd, ...roots, ...writableRoots])[0]!,
+                roots: preferSpelling(rolloutEnvironment.roots, [...roots, ...writableRoots, cwd]),
+                writableRoots: preferSpelling(rolloutEnvironment.writableRoots, [...writableRoots, ...roots, cwd]),
               };
             }
           }
@@ -379,7 +381,7 @@ export class ChatGptThreadEnvironmentStore {
   private calendarContextRoots(
     delta: ChatGptCalendarEnvironmentDelta,
     rollout: CodexRolloutEnvironment,
-    threadId: string,
+    threadId: string | undefined,
     refusesContext: (roots: string[], nativeRoots: Set<string>) => boolean,
   ): string[] | undefined {
     const environment = rollout.environment;
@@ -397,7 +399,7 @@ export class ChatGptThreadEnvironmentStore {
       // The delta repeats no roots, so the roots this thread established at turn start stay its
       // context (the broker pins the start envelope for the whole tool loop), provided they keep
       // the native cwd and every native root.
-      const established = this.peek(threadId);
+      const established = threadId ? this.peek(threadId) : undefined;
       if (established?.sandboxPolicy.type === "dangerFullAccess"
         && pathIdentity(established.cwd) === pathIdentity(environment.cwd)
         && [...nativeRoots].every(root => established.roots.some(path => pathIdentity(path) === root))) {

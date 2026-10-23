@@ -1479,6 +1479,16 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  test.skipIf(process.platform !== "win32")("a repeated midnight delta keeps each cached field's own spelling across rounds", () => {
+    const { codexHome, request, delta, visualizationRoot, repeatRoots } = undeclaredRolloutMidnightFixture();
+    const statePath = cachedThreadState("codex-delta-spelling-rounds-", "{\"version\":1,\"threads\":{}}");
+    repeatRoots(delta, root.toUpperCase(), visualizationRoot);
+    const store = new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome);
+    const first = store.resolve(request);
+    expect(first).toMatchObject({ cwd: root, roots: [root.toUpperCase(), visualizationRoot] });
+    expect(store.resolve(request)).toEqual(first);
+  });
+
   test.skipIf(process.platform !== "win32")("the rollout cwd keeps the cached spelling when only its case differs", () => {
     const { codexHome, request } = undeclaredRolloutMidnightFixture();
     const statePath = cachedThreadState("codex-cwd-spelling-", {
@@ -1782,6 +1792,18 @@ describe("trusted Codex task environment continuity", () => {
     repeatRoots(delta, root, visualizationRoot);
     asCompactionContinuation(fixture, "Compaction midnight roots beyond claim", [root]);
     expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("Compaction continuation environment conflicts with its current Codex rollout (fields: workspace_roots)");
+  });
+
+  // The request's own full environment is newer than the cache; a rootless delta keeps it.
+  test("compaction plus a midnight delta without workspace_roots keeps the request's roots over a wider cache", () => {
+    const fixture = undeclaredRolloutMidnightFixture();
+    const { codexHome, request, visualizationRoot } = fixture;
+    asCompactionContinuation(fixture, "Compaction midnight rootless delta with a wider cache", [root]);
+    const statePath = cachedThreadState("codex-rootless-delta-claim-", {
+      cwd: root, roots: [root, visualizationRoot], writableRoots: [root, visualizationRoot],
+      sandboxPolicy: { type: "dangerFullAccess" }, updatedAt: Date.now(),
+    });
+    expect(new ChatGptThreadEnvironmentStore(statePath, Date.now, codexHome).resolve(request).roots).toEqual([root]);
   });
 
   test("compaction plus midnight accepts a native bullet worker inventory (#27)", () => {
