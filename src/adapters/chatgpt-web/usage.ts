@@ -16,6 +16,8 @@ import {
   supportsChatGptWebBiggerContext,
 } from "../../chatgpt-web-models";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
+import { readCodexModelContextOverride } from "../../codex-integration-document";
+import { underCompactionPressure } from "../../request-size-policy";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import {
   CHATGPT_BIGGER_CONTEXT_PARTS,
@@ -294,6 +296,52 @@ function roundEvidenceText(evidence: ChatGptWebRoundEvidence): string {
   });
 }
 
+/**
+ * The context size Codex measures `total_tokens` against for this request's route. It is the
+ * window the model catalog advertises (`buildChatGptWebModel` passes the real Bigger/Full Context
+ * flags and the family only for automatic routes), raised to the user's `model_context_window`
+ * when that is larger. Codex's auto-compact limit is at most about 90% of the advertised window.
+ */
+function compactionPressureTokens(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+  experimentalBiggerContext: boolean,
+  experimentalFullContext: boolean,
+  readContextOverride: typeof readCodexModelContextOverride,
+): number {
+  const manual = isChatGptWebZeroRiskBackendModel(parsed.modelId);
+  const effort = manual
+    ? "low"
+    : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities).effort;
+  const advertised = resolveChatGptWebContextLimits(
+    parsed.modelId as ChatGptWebBackendModel,
+    effort,
+    { ...capabilities, experimentalBiggerContext, experimentalFullContext },
+    parsed._chatgptModelFamily,
+  ).contextWindow;
+  let override = 0;
+  try {
+    override = readContextOverride()?.contextWindow ?? 0;
+  } catch {
+    // An unreadable Codex config must not fail a turn; the advertised window already suffices.
+  }
+  return Math.max(advertised, override);
+}
+
+const compactionPressureLogged = new WeakSet<CodexParsedRequest>();
+
+/**
+ * Under byte pressure the request is close to the local body limit, but Codex only compacts when
+ * the reported `total_tokens` reaches its limit. Reporting the context window makes Codex run its
+ * auto-compaction before the next request can exceed the limit. Compaction requests, and Luna
+ * without Bigger Context (where `server.ts` rejects compaction), never report pressure.
+ */
+function reportsCompactionPressure(parsed: CodexParsedRequest, experimentalBiggerContext: boolean): boolean {
+  return underCompactionPressure(parsed._requestBodyBytes)
+    && !parsed._compactionRequest
+    && !(parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !experimentalBiggerContext);
+}
+
 export function estimateChatGptWebUsage(
   parsed: CodexParsedRequest,
   evidence: ChatGptWebRoundEvidence,
@@ -302,6 +350,7 @@ export function estimateChatGptWebUsage(
   experimentalSkillAttachments = false,
   experimentalFullContext = false,
   appName?: string,
+  readContextOverride: typeof readCodexModelContextOverride = readCodexModelContextOverride,
 ): CodexUsage {
   const experimentalMultipartMode = experimentalFullContext ? "full" : "bigger";
   const experimentalMultipartParts = experimentalFullContext
@@ -309,13 +358,29 @@ export function estimateChatGptWebUsage(
     : (experimentalBiggerContext
       ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, appName)
       : undefined);
-  const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
+  const estimatedInputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
     appName,
     ...(experimentalBiggerContext ? { captureLunaCheckpoint: false } : {}),
     experimentalSkillAttachments,
     experimentalMultipartMode,
     experimentalMultipartParts,
   });
+  let inputTokens = estimatedInputTokens;
+  if (reportsCompactionPressure(parsed, experimentalBiggerContext)) {
+    inputTokens = Math.max(
+      estimatedInputTokens,
+      compactionPressureTokens(parsed, capabilities, experimentalBiggerContext, experimentalFullContext, readContextOverride),
+    );
+    if (!compactionPressureLogged.has(parsed)) {
+      compactionPressureLogged.add(parsed);
+      console.warn(`[chatgpt-web] compaction_pressure ${JSON.stringify({
+        encodedBytes: parsed._requestBodyBytes!.encoded,
+        decodedBytes: parsed._requestBodyBytes!.decoded,
+        estimatedInputTokens,
+        reportedInputTokens: inputTokens,
+      })}`);
+    }
+  }
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
   return {
     inputTokens,

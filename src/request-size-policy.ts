@@ -22,6 +22,23 @@ export const COMPACTION_REQUEST_BODY_LIMITS: RequestBodyLimits = {
  */
 export const SERVER_MAX_REQUEST_BODY_BYTES = 2 * COMPACTION_REQUEST_BODY_LIMITS.encodedBytes;
 
+/**
+ * Soft thresholds for web-model requests: 16 MiB of encoded and 32 MiB of decoded headroom below
+ * the standard limits, enough for roughly five to eight large `view_image` results in one batch.
+ * At or above either one the bridge reports usage at the context window so Codex compacts first.
+ */
+export const COMPACTION_PRESSURE_BYTES: RequestBodyLimits = {
+  encodedBytes: DEFAULT_REQUEST_BODY_LIMITS.encodedBytes - 16 * 1024 * 1024,
+  decodedBytes: DEFAULT_REQUEST_BODY_LIMITS.decodedBytes - 32 * 1024 * 1024,
+};
+
+/** `undefined` (native models, or requests whose wire size was not measured) is never pressure. */
+export function underCompactionPressure(bytes: { encoded: number; decoded: number } | undefined): boolean {
+  return bytes !== undefined
+    && (bytes.encoded >= COMPACTION_PRESSURE_BYTES.encodedBytes
+      || bytes.decoded >= COMPACTION_PRESSURE_BYTES.decodedBytes);
+}
+
 export interface RequestSizeLimits {
   standard: RequestBodyLimits;
   compaction: RequestBodyLimits;

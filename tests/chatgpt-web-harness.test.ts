@@ -24,6 +24,7 @@ import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompacti
 import { callTurnBroker, TurnBroker, RemoteTurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import { CHATGPT_WEB_AGENT_WAIT_POLL_MS, CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
+import { resolveChatGptWebContextLimits } from "../src/chatgpt-web-models";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
@@ -2579,6 +2580,73 @@ describe("ChatGPT outer-native harness v4", () => {
     await expect(callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId }))
       .rejects.toThrow("has already finished");
     await broker.close();
+  });
+
+  test("a tool batch emitted under pressure carries the raised usage", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-pressure-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: "browser://chatgpt-pressure-test",
+      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const prepared = await turn.prepare();
+      try {
+        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+        if (!token) throw new Error("turn token missing from compiled prompt");
+        const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+        await invokeAfterBrowserBoundary(turn, () => callTurnBroker<BrokerToolResult>(socketPath, {
+          method: "invoke",
+          bindingId: claimed.bindingId,
+          wireName: "exec_command",
+          freeform: false,
+          arguments: { cmd: "list-files", workdir: tempRoot },
+        }, 30_000));
+        return "unused";
+      } finally {
+        prepared.release();
+      }
+    };
+
+    // Keep the developer's own Codex config out of the pressure window.
+    const originalCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = join(tempRoot, "isolated-pressure-codex");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const adapter = createChatGptWebAdapter(provider);
+    try {
+      const window = resolveChatGptWebContextLimits(
+        "gpt-5.6-sol", "high", { solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      ).contextWindow;
+      let runs = 0;
+      const run = async (bytes: { encoded: number; decoded: number } | undefined) => {
+        const request = rawWireRequest(environmentXml);
+        // A distinct native turn per request keeps the second run from attaching to the first.
+        runs += 1;
+        request._rawBody = JSON.parse(JSON.stringify(request._rawBody).replaceAll("_test_123", `_pressure_${runs}`));
+        if (bytes) request._requestBodyBytes = bytes;
+        const events: AdapterEvent[] = [];
+        await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+        expect(events.some(event => event.type === "tool_call_start")).toBeTrue();
+        return events.at(-1) as Extract<AdapterEvent, { type: "done" }>;
+      };
+
+      const calm = await run({ encoded: 1024 * 1024, decoded: 2 * 1024 * 1024 });
+      expect(calm.usage!.inputTokens).toBeLessThan(window);
+
+      const pressured = await run({ encoded: 48 * 1024 * 1024, decoded: 90 * 1024 * 1024 });
+      expect(pressured.usage!.inputTokens).toBe(window);
+      expect(pressured.usage!.totalTokens).toBeGreaterThanOrEqual(window);
+      const wire = buildResponseJSON([pressured], "gpt-5.6-sol") as { usage: { input_tokens: number; total_tokens: number } };
+      expect(wire.usage.input_tokens).toBe(window);
+      expect(wire.usage.total_tokens).toBeGreaterThanOrEqual(window);
+    } finally {
+      warn.mockRestore();
+      if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = originalCodexHome;
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
   });
 
   test("recalculates usage from tool results added during the active browser turn", async () => {
