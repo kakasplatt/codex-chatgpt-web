@@ -106,13 +106,17 @@ never compacted, so the zstd request body sits near or above the 64 MiB encoded 
    prove that Codex auto-compacts in the middle of the turn and the turn continues.
 6. **Refused compaction on Luna.** With Luna and without Bigger Context, force Codex to auto-compact
    while a tool call is pending. Prove that the turn ends at once with `codex_compaction_unavailable`.
-   This assumes Codex fails the turn on the 409; if it continues instead, revert that attribution.
-7. **Compaction repetition.** Across a real thread, count `compaction_pressure` lines with
-   `afterCompaction: true`. Repeated lines mean a compaction did not shrink the history enough and a
-   guard is needed; none means the item can be closed.
+   This assumes Codex fails its own turn on the 409; if it continues the turn instead, the attribution
+   kills a turn that would have finished, and commit "end a Luna turn at once" must be reverted.
+7. **Compaction repetition.** Across a real thread, read the `messagesSinceCompaction` field of every
+   `compaction_pressure` line (`null`: the history was never compacted). A line with a small count, a
+   handful of messages after the latest summary, means that compaction did not shrink the history
+   enough and Codex will compact again on every round, so a guard is needed. Large counts are ordinary
+   regrowth. If no thread ever shows a small count, the item can be closed.
 8. **Broker endpoint on POSIX.** `resolveBrokerEndpoint(config.brokerSocketPath) === config.brokerSocketPath`
-   is now asserted by `tests/runtime-layout.test.ts` on the Linux and macOS CI jobs. Confirm the CI run
-   was green on both.
+   is asserted by `tests/runtime-layout.test.ts` for the default config, and skipped on Windows, so it
+   only runs on the Linux and macOS CI jobs. Confirm the first CI run of #71 is green on both before
+   treating it as proven; it has not run yet.
 
 ## macOS gate
 

@@ -42,7 +42,7 @@ export function chatGptCodexRequestRejectedError(failure: CodexRequestRejectedFa
 export function chatGptCodexCompactionUnavailableError(failure: CodexCompactionUnavailableFailure): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     `Conversation interrupted: Codex asked to compact this task while the turn waited for tool results, and this ChatGPT Web route refuses compaction (HTTP ${failure.status}). `
-    + "The turn was stopped. Send the message again to continue.",
+    + "The turn was stopped. Start a new task, or enable Bigger Context so Luna tasks can be compacted.",
     { status: 400, errorType: "invalid_request_error", code: "codex_compaction_unavailable", retryable: false },
   );
 }
