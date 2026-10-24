@@ -4583,7 +4583,9 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   }, 10_000);
 
-  test.each([false, true])("a retired MCP binding closes the adapter tool boundary and preserves timeout=%s", async timedOut => {
+  test.each(["completed", "timedOut", "rejected"] as const)("a retired MCP binding closes the adapter tool boundary and preserves outcome=%s", async outcome => {
+    const timedOut = outcome === "timedOut";
+    const rejected = outcome === "rejected";
     const socketPath = brokerTestEndpoint(`cgw-h3-retired-boundary-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -4636,13 +4638,20 @@ describe("ChatGPT outer-native harness v4", () => {
         const remoteRetirement = new RemoteTurnBroker(socketPath).waitForRetirement(token);
         // Queue the observer before release so both local and remote owners see the same event.
         await callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId });
-        await callTurnBroker(socketPath, {
-          method: "release", bindingId: claimed.bindingId,
-          ...(timedOut ? { failure: { code: "codex_tool_timeout" as const, tool: "exec_command", timeoutMs: 90_000 } } : {}),
-        });
+        const rejectedFailure = { code: "codex_request_rejected" as const, status: 400, reason: "request_body_too_large" as const };
+        if (rejected) {
+          // Codex's follow-up request was rejected, so the server ends the turn instead of the MCP release.
+          const traceId = [...(broker as unknown as { channels: Map<string, { traceId: string }> }).channels.values()][0]!.traceId;
+          expect(broker.failTraceAwaitingResults(traceId, rejectedFailure)).toBe(1);
+        } else {
+          await callTurnBroker(socketPath, {
+            method: "release", bindingId: claimed.bindingId,
+            ...(timedOut ? { failure: { code: "codex_tool_timeout" as const, tool: "exec_command", timeoutMs: 90_000 } } : {}),
+          });
+        }
         expect(await remoteRetirement).toEqual(timedOut
           ? { code: "codex_tool_timeout", tool: "exec_command", timeoutMs: 90_000 }
-          : undefined);
+          : rejected ? rejectedFailure : undefined);
         const invocationResult = await invocationOutcome;
         expect(invocationResult.type).toBe("error");
         await broker.waitForRetirement(token);
@@ -4675,13 +4684,15 @@ describe("ChatGPT outer-native harness v4", () => {
       );
       await retirementObserved;
       expect(retiredProgress?.activeToolCalls).toBe(0);
-      expect(lateAcknowledgementError?.message).toContain(timedOut ? "exec_command" : "retired the turn binding");
+      expect(lateAcknowledgementError?.message).toContain(timedOut ? "exec_command"
+        : rejected ? "was rejected (HTTP 400" : "retired the turn binding");
       expect(events.some(event => event.type === "tool_call_start")).toBeFalse();
       expect(events.at(-1)).toMatchObject({
         type: "error",
-        code: timedOut ? "codex_tool_timeout" : "chatgpt_submitted_turn_failed",
+        code: timedOut ? "codex_tool_timeout" : rejected ? "codex_request_rejected" : "chatgpt_submitted_turn_failed",
         message: expect.stringContaining(timedOut
           ? "Conversation interrupted: tool timeout"
+          : rejected ? "was rejected (HTTP 400"
           : "Conversation interrupted: turn failed after submission"),
       });
     } finally {

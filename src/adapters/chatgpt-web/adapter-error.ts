@@ -1,3 +1,5 @@
+import type { BrokerRetirementFailure, CodexRequestRejectedFailure } from "./turn-broker";
+
 export interface ChatGptWebAdapterErrorOptions {
   status: number;
   errorType: string;
@@ -28,6 +30,20 @@ export function chatGptToolTimeoutError(tool: string, timeoutMs: number): ChatGp
     + "The turn was stopped. Check whether the command is still running or waiting for approval before retrying.",
     { status: 504, errorType: "server_error", code: "codex_tool_timeout", retryable: false },
   );
+}
+
+export function chatGptCodexRequestRejectedError(failure: CodexRequestRejectedFailure): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `Conversation interrupted: Codex's request carrying this turn's tool results was rejected (HTTP ${failure.status}, ${failure.reason}). The turn was stopped.`,
+    { status: 400, errorType: "invalid_request_error", code: "codex_request_rejected", retryable: false },
+  );
+}
+
+export function chatGptRetirementError(failure: BrokerRetirementFailure): ChatGptWebAdapterError {
+  switch (failure.code) {
+    case "codex_tool_timeout": return chatGptToolTimeoutError(failure.tool, failure.timeoutMs);
+    case "codex_request_rejected": return chatGptCodexRequestRejectedError(failure);
+  }
 }
 
 export function chatGptResponseIncompleteError(message: string): ChatGptWebAdapterError {
