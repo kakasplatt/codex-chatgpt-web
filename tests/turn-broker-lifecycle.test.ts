@@ -182,6 +182,40 @@ test("native interruption retires only the exact browser turn identity", async (
   sessions.clear();
 });
 
+test("activeTraceIdsForNativeTurn returns active traces for the exact native turn without mutating", async () => {
+  const sessions = new ChatGptTurnSessions();
+  let cancelled = 0;
+  const runtime = (browser: Promise<string>) => ({
+    mode: "read-only" as const,
+    browser,
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled += 1; },
+  });
+  const pending = () => new Promise<string>(() => {});
+  // Settle the inactive entry first: at most five browser turns may be active at once.
+  const settled = sessions.getOrCreate("settled", () => runtime(Promise.resolve("done")), "trace_settled", "owner", "turn_a", "thread_shared");
+  await settled.browserOutcome;
+  sessions.getOrCreate("active", () => runtime(pending()), "trace_active", "owner", "turn_a", "thread_shared");
+  // Same trace id twice for the exact turn is reported once.
+  sessions.getOrCreate("active-again", () => runtime(pending()), "trace_active", "owner", "turn_a", "thread_shared");
+  sessions.getOrCreate("other-turn", () => runtime(pending()), "trace_other_turn", "owner", "turn_b", "thread_shared");
+  sessions.getOrCreate("other-thread", () => runtime(pending()), "trace_other_thread", "owner", "turn_a", "thread_other");
+  sessions.getOrCreate("untraced", () => runtime(pending()), undefined, "owner", "turn_a", "thread_shared");
+  const activeBefore = sessions.activeCount();
+  expect(activeBefore).toBe(5);
+
+  expect(sessions.activeTraceIdsForNativeTurn("thread_shared", "turn_a")).toEqual(["trace_active"]);
+  expect(sessions.activeTraceIdsForNativeTurn("thread_shared", "turn_missing")).toEqual([]);
+  expect(sessions.activeCount()).toBe(activeBefore);
+  for (const key of ["active", "active-again", "other-turn", "other-thread", "untraced", "settled"]) {
+    expect(sessions.find(key)).toBeDefined();
+  }
+  expect(cancelled).toBe(0);
+  sessions.clear();
+});
+
 test("session cache expiry never cancels a still-active long browser turn", async () => {
   const sessions = new ChatGptTurnSessions(1);
   let cancelled = 0;

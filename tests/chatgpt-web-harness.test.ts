@@ -28,6 +28,7 @@ import { defaultBrokerEndpoint } from "../src/config";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
+import { attributeRejectedRequest } from "../src/server";
 import type { AdapterEvent, CodexMessage, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
 const tempRoot = join(tmpdir(), `codex-chatgpt-web-harness-${process.pid}-${Date.now()}`);
@@ -4696,6 +4697,106 @@ describe("ChatGPT outer-native harness v4", () => {
           : "Conversation interrupted: turn failed after submission"),
       });
     } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      chatGptTurnSessions.clear();
+      await broker.close();
+    }
+  }, 10_000);
+
+  test("a rejected follow-up ends a turn with a delivered tool call promptly", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-rejected-followup-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://rejected-followup-${Date.now()}`,
+      chatgptWeb: {
+        brokerSocketPath: socketPath,
+        localToolsEnabled: true,
+        solAvailable: true,
+        extraHighAvailable: true, proAvailable: true,
+      },
+    };
+    const broker = TurnBroker.forSocket(socketPath);
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const attributionLogs: string[] = [];
+    const warn = spyOn(console, "warn").mockImplementation((...args) => {
+      const line = args.map(String).join(" ");
+      if (line.startsWith("[codex-chatgpt-web] request_rejection_attributed")) attributionLogs.push(line);
+    });
+    let revokedTurns: number | undefined;
+    let rejectedAt = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const prepared = await turn.prepare();
+      try {
+        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+        if (!token) throw new Error("missing test turn token");
+        turn.onSubmitted?.();
+        const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+        const invocation = callTurnBroker<BrokerToolResult>(socketPath, {
+          method: "invoke",
+          bindingId: claimed.bindingId,
+          wireName: "exec_command",
+          arguments: { cmd: "result never arrives" },
+        }, null);
+        const invocationOutcome = invocation.then(() => "value" as const, () => "error" as const);
+        const progress = turn.externalProgress;
+        if (!progress) throw new Error("tool-capable browser test has no progress transport");
+        let snapshot = progress.snapshot();
+        while (snapshot.lastToolBatchRevision === 0) {
+          snapshot = await progress.waitForChange(snapshot.revision, turn.abortSignal);
+        }
+        expect(snapshot.activeToolCalls).toBe(1);
+        await callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId });
+
+        // Codex's follow-up for this native turn was rejected: the server attributes it to the
+        // active trace instead of waiting CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS for the MCP release.
+        rejectedAt = performance.now();
+        revokedTurns = attributeRejectedRequest(
+          {
+            identity: { threadId: "thread_test_123", turnId: "turn_test_123" },
+            status: 400,
+            reason: "request_body_too_large",
+          },
+          chatGptTurnSessions,
+          broker,
+        );
+        expect(await invocationOutcome).toBe("error");
+
+        return await new Promise<string>((_resolve, reject) => {
+          const rejectAborted = () => reject(turn.abortSignal?.reason ?? new DOMException("test browser aborted", "AbortError"));
+          if (turn.abortSignal?.aborted) rejectAborted();
+          else turn.abortSignal?.addEventListener("abort", rejectAborted, { once: true });
+        });
+      } finally {
+        prepared.release();
+      }
+    };
+
+    const events: AdapterEvent[] = [];
+    try {
+      await createChatGptWebAdapter(provider, { broker }).runTurn!(
+        rawWireRequest(environmentXml),
+        { headers: new Headers() },
+        event => events.push(event),
+      );
+      const elapsedMs = performance.now() - rejectedAt;
+      expect(rejectedAt).toBeGreaterThan(0);
+      expect(revokedTurns).toBe(1);
+      expect(elapsedMs).toBeLessThan(2_000);
+      expect(elapsedMs).toBeLessThan(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS);
+      expect(events.at(-1)).toMatchObject({
+        type: "error",
+        code: "codex_request_rejected",
+        message: expect.stringContaining("was rejected (HTTP 400"),
+      });
+      expect(attributionLogs).toHaveLength(1);
+      const logged = JSON.parse(attributionLogs[0]!.slice("[codex-chatgpt-web] request_rejection_attributed".length)) as {
+        traceIds: string[]; revokedTurns: number; status: number; reason: string;
+      };
+      expect(logged).toMatchObject({ revokedTurns: 1, status: 400, reason: "request_body_too_large" });
+      expect(logged.traceIds).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       chatGptTurnSessions.clear();
       await broker.close();

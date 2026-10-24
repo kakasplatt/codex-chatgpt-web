@@ -1,8 +1,8 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
-import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
+import { closeTurnBrokers, TurnBroker, type CodexRequestRejectedFailure } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
-import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
+import { chatGptTurnSessions, type ChatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
   cancelAllStructuredCompactions,
   cancelStructuredCompactionNativeTurn,
@@ -378,6 +378,15 @@ export interface ResponseRequestOptions {
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
   /** Tests inject small limits; production uses the policy defaults. */
   requestSizeLimits?: RequestSizeLimits;
+  /** Observe a request refused after its body was read and before the adapter ran, once its native turn is known. */
+  onRequestRejected?: (rejection: CodexRequestRejection) => void;
+}
+
+/** A Codex request refused with a 4xx after its body was read, and the native turn that sent it. */
+export interface CodexRequestRejection {
+  identity: NativeCodexTurnIdentity;
+  status: number;
+  reason: CodexRequestRejectedFailure["reason"];
 }
 
 interface ResponseBodyContext {
@@ -647,12 +656,47 @@ function rejectionRemedy(
   return stage === "policy" && webModel ? "compact" : "new_task";
 }
 
+function nativeTurnIdentity(identity: { threadId?: string; turnId?: string }): NativeCodexTurnIdentity | undefined {
+  return identity.threadId && identity.turnId ? { threadId: identity.threadId, turnId: identity.turnId } : undefined;
+}
+
+/** The native turn named by the `x-codex-turn-metadata` header; `undefined` when absent or unparseable. */
+function turnIdentityFromHeaders(headers: Headers): NativeCodexTurnIdentity | undefined {
+  const metadata = headers.get("x-codex-turn-metadata");
+  return metadata
+    ? nativeTurnIdentity(extractCodexTurnIdentityFromBody({ client_metadata: { "x-codex-turn-metadata": metadata } }))
+    : undefined;
+}
+
+/** Answers with a 4xx and, when the native turn is known, reports the rejection for attribution. */
+function rejectRequest(
+  status: number,
+  type: string,
+  message: string,
+  identity: NativeCodexTurnIdentity | undefined,
+  reason: CodexRequestRejection["reason"],
+  options: Pick<ResponseRequestOptions, "onRequestRejected">,
+): Response {
+  const response = formatErrorResponse(status, type, message);
+  if (identity) {
+    try {
+      options.onRequestRejected?.({ identity, status, reason });
+    } catch (error) {
+      // Attribution is a side channel: it must never turn this terminal 4xx into a retryable 5xx.
+      console.error(`[codex-chatgpt-web] request_rejection_attribution_failed ${error instanceof Error ? error.name : "Error"}`);
+    }
+  }
+  return response;
+}
+
 /** Logs a size-only line and answers with the actionable 400. `raw` is given once the body was parsed. */
 function requestBodyRejectionResponse(
   error: RequestBodyLimitError,
   route: RequestRoute,
   stage: "read" | "policy",
   webModel: boolean,
+  identity: NativeCodexTurnIdentity | undefined,
+  options: Pick<ResponseRequestOptions, "onRequestRejected">,
   raw?: unknown,
 ): Response {
   const context: RequestRejectionContext = {
@@ -661,7 +705,14 @@ function requestBodyRejectionResponse(
     ...(stage === "policy" ? { images: measureImagePayloads(raw) } : {}),
   };
   logRequestBodyRejection(error, context);
-  return formatErrorResponse(400, "invalid_request_error", formatRequestBodyRejection(error, context));
+  return rejectRequest(
+    400,
+    "invalid_request_error",
+    formatRequestBodyRejection(error, context),
+    identity,
+    "request_body_too_large",
+    options,
+  );
 }
 
 export async function responseRequest(
@@ -679,7 +730,8 @@ export async function responseRequest(
     raw = size.value;
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
-      return requestBodyRejectionResponse(error, "responses", "read", false);
+      // No body identity exists before the read; this rejection is not attributed to a turn.
+      return requestBodyRejectionResponse(error, "responses", "read", false, undefined, options);
     }
     logUnreadableRequestBody("responses", req, error);
     return formatErrorResponse(
@@ -696,7 +748,8 @@ export async function responseRequest(
     assertRequestBodyWithin(size, requestBodyLimitsFor({ route: "responses", raw, webModel }, limits));
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
-      return requestBodyRejectionResponse(error, "responses", "policy", webModel, raw);
+      const identity = nativeTurnIdentity(extractCodexTurnIdentityFromBody(raw));
+      return requestBodyRejectionResponse(error, "responses", "policy", webModel, identity, options, raw);
     }
     throw error;
   }
@@ -719,11 +772,10 @@ async function handleResponseBody(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  let identity: NativeCodexTurnIdentity | undefined;
   try {
-    const identity = extractCodexTurnIdentityFromBody(raw);
-    if (identity.threadId && identity.turnId) {
-      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
-    }
+    identity = nativeTurnIdentity(extractCodexTurnIdentityFromBody(raw));
+    if (identity) options.onTurnIdentity?.(identity);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -746,26 +798,40 @@ async function handleResponseBody(
     parsed = parseRequest(expanded);
     if (prediction) executionConfig = configureComposerPrediction(parsed, config);
     route = routeChatGptWebRequest(parsed, executionConfig);
-    const identity = extractChatGptTurnIdentity(parsed);
-    if (identity.threadId && identity.turnId) {
-      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
+    const parsedIdentity = nativeTurnIdentity(extractChatGptTurnIdentity(parsed));
+    if (parsedIdentity) {
+      options.onTurnIdentity?.(parsedIdentity);
+      identity = parsedIdentity;
     }
   } catch (error) {
-    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+    return rejectRequest(
+      400,
+      "invalid_request_error",
+      error instanceof Error ? error.message : String(error),
+      identity,
+      "invalid_request",
+      options,
+    );
   }
   if (parsed._opaqueMultiAgentV2Payload) {
-    return formatErrorResponse(
+    return rejectRequest(
       400,
       "invalid_request_error",
       "ChatGPT Web cannot read this encrypted cross-backend subagent payload. "
         + "Start a new Compatibility V1 task, or delegate from a Web model whose collaboration call uses the plaintext-delivery marker.",
+      identity,
+      "invalid_request",
+      options,
     );
   }
   if (typeof requestedPreviousResponseId === "string" && expanded === raw) {
-    return formatErrorResponse(
+    return rejectRequest(
       409,
       "invalid_request_error",
       "Local continuation state for previous_response_id is unavailable; refusing to run ChatGPT Web with partial Codex context. Compact the Codex task or start a new task before retrying.",
+      identity,
+      "invalid_request",
+      options,
     );
   }
 
@@ -844,7 +910,7 @@ async function handleResponseBody(
       // new turn_id. Its last human prompt still belongs to the stopped turn and must not be
       // replayed as new work. HTTP 400 makes that malformed recovery request terminal instead of
       // allowing Codex to retry it as an upstream 502.
-      return formatErrorResponse(400, "invalid_request_error", message);
+      return rejectRequest(400, "invalid_request_error", message, identity, "invalid_request", options);
     }
     if (!message.includes("requires native Codex turn_id metadata")
       && !message.includes("requires a current-turn user message")) throw error;
@@ -940,7 +1006,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "requestSizeLimits"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "requestSizeLimits" | "onRequestRejected"> = {},
 ): Promise<Response> {
   const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
@@ -952,7 +1018,8 @@ export async function compactRequest(
     raw = size.value as Record<string, unknown>;
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
-      return requestBodyRejectionResponse(error, "compact", "read", false);
+      // The canonical header names the turn even when the body was never read.
+      return requestBodyRejectionResponse(error, "compact", "read", false, turnIdentityFromHeaders(req.headers), options);
     }
     logUnreadableRequestBody("compact", req, error);
     return formatErrorResponse(
@@ -977,11 +1044,10 @@ export async function compactRequest(
       },
     };
   }
+  let identity: NativeCodexTurnIdentity | undefined;
   try {
-    const identity = extractCodexTurnIdentityFromBody(raw);
-    if (identity.threadId && identity.turnId) {
-      options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
-    }
+    identity = nativeTurnIdentity(extractCodexTurnIdentityFromBody(raw));
+    if (identity) options.onTurnIdentity?.(identity);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -993,7 +1059,7 @@ export async function compactRequest(
       assertRequestBodyWithin(size, limits.standard);
     } catch (error) {
       if (error instanceof RequestBodyLimitError) {
-        return requestBodyRejectionResponse(error, "compact", "policy", false, raw);
+        return requestBodyRejectionResponse(error, "compact", "policy", false, identity, options, raw);
       }
       throw error;
     }
@@ -1007,7 +1073,14 @@ export async function compactRequest(
   try {
     route = requireChatGptWebModelRoute(raw.model, config);
   } catch (error) {
-    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+    return rejectRequest(
+      400,
+      "invalid_request_error",
+      error instanceof Error ? error.message : String(error),
+      identity,
+      "invalid_request",
+      options,
+    );
   }
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
     return formatErrorResponse(
@@ -1065,6 +1138,29 @@ export async function compactRequest(
   return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(input), summary) });
 }
 
+/**
+ * A rejected Codex request never delivers the tool results its browser turn is waiting for. End
+ * that native turn's active browser traces now instead of after the MCP tool timeout. Returns the
+ * number of revoked broker turns; only turns with delivered tool calls are affected.
+ */
+export function attributeRejectedRequest(
+  rejection: CodexRequestRejection,
+  sessions: Pick<ChatGptTurnSessions, "activeTraceIdsForNativeTurn">,
+  broker: Pick<TurnBroker, "failTraceAwaitingResults"> | undefined,
+): number {
+  // Tool calls exist only in full mode, the only mode with a broker.
+  if (!broker) return 0;
+  const { identity, status, reason } = rejection;
+  const traceIds = sessions.activeTraceIdsForNativeTurn(identity.threadId, identity.turnId);
+  if (traceIds.length === 0) return 0;
+  let revokedTurns = 0;
+  for (const traceId of traceIds) {
+    revokedTurns += broker.failTraceAwaitingResults(traceId, { code: "codex_request_rejected", status, reason });
+  }
+  console.warn(`[codex-chatgpt-web] request_rejection_attributed ${JSON.stringify({ traceIds, revokedTurns, status, reason })}`);
+  return revokedTurns;
+}
+
 export function startServer(
   config: AppConfig,
   dependencies: {
@@ -1094,6 +1190,10 @@ export function startServer(
     request: number; at: string; status: number; failure?: ModelCatalogFailure;
   } | null = null;
   const httpTurns = new HttpTurnCounter();
+  // The adapter shares this `TurnBroker.forSocket` instance, as /admin/cancel-turn already relies on.
+  const onRequestRejected = (rejection: CodexRequestRejection): void => {
+    attributeRejectedRequest(rejection, chatGptTurnSessions, turnBroker);
+  };
   const modelCatalogFetches = dependencies.modelCatalogFetches ?? new ModelCatalogFetches();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
@@ -1347,7 +1447,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, onRequestRejected },
           ),
           req.signal,
           process.platform,
@@ -1361,7 +1461,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, onRequestRejected },
           ),
           req.signal,
           process.platform,

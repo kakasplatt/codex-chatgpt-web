@@ -1,9 +1,18 @@
 import { afterAll, beforeEach, expect, spyOn, test } from "bun:test";
 import type { ProviderAdapter } from "../src/adapters/base";
-import { defaultConfig } from "../src/config";
+import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { defaultConfig, providerConfig } from "../src/config";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
+import { parseRequest } from "../src/responses/parser";
 import type { RequestSizeLimits } from "../src/request-size-policy";
-import { compactRequest, responseRequest, startServer } from "../src/server";
+import {
+  compactRequest,
+  type CodexRequestRejection,
+  responseRequest,
+  routeChatGptWebRequest,
+  startServer,
+} from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
 
 const MiB = 1024 * 1024;
@@ -227,3 +236,159 @@ test("server: a 129 MiB body gets an HTTP 400 instead of a closed socket", async
     await server.stop(true);
   }
 }, 60_000);
+
+const turnMetadata = (threadId: string, turnId: string): string => JSON.stringify({
+  thread_id: threadId, turn_id: turnId, parent_thread_id: "thread_parent",
+});
+
+function rejectionRecorder() {
+  const rejections: CodexRequestRejection[] = [];
+  return { rejections, onRequestRejected: (rejection: CodexRequestRejection) => { rejections.push(rejection); } };
+}
+
+test("responses: oversized follow-up reports the rejection with the body identity", async () => {
+  const recorder = rejectionRecorder();
+  const body = JSON.stringify({
+    model: webModel,
+    stream: false,
+    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_rejected_followup", "turn_rejected_followup") },
+    input: [padding, { type: "function_call_output", call_id: "call_rejected", output: "done" }],
+  });
+  const response = await responseRequest(post("/v1/responses", body), defaultConfig("full"), compactionAdapterFactory(), {
+    requestSizeLimits, rememberState: false, onRequestRejected: recorder.onRequestRejected,
+  });
+  expect(response.status).toBe(400);
+  expect((await errorMessage(response)).startsWith(REJECTION_PREFIX)).toBe(true);
+  expect(recorder.rejections).toEqual([{
+    identity: { threadId: "thread_rejected_followup", turnId: "turn_rejected_followup" },
+    status: 400,
+    reason: "request_body_too_large",
+  }]);
+});
+
+test("responses: read-time ceiling rejection stays unattributed", async () => {
+  const recorder = rejectionRecorder();
+  const body = JSON.stringify({
+    model: webModel,
+    stream: false,
+    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_ceiling", "turn_ceiling") },
+    input: [{ ...padding, content: [{ type: "input_text", text: "x".repeat(40_000) }] }],
+  });
+  const response = await responseRequest(post("/v1/responses", body), defaultConfig("full"), compactionAdapterFactory(), {
+    requestSizeLimits, rememberState: false, onRequestRejected: recorder.onRequestRejected,
+  });
+  expect(response.status).toBe(400);
+  expect(recorder.rejections).toEqual([]);
+});
+
+test("responses: a refused previous_response_id follow-up reports an invalid_request rejection", async () => {
+  const recorder = rejectionRecorder();
+  const body = JSON.stringify({
+    model: webModel,
+    stream: false,
+    previous_response_id: "resp_unknown_local_state",
+    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_previous", "turn_previous") },
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Continue" }] }],
+  });
+  const response = await responseRequest(post("/v1/responses", body), defaultConfig("full"), compactionAdapterFactory(), {
+    requestSizeLimits, rememberState: false, onRequestRejected: recorder.onRequestRejected,
+  });
+  expect(response.status).toBe(409);
+  expect(recorder.rejections).toEqual([{
+    identity: { threadId: "thread_previous", turnId: "turn_previous" },
+    status: 409,
+    reason: "invalid_request",
+  }]);
+});
+
+test("compact: read-time ceiling rejection reports the header identity", async () => {
+  const recorder = rejectionRecorder();
+  const body = JSON.stringify({ model: webModel, input: [{ ...padding, content: [{ type: "input_text", text: "x".repeat(40_000) }] }] });
+  const headers = { "x-codex-turn-metadata": turnMetadata("thread_compact_ceiling", "turn_compact_ceiling") };
+  const response = await compactRequest(post("/v1/responses/compact", body, headers), defaultConfig("full"), compactionAdapterFactory(), {
+    requestSizeLimits, onRequestRejected: recorder.onRequestRejected,
+  });
+  expect(response.status).toBe(400);
+  expect((await errorMessage(response)).endsWith(NEW_TASK_ADVICE)).toBe(true);
+  expect(recorder.rejections).toEqual([{
+    identity: { threadId: "thread_compact_ceiling", turnId: "turn_compact_ceiling" },
+    status: 400,
+    reason: "request_body_too_large",
+  }]);
+});
+
+test("prediction-skip and terminal replay do not report a rejection", async () => {
+  const recorder = rejectionRecorder();
+  const noAdapter = (): ProviderAdapter => { throw new Error("a refused request must not construct an adapter"); };
+
+  // Prediction-skip: default limits, so the oversized prediction reaches its own skip site.
+  const predictionMetadata = {
+    request_kind: "turn", thread_source: "composer_predictions", turn_trigger: "composer_predictions",
+    thread_id: "prediction-thread", turn_id: "prediction-turn", forked_from_thread_id: "parent-thread",
+  };
+  const prediction = await responseRequest(post("/v1/responses", JSON.stringify({
+    model: "chatgpt-web/gpt-6-pro", reasoning: { effort: "max" }, stream: false,
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify(predictionMetadata) },
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "preserve this entire history ".repeat(60_000) }] }],
+    text: { format: { type: "json_schema", name: "suggestion", strict: true,
+      schema: { type: "object", properties: { suggestion: { type: ["string", "null"] } }, required: ["suggestion"], additionalProperties: false } } },
+  })), { ...defaultConfig("full"), proAvailable: true, experimentalBiggerContext: true }, noAdapter, {
+    rememberState: false, onRequestRejected: recorder.onRequestRejected,
+  });
+  expect(prediction.status).toBe(400);
+  expect(await prediction.text()).toContain("Next-message prediction skipped");
+
+  // Luna compaction refusal is a designed 409, not a rejected follow-up (on both routes).
+  const lunaConfig = { ...defaultConfig("browser-only"), solAvailable: false };
+  const luna = await responseRequest(post("/v1/responses", JSON.stringify({
+    model: "chatgpt-web/luna", stream: false,
+    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna") },
+    input: [{ type: "compaction_trigger" }],
+  })), lunaConfig, noAdapter, { rememberState: false, onRequestRejected: recorder.onRequestRejected });
+  expect(luna.status).toBe(409);
+  const lunaCompact = await compactRequest(post("/v1/responses/compact", JSON.stringify({ model: "chatgpt-web/luna", input: [] }), {
+    "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna"),
+  }), lunaConfig, noAdapter, { onRequestRejected: recorder.onRequestRejected });
+  expect(lunaCompact.status).toBe(409);
+
+  // Terminal replay of a turn whose browser tab was closed.
+  const config = defaultConfig("browser-only");
+  const turnId = "turn_rejection_replay";
+  const replayBody = {
+    model: "chatgpt-web/high",
+    stream: true,
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_rejection_replay", turn_id: turnId }) },
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Run until the browser tab is closed" }],
+      internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    }],
+  };
+  const parsed = parseRequest(replayBody);
+  routeChatGptWebRequest(parsed, config);
+  const traceId = chatGptWebTraceId(providerConfig(config), parsed);
+  chatGptTurnSessions.clear();
+  let rejectBrowser!: (error: Error) => void;
+  const cancelledBrowser = new Promise<string>((_resolve, reject) => { rejectBrowser = reject; });
+  chatGptTurnSessions.getOrCreate("rejection-replay", () => ({
+    mode: "read-only",
+    browser: cancelledBrowser,
+    physicalSettlement: cancelledBrowser.then(() => undefined, () => undefined),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: reason => rejectBrowser(reason ?? new Error("cancelled")),
+  }), traceId);
+  try {
+    expect(await chatGptTurnSessions.cancelTrace(traceId)).toBe(1);
+    const replay = await responseRequest(post("/v1/responses", JSON.stringify(replayBody)), config, noAdapter, {
+      rememberState: false, onRequestRejected: recorder.onRequestRejected,
+    });
+    expect(replay.status).toBe(400);
+    expect(((await replay.json()) as { error: { type: string } }).error.type).toBe("client_closed_request");
+  } finally {
+    chatGptTurnSessions.clear();
+  }
+
+  expect(recorder.rejections).toEqual([]);
+});
