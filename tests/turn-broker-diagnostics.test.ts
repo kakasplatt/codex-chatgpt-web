@@ -129,3 +129,42 @@ test("retirement diagnostics cap call details while keeping complete counts and 
     await expect(f.release()).rejects.toThrow("invalid or expired");
   } finally { await f.close(); }
 });
+
+const rejected = { code: "codex_request_rejected" as const, status: 400, reason: "request_body_too_large" as const };
+
+test("failTraceAwaitingResults settles a delivered call at once with codex_request_rejected", async () => {
+  const f = await fixture();
+  try {
+    const call = await f.enqueue();
+    await f.broker.nextToolBatch(f.token);
+    const retirement = f.broker.waitForRetirement(f.token);
+    expect(f.broker.failTraceAwaitingResults("diagnostic-turn", rejected)).toBe(1);
+    expect(await retirement).toEqual(rejected);
+    expect(await call.outcome).toBe("rejected");
+    const event = f.logs.find(line => line.includes(" broker_retired "))!;
+    expect(JSON.parse(event.split(" broker_retired ")[1]!).failure.code).toBe("codex_request_rejected");
+    expect(f.broker.failTraceAwaitingResults("diagnostic-turn", rejected)).toBe(0);
+  } finally { await f.close(); }
+});
+
+test("failTraceAwaitingResults does not revoke a channel without delivered calls", async () => {
+  const f = await fixture();
+  try {
+    const call = await f.enqueue();
+    expect(f.broker.failTraceAwaitingResults("diagnostic-turn", rejected)).toBe(0);
+    expect(f.broker.failTraceAwaitingResults("another-turn", rejected)).toBe(0);
+    await expect(callTurnBroker(f.socketPath, { method: "resolve", bindingId: f.bindingId })).resolves.toBeDefined();
+    expect(f.broker.revokeTrace("diagnostic-turn")).toBe(1);
+    expect(await call.outcome).toBe("rejected");
+  } finally { await f.close(); }
+});
+
+test("release still rejects a codex_request_rejected failure from the MCP side", async () => {
+  const f = await fixture();
+  try {
+    await f.enqueue();
+    await expect(callTurnBroker(f.socketPath, { method: "release", bindingId: f.bindingId, failure: rejected }))
+      .rejects.toThrow("Invalid Codex tool retirement failure");
+    await expect(callTurnBroker(f.socketPath, { method: "resolve", bindingId: f.bindingId })).resolves.toBeDefined();
+  } finally { await f.close(); }
+});

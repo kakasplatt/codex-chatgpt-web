@@ -22,6 +22,11 @@ export interface CodexParsedRequest {
    * before constructing the browser adapter.
    */
   _opaqueMultiAgentV2Payload?: boolean;
+  /**
+   * Request body sizes measured by the server while reading this turn. Set only by the server after
+   * `parseRequest`; the parser never reads it from caller data.
+   */
+  _requestBodyBytes?: { encoded: number; decoded: number };
 }
 
 export interface CodexContext {

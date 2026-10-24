@@ -8,20 +8,49 @@ import {
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
-import { chatGptToolTimeoutError } from "./adapter-error";
+import {
+  chatGptCodexRequestRejectedError,
+  chatGptToolTimeoutError,
+} from "./adapter-error";
 import { subagentModelObservation } from "./mcp-observation";
 
-interface BrokerRetirementFailure {
+export interface CodexToolTimeoutFailure {
   code: "codex_tool_timeout";
   tool: string;
   timeoutMs: number;
 }
 
+export interface CodexRequestRejectedFailure {
+  code: "codex_request_rejected";
+  status: number;
+  reason: "request_body_too_large" | "invalid_request";
+}
+
+export type BrokerRetirementFailure = CodexToolTimeoutFailure | CodexRequestRejectedFailure;
+
+function isToolTimeoutFailure(failure: Partial<CodexToolTimeoutFailure> | null): failure is CodexToolTimeoutFailure {
+  return !!failure && failure.code === "codex_tool_timeout"
+    && typeof failure.tool === "string" && /^[A-Za-z0-9_.-]{1,256}$/.test(failure.tool)
+    && Number.isSafeInteger(failure.timeoutMs) && failure.timeoutMs! > 0;
+}
+
+function isRequestRejectedFailure(failure: Partial<CodexRequestRejectedFailure> | null): failure is CodexRequestRejectedFailure {
+  return !!failure && failure.code === "codex_request_rejected"
+    && Number.isInteger(failure.status) && failure.status! >= 400 && failure.status! <= 499
+    && (failure.reason === "request_body_too_large" || failure.reason === "invalid_request");
+}
+
+// Both shapes can reach the owner through RemoteTurnBroker.waitForRetirement.
 function assertRetirementFailure(value: unknown): asserts value is BrokerRetirementFailure {
-  const failure = value as Partial<BrokerRetirementFailure> | null;
-  if (!failure || failure.code !== "codex_tool_timeout"
-    || typeof failure.tool !== "string" || !/^[A-Za-z0-9_.-]{1,256}$/.test(failure.tool)
-    || !Number.isSafeInteger(failure.timeoutMs) || failure.timeoutMs! <= 0) {
+  if (!isToolTimeoutFailure(value as Partial<CodexToolTimeoutFailure> | null)
+    && !isRequestRejectedFailure(value as Partial<CodexRequestRejectedFailure> | null)) {
+    throw new Error("Invalid Codex tool retirement failure");
+  }
+}
+
+// The MCP process only ever reports tool timeouts; it never sends codex_request_rejected.
+function assertToolTimeoutFailure(value: unknown): asserts value is CodexToolTimeoutFailure {
+  if (!isToolTimeoutFailure(value as Partial<CodexToolTimeoutFailure> | null)) {
     throw new Error("Invalid Codex tool retirement failure");
   }
 }
@@ -730,6 +759,16 @@ export class TurnBroker implements TurnBrokerOwner {
     return tokens.length;
   }
 
+  // Ends every turn of this trace that is waiting for delivered tool results, because Codex's
+  // follow-up request carrying them was rejected and the results can never arrive.
+  failTraceAwaitingResults(traceId: string, failure: CodexRequestRejectedFailure): number {
+    const tokens = [...this.channels]
+      .filter(([, channel]) => channel.traceId === traceId && channel.deliveredCallIds.size > 0)
+      .map(([token]) => token);
+    for (const token of tokens) this.revoke(token, chatGptCodexRequestRejectedError(failure), failure);
+    return tokens.length;
+  }
+
   setExternalOwnersAccepted(accepted: boolean): void {
     this.acceptingExternalOwners = accepted;
   }
@@ -1194,7 +1233,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!binding) {
       const retiredTurn = this.retiredBindings.get(bindingId);
       if (request.method === "release" && retiredTurn !== undefined) {
-        if (request.failure !== undefined) assertRetirementFailure(request.failure);
+        if (request.failure !== undefined) assertToolTimeoutFailure(request.failure);
         return { released: true, duplicate: true,
           ...(request.failure === undefined ? {} : { diagnostics: retiredTurn }),
         };
@@ -1209,7 +1248,7 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     if (request.method === "release") {
       if (request.failure !== undefined) {
-        assertRetirementFailure(request.failure);
+        assertToolTimeoutFailure(request.failure);
         this.revoke(binding.token, chatGptToolTimeoutError(request.failure.tool, request.failure.timeoutMs), request.failure);
       } else {
         this.revoke(binding.token);

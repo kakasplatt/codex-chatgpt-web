@@ -796,6 +796,16 @@ export class ChatGptTurnSessions {
     return { cancelled: matches.length, settlement };
   }
 
+  /** Read-only: the distinct traces of still-active browser turns owned by the exact native turn. */
+  activeTraceIdsForNativeTurn(threadId: string, turnId: string): string[] {
+    const traceIds = new Set<string>();
+    for (const session of this.entries.values()) {
+      if (session.nativeThreadId !== threadId || session.nativeTurnId !== turnId) continue;
+      if (session.traceId !== undefined && session.isActive()) traceIds.add(session.traceId);
+    }
+    return [...traceIds];
+  }
+
   cancelledError(traceId: string): Error | undefined {
     for (const session of this.entries.values()) {
       if (session.traceId !== traceId) continue;

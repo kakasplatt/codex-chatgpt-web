@@ -240,6 +240,8 @@ export class ChatGptPrivateCheckpointStore<TCheckpoint> {
     });
     compacted.modelId = parsed.modelId;
     compacted.options = { ...compacted.options, ...parsed.options };
+    // The rebuilt request keeps the wire size measured for the original body.
+    if (parsed._requestBodyBytes) compacted._requestBodyBytes = parsed._requestBodyBytes;
 
     if (JSON.stringify(extractChatGptTurnUserRevision(compacted)) !== JSON.stringify(extractChatGptTurnUserRevision(parsed))) {
       throw new Error(`ChatGPT ${this.policy.label} rolling checkpoint changed the active native user revision`);

@@ -333,3 +333,20 @@ test("Luna checkpoint store prunes oldest entries beyond 512 max entries", () =>
   ]);
   expect(store.apply(latestNext).applied).toBeTrue();
 });
+
+test("Luna usage input keeps the measured bytes", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-luna-checkpoint-"));
+  roots.push(root);
+  const store = new ChatGptLunaCheckpointStore(join(root, "checkpoints.json"));
+  const source = request("thread_bytes", "turn_source", [message("user", "Start", "turn_source")]);
+  store.commit(source, { checkpoint, answerHash: hashChatGptLunaAnswer("Done.") }, "Done.");
+  const next = request("thread_bytes", "turn_next", [
+    message("assistant", "Done.", "turn_source"),
+    message("user", "Continue", "turn_next"),
+  ]);
+  next._requestBodyBytes = { encoded: 49 * 1024 * 1024, decoded: 50 * 1024 * 1024 };
+  const applied = store.apply(next);
+  expect(applied.applied).toBe(true);
+  expect(applied.parsed).not.toBe(next);
+  expect(applied.parsed._requestBodyBytes).toEqual({ encoded: 49 * 1024 * 1024, decoded: 50 * 1024 * 1024 });
+});

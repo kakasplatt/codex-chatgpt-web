@@ -20,7 +20,7 @@ import {
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { ChatGptWebAdapterError, chatGptToolTimeoutError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptRetirementError } from "./adapter-error";
 import { ChatGptBrowserWorker, chatGptSuspensionClock, remainingStageBudgetMs } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -593,7 +593,7 @@ export function createChatGptWebAdapter(
       void broker.waitForRetirement(turnToken).then(
         failure => {
           const retirement = failure
-            ? chatGptToolTimeoutError(failure.tool, failure.timeoutMs)
+            ? chatGptRetirementError(failure)
             : new Error("Codex Native retired the turn binding before its tool work completed");
           externalProgress.retire(retirement);
           if (!browserOwnerSettled && !browserAbort.signal.aborted) browserAbort.abort(retirement);

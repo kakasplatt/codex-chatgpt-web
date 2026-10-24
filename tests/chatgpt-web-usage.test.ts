@@ -8,7 +8,12 @@ import {
 import { compileChatGptWebPrompt, CHATGPT_FULL_CONTEXT_MAX_PARTS } from "../src/adapters/chatgpt-web/prompt";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
-import { CHATGPT_WEB_FULL_CONTEXT_WINDOW } from "../src/chatgpt-web-models";
+import {
+  CHATGPT_WEB_FULL_CONTEXT_WINDOW,
+  CHATGPT_WEB_LUNA_BACKEND_MODEL,
+  resolveChatGptWebContextLimits,
+} from "../src/chatgpt-web-models";
+import { COMPACTION_PRESSURE_BYTES, underCompactionPressure } from "../src/request-size-policy";
 import * as tokenEstimate from "../src/lib/token-estimate";
 import { estimateTokens } from "../src/lib/token-estimate";
 import type { CodexParsedRequest } from "../src/types";
@@ -478,3 +483,120 @@ test("Full Context usage approaching 900,000 auto-compact threshold reports cano
   expect(compactUsage.inputTokens).toBeGreaterThan(700_000);
   expect(Math.abs(compactUsage.inputTokens - canonicalUsage.inputTokens)).toBeLessThan(500);
 }, 60_000);
+
+const MIB = 1024 * 1024;
+const noOverride = () => undefined;
+
+function withBytes(parsed: CodexParsedRequest, encoded: number, decoded: number): CodexParsedRequest {
+  parsed._requestBodyBytes = { encoded, decoded };
+  return parsed;
+}
+
+function pressureUsage(
+  parsed: CodexParsedRequest,
+  caps = capabilities,
+  biggerContext = false,
+  readOverride: () => { contextWindow: number } | undefined = noOverride,
+) {
+  return estimateChatGptWebUsage(parsed, { answer: "done" }, caps, biggerContext, false, false, undefined, readOverride);
+}
+
+const solWindow = resolveChatGptWebContextLimits("gpt-5.6-sol", "high", capabilities).contextWindow;
+
+test("usage is unchanged below the soft threshold", () => {
+  const baseline = pressureUsage(request("small"));
+  expect(COMPACTION_PRESSURE_BYTES).toEqual({ encodedBytes: 48 * MIB, decodedBytes: 96 * MIB });
+  expect(underCompactionPressure(undefined)).toBe(false);
+  for (const bytes of [
+    undefined,
+    { encoded: 48 * MIB - 1, decoded: 96 * MIB - 1 },
+  ]) {
+    const parsed = request("small");
+    if (bytes) parsed._requestBodyBytes = bytes;
+    expect(pressureUsage(parsed)).toEqual(baseline);
+  }
+  expect(baseline.inputTokens).toBeLessThan(solWindow);
+});
+
+test("usage reaches the context window at 48 MiB encoded", () => {
+  const usage = pressureUsage(withBytes(request("small"), 48 * MIB, 90 * MIB));
+  expect(usage.inputTokens).toBe(solWindow);
+  // Codex compares total_tokens against its auto-compact limit, so the total must carry the raise.
+  expect(usage.totalTokens).toBeGreaterThanOrEqual(solWindow);
+  expect(usage.totalTokens).toBe(usage.inputTokens + usage.outputTokens);
+});
+
+test("usage reaches the context window at 96 MiB decoded with identity encoding", () => {
+  const encodedOnlyBelow = pressureUsage(withBytes(request("small"), 47 * MIB, 96 * MIB));
+  expect(encodedOnlyBelow.inputTokens).toBe(solWindow);
+  const identity = pressureUsage(withBytes(request("small"), 96 * MIB, 96 * MIB));
+  expect(identity.inputTokens).toBe(solWindow);
+  expect(identity.totalTokens).toBeGreaterThanOrEqual(solWindow);
+});
+
+test("pressure uses the advertised Bigger Context window and the larger Codex override", () => {
+  const advertisedBigger = resolveChatGptWebContextLimits(
+    "gpt-5.6-sol", "high", { ...capabilities, experimentalBiggerContext: true },
+  ).contextWindow;
+  expect(advertisedBigger).toBeGreaterThan(solWindow);
+  const bigger = pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, true);
+  expect(bigger.inputTokens).toBe(advertisedBigger);
+  expect(bigger.totalTokens).toBeGreaterThanOrEqual(advertisedBigger);
+
+  const raised = pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, false, () => ({ contextWindow: solWindow * 3 }));
+  expect(raised.inputTokens).toBe(solWindow * 3);
+  const lowered = pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, false, () => ({ contextWindow: 1_000 }));
+  expect(lowered.inputTokens).toBe(solWindow);
+  const unreadable = pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, false, () => {
+    throw new Error("model_context_window in Codex config must be a positive integer");
+  });
+  expect(unreadable.inputTokens).toBe(solWindow);
+});
+
+test("compaction requests never report pressure", () => {
+  const parsed = withBytes(request("small"), 100 * MIB, 200 * MIB);
+  parsed._compactionRequest = true;
+  const unmeasured = request("small");
+  unmeasured._compactionRequest = true;
+  const baseline = pressureUsage(unmeasured);
+  expect(pressureUsage(parsed)).toEqual(baseline);
+  expect(baseline.inputTokens).toBeLessThan(solWindow);
+});
+
+test("Luna under byte pressure reports unchanged usage", () => {
+  const luna = { ...capabilities, solAvailable: false, extraHighAvailable: false, proAvailable: false };
+  const lunaRequest = (): CodexParsedRequest => ({
+    ...request("small"),
+    modelId: CHATGPT_WEB_LUNA_BACKEND_MODEL,
+    options: { reasoning: "low" },
+  });
+  const baseline = pressureUsage(lunaRequest(), luna);
+  expect(pressureUsage(withBytes(lunaRequest(), 60 * MIB, 100 * MIB), luna)).toEqual(baseline);
+
+  const lunaBiggerWindow = resolveChatGptWebContextLimits(
+    CHATGPT_WEB_LUNA_BACKEND_MODEL, "low", { ...luna, experimentalBiggerContext: true },
+  ).contextWindow;
+  const bigger = pressureUsage(withBytes(lunaRequest(), 60 * MIB, 100 * MIB), luna, true);
+  expect(bigger.inputTokens).toBe(lunaBiggerWindow);
+  expect(bigger.totalTokens).toBeGreaterThanOrEqual(lunaBiggerWindow);
+});
+
+test("pressure is logged once per request without request content", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const parsed = withBytes(request("secret-body-marker"), 50 * MIB, 70 * MIB);
+    const first = pressureUsage(parsed);
+    pressureUsage(parsed);
+    const lines = warn.mock.calls.map(call => String(call[0])).filter(line => line.startsWith("[chatgpt-web] compaction_pressure "));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice("[chatgpt-web] compaction_pressure ".length))).toEqual({
+      encodedBytes: 50 * MIB,
+      decodedBytes: 70 * MIB,
+      estimatedInputTokens: pressureUsage(request("secret-body-marker")).inputTokens,
+      reportedInputTokens: first.inputTokens,
+    });
+    expect(lines[0]).not.toContain("secret-body-marker");
+  } finally {
+    warn.mockRestore();
+  }
+});
