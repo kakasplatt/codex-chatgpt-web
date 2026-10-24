@@ -617,7 +617,7 @@ test("pressure is logged once per request without request content", () => {
       decodedBytes: 70 * MIB,
       estimatedInputTokens: pressureUsage(request("secret-body-marker")).inputTokens,
       reportedInputTokens: first.inputTokens,
-      afterCompaction: false,
+      messagesSinceCompaction: null,
     });
     expect(lines[0]).not.toContain("secret-body-marker");
   } finally {
@@ -630,21 +630,28 @@ const pressureLogs = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls
   .filter(line => line.startsWith("[chatgpt-web] compaction_pressure "))
   .map(line => JSON.parse(line.slice("[chatgpt-web] compaction_pressure ".length)) as Record<string, unknown>);
 
-test("pressure on a history that already holds a compaction summary is flagged afterCompaction", () => {
+test("the pressure log counts the messages after the latest compaction summary", () => {
   const warn = spyOn(console, "warn").mockImplementation(() => {});
   try {
-    const summarized = (content: CodexUserMessage["content"]): CodexParsedRequest => {
-      const parsed = withBytes(request("recent turn"), 60 * MIB, 100 * MIB);
-      parsed.context.messages.unshift({ role: "user", content, timestamp: 0 });
-      return parsed;
-    };
+    const user = (content: CodexUserMessage["content"]): CodexUserMessage => ({ role: "user", content, timestamp: 0 });
     const v1 = `${SUMMARY_PREFIX}
 summary text`;
     const v2 = `${SUMMARY_PREFIX}
 
 summary text`;
-    for (const content of [v1, v2, [{ type: "text" as const, text: v2 }]]) pressureUsage(summarized(content));
-    expect(pressureLogs(warn).map(log => log.afterCompaction)).toEqual([true, true, true]);
+    const withMessages = (...messages: CodexUserMessage[]): CodexParsedRequest => {
+      const parsed = withBytes(request("recent turn"), 60 * MIB, 100 * MIB);
+      parsed.context.messages = [...messages, ...parsed.context.messages];
+      return parsed;
+    };
+    // The helper appends one "recent turn" message after whatever it is given.
+    pressureUsage(withMessages(user(v1)));
+    pressureUsage(withMessages(user(v2), user("a"), user("b")));
+    pressureUsage(withMessages(user([{ type: "text", text: v2 }])));
+    // Only the latest summary counts.
+    pressureUsage(withMessages(user(v1), user("a"), user(v2), user("b")));
+    pressureUsage(withMessages(user("no summary here")));
+    expect(pressureLogs(warn).map(log => log.messagesSinceCompaction)).toEqual([1, 3, 1, 2, null]);
   } finally {
     warn.mockRestore();
   }

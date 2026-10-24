@@ -332,12 +332,24 @@ function compactionPressureTokens(
   return { tokens: Math.max(advertised, override), overrideIgnored };
 }
 
-/** True when the history already carries a compaction summary, so pressure after it repeats a compaction. */
-function followsCompaction(parsed: CodexParsedRequest): boolean {
-  return parsed.context.messages.some(message => message.role === "user"
+function isCompactionSummaryMessage(message: CodexParsedRequest["context"]["messages"][number]): boolean {
+  return message.role === "user"
     && (typeof message.content === "string"
       ? isReadableCompactionSummaryText(message.content)
-      : message.content.some(part => part.type === "text" && isReadableCompactionSummaryText(part.text))));
+      : message.content.some(part => part.type === "text" && isReadableCompactionSummaryText(part.text)));
+}
+
+/**
+ * How many messages follow the latest compaction summary in the history, or `null` when it holds
+ * none. A history that is still under byte pressure with only a few messages after its summary
+ * was not shrunk enough by that compaction; many messages after it are ordinary regrowth.
+ */
+function messagesSinceCompaction(parsed: CodexParsedRequest): number | null {
+  const { messages } = parsed.context;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isCompactionSummaryMessage(messages[index]!)) return messages.length - 1 - index;
+  }
+  return null;
 }
 
 const compactionPressureLogged = new WeakSet<CodexParsedRequest>();
@@ -390,9 +402,9 @@ export function estimateChatGptWebUsage(
         decodedBytes: parsed._requestBodyBytes!.decoded,
         estimatedInputTokens,
         reportedInputTokens: inputTokens,
-        // Pressure on a history that already holds a summary means the last compaction did not shrink
-        // it enough, so Codex will compact again on every round. Count these lines to measure that.
-        afterCompaction: followsCompaction(parsed),
+        // Few messages after the latest summary, yet still under pressure, means the last compaction did
+        // not shrink the history enough and Codex will compact again. `null`: never compacted.
+        messagesSinceCompaction: messagesSinceCompaction(parsed),
         // Fixed reason code: the Codex config's `model_context_window` was unusable, so the advertised
         // window was used. Never the error text.
         ...(pressure.overrideIgnored ? { contextWindowOverride: "ignored_unreadable_or_invalid" } : {}),
