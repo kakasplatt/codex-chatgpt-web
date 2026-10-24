@@ -219,6 +219,20 @@ test("an ordinary web body under the ceiling advises /compact; one above it advi
   expect((await errorMessage(above)).endsWith(NEW_TASK_ADVICE)).toBe(true);
 });
 
+test("responses: Luna without Bigger Context advises a new task, with Bigger Context advises /compact", async () => {
+  const lunaConfig = { ...defaultConfig("browser-only"), solAvailable: false };
+  const body = () => post("/v1/responses", JSON.stringify({ model: "chatgpt-web/luna", stream: false, input: [padding] }));
+  const options = { requestSizeLimits, rememberState: false };
+  const without = await responseRequest(body(), lunaConfig, compactionAdapterFactory(), options);
+  expect(without.status).toBe(400);
+  const withoutMessage = await errorMessage(without);
+  expect(withoutMessage.startsWith(REJECTION_PREFIX)).toBe(true);
+  expect(withoutMessage.endsWith(NEW_TASK_ADVICE)).toBe(true);
+  const withBigger = await responseRequest(body(), { ...lunaConfig, experimentalBiggerContext: true }, compactionAdapterFactory(), options);
+  expect(withBigger.status).toBe(400);
+  expect((await errorMessage(withBigger)).endsWith(COMPACT_ADVICE)).toBe(true);
+});
+
 test("server: a 129 MiB body gets an HTTP 400 instead of a closed socket", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };
   const server = startServer(config);

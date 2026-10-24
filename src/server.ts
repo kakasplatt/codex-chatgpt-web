@@ -649,14 +649,25 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
 
 /**
  * `/compact` helps only a Web-model, non-compaction body that the policy (not the read ceiling)
- * rejected. Compaction bodies, native models and bodies above the ceiling cannot be compacted.
+ * rejected, on a route where compaction is allowed. Native models and bodies above the ceiling
+ * cannot be compacted, and Luna without Bigger Context refuses compaction by design (409).
+ * A Web compaction body is never rejected at the policy stage: `limits.compaction` equals the read ceiling.
  */
 function rejectionRemedy(
-  _error: RequestBodyLimitError,
   stage: "read" | "policy",
   webModel: boolean,
+  config: AppConfig,
+  raw: unknown,
 ): RequestRejectionRemedy {
-  return stage === "policy" && webModel ? "compact" : "new_task";
+  if (stage !== "policy" || !webModel) return "new_task";
+  try {
+    const model = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as { model?: unknown }).model : undefined;
+    const route = requireChatGptWebModelRoute(typeof model === "string" ? model : "", config);
+    if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) return "new_task";
+  } catch {
+    // An unroutable model is rejected later with its own error; keep the generic advice.
+  }
+  return "compact";
 }
 
 /**
@@ -711,13 +722,14 @@ function requestBodyRejectionResponse(
   route: RequestRoute,
   stage: "read" | "policy",
   webModel: boolean,
+  config: AppConfig,
   identity: NativeCodexTurnIdentity | undefined,
   options: Pick<ResponseRequestOptions, "onRequestRejected">,
   raw?: unknown,
 ): Response {
   const context: RequestRejectionContext = {
     route,
-    remedy: rejectionRemedy(error, stage, webModel),
+    remedy: rejectionRemedy(stage, webModel, config, raw),
     ...(stage === "policy" ? { images: measureImagePayloads(raw) } : {}),
   };
   logRequestBodyRejection(error, context);
@@ -747,7 +759,7 @@ export async function responseRequest(
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
       // The body was never read; Codex also sends the turn metadata as an HTTP header on /responses.
-      return requestBodyRejectionResponse(error, "responses", "read", false, turnIdentityFromHeaders(req.headers), options);
+      return requestBodyRejectionResponse(error, "responses", "read", false, config, turnIdentityFromHeaders(req.headers), options);
     }
     logUnreadableRequestBody("responses", req, error);
     return formatErrorResponse(
@@ -768,7 +780,7 @@ export async function responseRequest(
     if (error instanceof RequestBodyLimitError) {
       // A composer prediction is an optional suggestion, not the active turn's follow-up: never attribute it.
       const identity = isCodexComposerPrediction(raw) ? undefined : nativeTurnIdentity(extractCodexTurnIdentityFromBody(raw));
-      return requestBodyRejectionResponse(error, "responses", "policy", webModel, identity, options, raw);
+      return requestBodyRejectionResponse(error, "responses", "policy", webModel, config, identity, options, raw);
     }
     throw error;
   }
@@ -1047,7 +1059,7 @@ export async function compactRequest(
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
       // The canonical header names the turn even when the body was never read.
-      return requestBodyRejectionResponse(error, "compact", "read", false, turnIdentityFromHeaders(req.headers), options);
+      return requestBodyRejectionResponse(error, "compact", "read", false, config, turnIdentityFromHeaders(req.headers), options);
     }
     logUnreadableRequestBody("compact", req, error);
     return formatErrorResponse(
@@ -1087,7 +1099,7 @@ export async function compactRequest(
       assertRequestBodyWithin(size, limits.standard);
     } catch (error) {
       if (error instanceof RequestBodyLimitError) {
-        return requestBodyRejectionResponse(error, "compact", "policy", false, identity, options, raw);
+        return requestBodyRejectionResponse(error, "compact", "policy", false, config, identity, options, raw);
       }
       throw error;
     }
