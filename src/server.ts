@@ -1,6 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
-import { closeTurnBrokers, TurnBroker, type CodexRequestRejectedFailure } from "./adapters/chatgpt-web/turn-broker";
+import { closeTurnBrokers, TurnBroker, type BrokerRetirementFailure, type CodexRequestRejectedFailure } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions, type ChatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
@@ -395,7 +395,8 @@ export interface ResponseRequestOptions {
 export interface CodexRequestRejection {
   identity: NativeCodexTurnIdentity;
   status: number;
-  reason: CodexRequestRejectedFailure["reason"];
+  /** `compaction_unavailable` is the designed 409 for a route that refuses compaction (Luna without Bigger Context). */
+  reason: CodexRequestRejectedFailure["reason"] | "compaction_unavailable";
 }
 
 interface ResponseBodyContext {
@@ -703,6 +704,9 @@ export function turnIdentityFromHeaders(headers: Headers): NativeCodexTurnIdenti
     : undefined;
 }
 
+const LUNA_COMPACTION_REFUSED_MESSAGE =
+  "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.";
+
 /** Answers with a 4xx and, when the native turn is known, reports the rejection for attribution. */
 function rejectRequest(
   status: number,
@@ -771,6 +775,9 @@ export async function responseRequest(
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
       // The body was never read; Codex also sends the turn metadata as an HTTP header on /responses.
+      // That also means `isCodexComposerPrediction(raw)` cannot exclude a prediction here, so a
+      // composer prediction above the read ceiling (128 MiB) is attributed like any other turn
+      // request. No prediction is that large in practice, and the policy stage below does exclude it.
       return requestBodyRejectionResponse(error, "responses", "read", false, config, turnIdentityFromHeaders(req.headers), options);
     }
     logUnreadableRequestBody("responses", req, error);
@@ -933,11 +940,7 @@ async function handleResponseBody(
     rememberCompactionContinuation(parsed, identity, v1Source ? [source, v1Source] : [source], summary);
   };
   if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
-    return formatErrorResponse(
-      409,
-      "invalid_request_error",
-      "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
-    );
+    return rejectRequest(409, "invalid_request_error", LUNA_COMPACTION_REFUSED_MESSAGE, attributable(identity), "compaction_unavailable", options);
   }
   if (compaction) {
     // History compaction is a dedicated summarization turn. It must never bind the active Codex
@@ -1138,11 +1141,7 @@ export async function compactRequest(
     );
   }
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
-    return formatErrorResponse(
-      409,
-      "invalid_request_error",
-      "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
-    );
+    return rejectRequest(409, "invalid_request_error", LUNA_COMPACTION_REFUSED_MESSAGE, identity, "compaction_unavailable", options);
   }
   const input = Array.isArray(raw.input) ? raw.input : [];
   const response = await handleResponseBody(
@@ -1210,9 +1209,13 @@ export function attributeRejectedRequest(
   const { identity, status, reason } = rejection;
   const traceIds = sessions.activeTraceIdsForNativeTurn(identity.threadId, identity.turnId);
   if (traceIds.length === 0) return 0;
+  const failure: Extract<BrokerRetirementFailure, { code: "codex_request_rejected" | "codex_compaction_unavailable" }> =
+    reason === "compaction_unavailable"
+      ? { code: "codex_compaction_unavailable", status }
+      : { code: "codex_request_rejected", status, reason };
   let revokedTurns = 0;
   for (const traceId of traceIds) {
-    revokedTurns += broker.failTraceAwaitingResults(traceId, { code: "codex_request_rejected", status, reason });
+    revokedTurns += broker.failTraceAwaitingResults(traceId, failure);
   }
   console.warn(`[codex-chatgpt-web] request_rejection_attributed ${JSON.stringify({ traceIds, revokedTurns, status, reason })}`);
   return revokedTurns;

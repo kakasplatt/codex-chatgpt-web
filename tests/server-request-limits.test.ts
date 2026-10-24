@@ -377,6 +377,26 @@ test("an oversized or invalid composer prediction request does not report a reje
   expect(recorder.rejections).toEqual([]);
 });
 
+test("the Luna compaction refusal is a 409 attributed as compaction_unavailable on both routes", async () => {
+  const recorder = rejectionRecorder();
+  const noAdapter = (): ProviderAdapter => { throw new Error("a refused request must not construct an adapter"); };
+  const lunaConfig = { ...defaultConfig("browser-only"), solAvailable: false };
+  const luna = await responseRequest(post("/v1/responses", JSON.stringify({
+    model: "chatgpt-web/luna", stream: false,
+    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna") },
+    input: [{ type: "compaction_trigger" }],
+  })), lunaConfig, noAdapter, { rememberState: false, onRequestRejected: recorder.onRequestRejected });
+  expect(luna.status).toBe(409);
+  const lunaCompact = await compactRequest(post("/v1/responses/compact", JSON.stringify({ model: "chatgpt-web/luna", input: [] }), {
+    "x-codex-turn-metadata": turnMetadata("thread_luna_compact", "turn_luna_compact"),
+  }), lunaConfig, noAdapter, { onRequestRejected: recorder.onRequestRejected });
+  expect(lunaCompact.status).toBe(409);
+  expect(recorder.rejections).toEqual([
+    { identity: { threadId: "thread_luna", turnId: "turn_luna" }, status: 409, reason: "compaction_unavailable" },
+    { identity: { threadId: "thread_luna_compact", turnId: "turn_luna_compact" }, status: 409, reason: "compaction_unavailable" },
+  ]);
+});
+
 test("prediction-skip and terminal replay do not report a rejection", async () => {
   const recorder = rejectionRecorder();
   const noAdapter = (): ProviderAdapter => { throw new Error("a refused request must not construct an adapter"); };
@@ -397,19 +417,6 @@ test("prediction-skip and terminal replay do not report a rejection", async () =
   });
   expect(prediction.status).toBe(400);
   expect(await prediction.text()).toContain("Next-message prediction skipped");
-
-  // Luna compaction refusal is a designed 409, not a rejected follow-up (on both routes).
-  const lunaConfig = { ...defaultConfig("browser-only"), solAvailable: false };
-  const luna = await responseRequest(post("/v1/responses", JSON.stringify({
-    model: "chatgpt-web/luna", stream: false,
-    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna") },
-    input: [{ type: "compaction_trigger" }],
-  })), lunaConfig, noAdapter, { rememberState: false, onRequestRejected: recorder.onRequestRejected });
-  expect(luna.status).toBe(409);
-  const lunaCompact = await compactRequest(post("/v1/responses/compact", JSON.stringify({ model: "chatgpt-web/luna", input: [] }), {
-    "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna"),
-  }), lunaConfig, noAdapter, { onRequestRejected: recorder.onRequestRejected });
-  expect(lunaCompact.status).toBe(409);
 
   // Terminal replay of a turn whose browser tab was closed.
   const config = defaultConfig("browser-only");

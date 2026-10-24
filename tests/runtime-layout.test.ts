@@ -74,6 +74,14 @@ test("Windows uses a stable native named pipe for the outer Codex tool broker", 
   expect(defaultBrokerEndpoint("/home/alice/.codex-chatgpt-web", "linux")).toEndWith(join("runtime", "turn-broker.sock"));
 });
 
+// `resolveBrokerEndpoint` resolves a POSIX socket path with the host's `path.resolve`, which only
+// leaves a `/`-rooted path unchanged on a POSIX host. CI runs this on ubuntu and macOS.
+test.skipIf(process.platform === "win32")("a POSIX broker socket path survives resolveBrokerEndpoint unchanged", () => {
+  const socketPath = defaultBrokerEndpoint("/home/alice/.codex-chatgpt-web", "linux");
+  expect(isWindowsPipeEndpoint(socketPath)).toBe(false);
+  expect(resolveBrokerEndpoint(socketPath)).toBe(socketPath);
+});
+
 test("permission-denied process probes preserve ownership evidence", () => {
   expect(processRunning(123, () => {
     const error = new Error("access denied") as NodeJS.ErrnoException;
