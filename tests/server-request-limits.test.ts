@@ -5,10 +5,12 @@ import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/a
 import { defaultConfig, providerConfig } from "../src/config";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
-import type { RequestSizeLimits } from "../src/request-size-policy";
+import { RequestBodyLimitError } from "../src/http-body";
+import { CONTROL_BODY_LIMIT_BYTES, type RequestSizeLimits } from "../src/request-size-policy";
 import {
   compactRequest,
   type CodexRequestRejection,
+  guardRequestBody,
   responseRequest,
   routeChatGptWebRequest,
   startServer,
@@ -765,4 +767,127 @@ test("an attribution callback that throws keeps the 400 and logs a JSON payload 
   } finally {
     error.mockRestore();
   }
+});
+
+/** Sends raw HTTP head bytes (no body) and returns the full response text, so a lying `Content-Length` can be tested. */
+async function rawRequest(port: number, head: string): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    let received = "";
+    void Bun.connect({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) { socket.write(head); },
+        data(socket, chunk) {
+          received += new TextDecoder().decode(chunk);
+          const split = received.indexOf("\r\n\r\n");
+          if (split < 0) return;
+          const length = Number(/content-length: (\d+)/i.exec(received.slice(0, split))?.[1] ?? 0);
+          if (received.length - split - 4 >= length) socket.end();
+        },
+        close() { resolve(received); },
+        error(_socket, error) { reject(error); },
+      },
+    });
+  });
+}
+
+test("server: a body declared above the old 256 MiB socket cap is logged and answered with a 400", async () => {
+  const server = startServer({ ...defaultConfig("browser-only"), port: 0 });
+  try {
+    const declared = 300 * MiB;
+    const response = await rawRequest(
+      server.port!,
+      `POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: ${declared}\r\n\r\n`,
+    );
+    expect(response.startsWith("HTTP/1.1 400")).toBe(true);
+    const message = (JSON.parse(response.slice(response.indexOf("\r\n\r\n") + 4)) as { error: { message: string } }).error.message;
+    expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
+    expect(message).toContain("300.0 MiB");
+    expect(message).toContain("over the 128 MiB local request limit");
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toMatchObject({
+      route: "responses", stage: "declared", declaredBytes: declared, limitBytes: 128 * MiB,
+    });
+  } finally {
+    await server.stop(true);
+  }
+}, 60_000);
+
+test("server: an /admin body above the control limit gets a 413 before it is read", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/admin/drain`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.controlToken}`, "content-type": "application/json" },
+      body: new Uint8Array(CONTROL_BODY_LIMIT_BYTES + 1),
+    });
+    expect(response.status).toBe(413);
+    expect(await errorMessage(response)).toBe(`Request body exceeds ${CONTROL_BODY_LIMIT_BYTES} bytes`);
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toEqual({
+      route: "control", stage: "declared", limitBytes: CONTROL_BODY_LIMIT_BYTES, declaredBytes: CONTROL_BODY_LIMIT_BYTES + 1,
+    });
+    // An authorized, in-limit request is still served.
+    const drained = await fetch(`http://127.0.0.1:${server.port}/admin/drain`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.controlToken}` },
+    });
+    expect(drained.status).toBe(200);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+describe("guardRequestBody", () => {
+  const chunkedRequest = (chunks: Uint8Array[]): Request => {
+    const init: RequestInit & { duplex: "half" } = {
+      method: "POST",
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    };
+    return new Request("http://127.0.0.1/v1/images/edits", init);
+  };
+
+  test("rejects a declared length above the limit without reading the body", () => {
+    const request = new Request("http://127.0.0.1/v1/images/edits", {
+      method: "POST", headers: { "content-length": "1000" }, body: "x",
+    });
+    const guarded = guardRequestBody(request, "native", 999);
+    expect(guarded).toBeInstanceOf(Response);
+    expect((guarded as Response).status).toBe(413);
+    expect(warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX))).toHaveLength(1);
+  });
+
+  test("passes a declared length at the limit through unchanged", () => {
+    const request = new Request("http://127.0.0.1/v1/images/edits", {
+      method: "POST", headers: { "content-length": "1000" }, body: "x",
+    });
+    expect(guardRequestBody(request, "native", 1000)).toBe(request);
+  });
+
+  test("lets an undeclared body within the limit be read in full", async () => {
+    const guarded = guardRequestBody(chunkedRequest([new Uint8Array(40).fill(1), new Uint8Array(40).fill(2)]), "native", 100);
+    expect(guarded).toBeInstanceOf(Request);
+    expect((await (guarded as Request).arrayBuffer()).byteLength).toBe(80);
+    expect(warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX))).toHaveLength(0);
+  });
+
+  test("cuts an undeclared body off at the limit and logs it once", async () => {
+    const guarded = guardRequestBody(chunkedRequest([new Uint8Array(60), new Uint8Array(60), new Uint8Array(60)]), "native", 100);
+    await expect((guarded as Request).arrayBuffer()).rejects.toBeInstanceOf(RequestBodyLimitError);
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toEqual({
+      route: "native", stage: "stream", limitBytes: 100, readBytes: 120,
+    });
+  });
 });

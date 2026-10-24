@@ -5,6 +5,10 @@ import {
   COMPACTION_REQUEST_BODY_LIMITS,
   REQUEST_SIZE_LIMITS,
   REQUEST_SIZE_LOG_FLOOR_BYTES,
+  CONTROL_BODY_LIMIT_BYTES,
+  NATIVE_PASSTHROUGH_BODY_LIMIT_BYTES,
+  SERVER_MAX_REQUEST_BODY_BYTES,
+  guardedBodyLimit,
   formatRequestBodyRejection,
   hasCompactionTrigger,
   isCompactionRequestBody,
@@ -161,6 +165,42 @@ test("a zstd body whose decoded size is unknown prints the encoded size alone", 
   const message = formatRequestBodyRejection(encodedOnly, { route: "responses", remedy: "new_task" });
   expect(message).toStartWith("This task's request is 70.0 MiB, over the 64 MiB local request limit.");
   expect(message).not.toContain("compressed");
+});
+
+test("a body cut off at the limit is described as larger than it, never by its lower-bound size", () => {
+  const partial = new RequestBodyLimitError("encoded", 128 * MiB, "zstd", { encodedBytes: 129 * MiB, partial: true });
+  const message = formatRequestBodyRejection(partial, { route: "responses", remedy: "new_task" });
+  expect(message).toStartWith("This task's request is larger than the 128 MiB local request limit.");
+  expect(message).not.toContain("129");
+  expect(message).toContain("start a new task");
+});
+
+test("the rejection log marks a partial read and omits the flag otherwise", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const fields = (index: number) => JSON.parse(String(warn.mock.calls[index]![0]).replace(/^\S+ \S+ /, ""));
+    logRequestBodyRejection(new RequestBodyLimitError("encoded", 64, "identity", { encodedBytes: 70, partial: true }), { route: "responses", remedy: "new_task" });
+    logRequestBodyRejection(new RequestBodyLimitError("encoded", 64, "identity", { encodedBytes: 70 }), { route: "responses", remedy: "new_task" });
+    expect(fields(0).partial).toBe(true);
+    expect(fields(1)).not.toHaveProperty("partial");
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+test("the transport cap is the largest Bun accepts and every route has its own limit", () => {
+  expect(SERVER_MAX_REQUEST_BODY_BYTES).toBe(0xFFFF_FFFF);
+  expect(CONTROL_BODY_LIMIT_BYTES).toBe(64 * 1024);
+  expect(NATIVE_PASSTHROUGH_BODY_LIMIT_BYTES).toBe(256 * MiB);
+  expect(guardedBodyLimit("POST", "/admin/cancel-turn")).toEqual({ route: "control", limitBytes: CONTROL_BODY_LIMIT_BYTES });
+  for (const path of ["/v1/alpha/search", "/v1/images/generations", "/v1/images/edits"]) {
+    expect(guardedBodyLimit("POST", path)).toEqual({ route: "native", limitBytes: NATIVE_PASSTHROUGH_BODY_LIMIT_BYTES });
+  }
+  // The Responses routes enforce their own limits; reads without a body need none.
+  expect(guardedBodyLimit("POST", "/v1/responses")).toBeUndefined();
+  expect(guardedBodyLimit("POST", "/v1/responses/compact")).toBeUndefined();
+  expect(guardedBodyLimit("GET", "/v1/models")).toBeUndefined();
+  expect(guardedBodyLimit("GET", "/admin/drain")).toBeUndefined();
 });
 
 test("new_task remedy does not suggest /compact as the fix", () => {

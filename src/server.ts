@@ -26,12 +26,16 @@ import { AsyncEventQueue } from "./event-queue";
 import {
   assertRequestBodyWithin,
   type JsonRequestBody,
+  limitRequestBodyStream,
   type MeasuredRequestBody,
+  readDeclaredLength,
   readJsonRequestBodyWithSize,
   RequestBodyLimitError,
 } from "./http-body";
 import {
   formatRequestBodyRejection,
+  guardedBodyLimit,
+  logGuardedBodyRejection,
   logRequestBodyRejection,
   logRequestBodySize,
   logUnreadableRequestBody,
@@ -39,6 +43,7 @@ import {
   REQUEST_SIZE_LIMITS,
   requestBodyLimitsFor,
   SERVER_MAX_REQUEST_BODY_BYTES,
+  type GuardedBodyRoute,
   type RequestRejectionContext,
   type RequestRejectionRemedy,
   type RequestRoute,
@@ -707,6 +712,21 @@ export function turnIdentityFromHeaders(headers: Headers): NativeCodexTurnIdenti
 const LUNA_COMPACTION_REFUSED_MESSAGE =
   "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.";
 
+/**
+ * Enforces a route's body limit, since `Bun.serve` itself accepts any size (see
+ * `SERVER_MAX_REQUEST_BODY_BYTES`): a declared length over the limit is answered with a 413 before
+ * the body is read, and a body without a declared length is cut off at the limit while it is read.
+ */
+export function guardRequestBody(req: Request, route: GuardedBodyRoute, limitBytes: number): Request | Response {
+  const declaredBytes = readDeclaredLength(req);
+  if (declaredBytes !== undefined && declaredBytes > limitBytes) {
+    logGuardedBodyRejection(route, { stage: "declared", limitBytes, declaredBytes });
+    return formatErrorResponse(413, "invalid_request_error", `Request body exceeds ${limitBytes} bytes`);
+  }
+  if (declaredBytes !== undefined) return req;
+  return limitRequestBodyStream(req, limitBytes, readBytes => logGuardedBodyRejection(route, { stage: "stream", limitBytes, readBytes }));
+}
+
 /** Answers with a 4xx and, when the native turn is known, reports the rejection for attribution. */
 function rejectRequest(
   status: number,
@@ -774,6 +794,8 @@ export async function responseRequest(
     raw = size.value;
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
+      // Nothing will forward this body, so do not keep the clone's tee branch buffered.
+      releaseNativeRequest(nativeRequest);
       // The body was never read; Codex also sends the turn metadata as an HTTP header on /responses.
       // That also means `isCodexComposerPrediction(raw)` cannot exclude a prediction here, so a
       // composer prediction above the read ceiling (128 MiB) is attributed like any other turn
@@ -1074,6 +1096,7 @@ export async function compactRequest(
     raw = size.value as Record<string, unknown>;
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
+      releaseNativeRequest(nativeRequest);
       // The canonical header names the turn even when the body was never read.
       return requestBodyRejectionResponse(error, "compact", "read", false, config, turnIdentityFromHeaders(req.headers), options);
     }
@@ -1270,7 +1293,8 @@ export function startServer(
     port: config.port,
     idleTimeout: 0,
     maxRequestBodySize: SERVER_MAX_REQUEST_BODY_BYTES,
-    async fetch(req) {
+    async fetch(incoming) {
+      let req = incoming;
       const url = new URL(req.url);
       // Loopback is reachable from any web page, cross-site or same-origin after DNS rebinding,
       // and this route has no bearer secret. Browsers attach Origin to every such request that
@@ -1281,6 +1305,12 @@ export function startServer(
           "invalid_request_error",
           "Browser-originated requests are not accepted by the local Codex route",
         );
+      }
+      const guard = guardedBodyLimit(req.method, url.pathname);
+      if (guard) {
+        const guarded = guardRequestBody(req, guard.route, guard.limitBytes);
+        if (guarded instanceof Response) return guarded;
+        req = guarded;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
