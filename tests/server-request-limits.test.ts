@@ -12,6 +12,7 @@ import {
   responseRequest,
   routeChatGptWebRequest,
   startServer,
+  turnIdentityFromHeaders,
 } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
 
@@ -266,19 +267,48 @@ test("responses: oversized follow-up reports the rejection with the body identit
   }]);
 });
 
-test("responses: read-time ceiling rejection stays unattributed", async () => {
+const ceilingBody = JSON.stringify({
+  model: webModel,
+  stream: false,
+  input: [{ ...padding, content: [{ type: "input_text", text: "x".repeat(40_000) }] }],
+});
+
+test("responses: read-time ceiling rejection reports the header identity", async () => {
   const recorder = rejectionRecorder();
-  const body = JSON.stringify({
-    model: webModel,
-    stream: false,
-    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_ceiling", "turn_ceiling") },
-    input: [{ ...padding, content: [{ type: "input_text", text: "x".repeat(40_000) }] }],
-  });
-  const response = await responseRequest(post("/v1/responses", body), defaultConfig("full"), compactionAdapterFactory(), {
+  const headers = { "x-codex-turn-metadata": turnMetadata("thread_ceiling", "turn_ceiling") };
+  const response = await responseRequest(post("/v1/responses", ceilingBody, headers), defaultConfig("full"), compactionAdapterFactory(), {
     requestSizeLimits, rememberState: false, onRequestRejected: recorder.onRequestRejected,
   });
   expect(response.status).toBe(400);
-  expect(recorder.rejections).toEqual([]);
+  expect((await errorMessage(response)).endsWith(NEW_TASK_ADVICE)).toBe(true);
+  expect(recorder.rejections).toEqual([{
+    identity: { threadId: "thread_ceiling", turnId: "turn_ceiling" },
+    status: 400,
+    reason: "request_body_too_large",
+  }]);
+});
+
+test("responses: read-time ceiling rejection with a missing or unparseable header reports nothing", async () => {
+  const cases: Array<Record<string, string>> = [{}, { "x-codex-turn-metadata": "{not json" }, { "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_only" }) }];
+  for (const headers of cases) {
+    const recorder = rejectionRecorder();
+    const response = await responseRequest(post("/v1/responses", ceilingBody, headers), defaultConfig("full"), compactionAdapterFactory(), {
+      requestSizeLimits, rememberState: false, onRequestRejected: recorder.onRequestRejected,
+    });
+    expect(response.status).toBe(400);
+    expect((await errorMessage(response)).endsWith(NEW_TASK_ADVICE)).toBe(true);
+    expect(recorder.rejections).toEqual([]);
+  }
+});
+
+test("turnIdentityFromHeaders returns the header turn or undefined without throwing", () => {
+  const identity = (value?: string) => turnIdentityFromHeaders(new Headers(value === undefined ? {} : { "x-codex-turn-metadata": value }));
+  expect(identity(turnMetadata("thread_h", "turn_h"))).toEqual({ threadId: "thread_h", turnId: "turn_h" });
+  expect(identity()).toBeUndefined();
+  expect(identity("{not json")).toBeUndefined();
+  expect(identity("[1,2]")).toBeUndefined();
+  expect(identity(JSON.stringify({ thread_id: "thread_only" }))).toBeUndefined();
+  expect(identity(JSON.stringify({ thread_id: 1, turn_id: 2 }))).toBeUndefined();
 });
 
 test("responses: a refused previous_response_id follow-up reports an invalid_request rejection", async () => {

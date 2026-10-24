@@ -661,7 +661,7 @@ function nativeTurnIdentity(identity: { threadId?: string; turnId?: string }): N
 }
 
 /** The native turn named by the `x-codex-turn-metadata` header; `undefined` when absent or unparseable. */
-function turnIdentityFromHeaders(headers: Headers): NativeCodexTurnIdentity | undefined {
+export function turnIdentityFromHeaders(headers: Headers): NativeCodexTurnIdentity | undefined {
   const metadata = headers.get("x-codex-turn-metadata");
   return metadata
     ? nativeTurnIdentity(extractCodexTurnIdentityFromBody({ client_metadata: { "x-codex-turn-metadata": metadata } }))
@@ -730,8 +730,8 @@ export async function responseRequest(
     raw = size.value;
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
-      // No body identity exists before the read; this rejection is not attributed to a turn.
-      return requestBodyRejectionResponse(error, "responses", "read", false, undefined, options);
+      // The body was never read; Codex also sends the turn metadata as an HTTP header on /responses.
+      return requestBodyRejectionResponse(error, "responses", "read", false, turnIdentityFromHeaders(req.headers), options);
     }
     logUnreadableRequestBody("responses", req, error);
     return formatErrorResponse(
