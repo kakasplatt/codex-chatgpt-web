@@ -21,7 +21,7 @@ import { assertComposerPredictionFits, configureComposerPrediction } from "./com
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import { providerConfig, resolveBrokerEndpoint } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import {
   assertRequestBodyWithin,
@@ -618,6 +618,12 @@ export async function modelsRequest(
   return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
+/** A body cut off at its route limit while being forwarded is the client's 413, not an upstream failure. */
+function nativeFailureResponse(error: unknown): Response {
+  if (error instanceof RequestBodyLimitError) return formatErrorResponse(413, "invalid_request_error", error.message);
+  return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+}
+
 export async function nativeSearchRequest(
   req: Request,
   fetchUpstream?: NativeFetch,
@@ -625,7 +631,7 @@ export async function nativeSearchRequest(
   try {
     return await forwardNativeCodexRequest(req, "alpha/search", fetchUpstream);
   } catch (error) {
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    return nativeFailureResponse(error);
   }
 }
 
@@ -641,7 +647,7 @@ async function nativeImagesRequest(
   try {
     return await forwardNativeCodexRequest(req, endpoint, fetchUpstream);
   } catch (error) {
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    return nativeFailureResponse(error);
   }
 }
 
@@ -1256,7 +1262,9 @@ export function startServer(
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
-  const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
+  // The adapter resolves the endpoint before `TurnBroker.forSocket`; resolving here too keeps both on
+  // the same broker instance (attribution and /admin/cancel-turn depend on it) for any stored path form.
+  const turnBroker = config.mode === "full" ? TurnBroker.forSocket(resolveBrokerEndpoint(config.brokerSocketPath)) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
       console.error(

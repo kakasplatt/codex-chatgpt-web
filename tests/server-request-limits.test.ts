@@ -842,6 +842,36 @@ test("server: an /admin body above the control limit gets a 413 before it is rea
   }
 });
 
+test("server: a chunked /admin body is cut off at the control limit while it is read", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  try {
+    const init: RequestInit & { duplex: "half" } = {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.controlToken}`, "content-type": "application/json" },
+      // No content-length is sent for a stream body, so only the stream limit can stop it.
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let sent = 0; sent <= CONTROL_BODY_LIMIT_BYTES; sent += 16 * 1024) controller.enqueue(new Uint8Array(16 * 1024));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    };
+    const response = await fetch(`http://127.0.0.1:${server.port}/admin/cancel-turn`, init);
+    expect(response.status).toBe(400);
+    const body = await response.json() as { status: string; error: string };
+    expect(body).toEqual({ status: "error", error: `Encoded request body exceeds ${CONTROL_BODY_LIMIT_BYTES} bytes` });
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toMatchObject({
+      route: "control", stage: "stream", limitBytes: CONTROL_BODY_LIMIT_BYTES,
+    });
+  } finally {
+    await server.stop(true);
+  }
+});
+
 describe("guardRequestBody", () => {
   const chunkedRequest = (chunks: Uint8Array[]): Request => {
     const init: RequestInit & { duplex: "half" } = {

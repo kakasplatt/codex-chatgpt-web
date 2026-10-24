@@ -74,12 +74,19 @@ test("Windows uses a stable native named pipe for the outer Codex tool broker", 
   expect(defaultBrokerEndpoint("/home/alice/.codex-chatgpt-web", "linux")).toEndWith(join("runtime", "turn-broker.sock"));
 });
 
-// `resolveBrokerEndpoint` resolves a POSIX socket path with the host's `path.resolve`, which only
-// leaves a `/`-rooted path unchanged on a POSIX host. CI runs this on ubuntu and macOS.
-test.skipIf(process.platform === "win32")("a POSIX broker socket path survives resolveBrokerEndpoint unchanged", () => {
-  const socketPath = defaultBrokerEndpoint("/home/alice/.codex-chatgpt-web", "linux");
-  expect(isWindowsPipeEndpoint(socketPath)).toBe(false);
-  expect(resolveBrokerEndpoint(socketPath)).toBe(socketPath);
+// The server and the adapter must reach the same `TurnBroker`, and the adapter resolves the configured
+// endpoint first. `path.resolve` only leaves a `/`-rooted path unchanged on a POSIX host, so these two
+// tests prove the equality on the Linux and macOS CI jobs and are skipped on Windows (pipes are covered above).
+test.skipIf(process.platform === "win32")("the default broker socket path of a real config survives resolveBrokerEndpoint unchanged", () => {
+  const { brokerSocketPath } = defaultConfig("full");
+  expect(isWindowsPipeEndpoint(brokerSocketPath)).toBe(false);
+  expect(resolveBrokerEndpoint(brokerSocketPath)).toBe(brokerSocketPath);
+});
+
+test.skipIf(process.platform === "win32")("a stored socket path in another form is normalized, which is why the server resolves it too", () => {
+  const home = defaultBrokerEndpoint("/home/alice/.codex-chatgpt-web", "linux");
+  expect(resolveBrokerEndpoint(`${home}/../turn-broker.sock`)).toBe(home);
+  expect(resolveBrokerEndpoint("~/turn-broker.sock")).not.toStartWith("~");
 });
 
 test("permission-denied process probes preserve ownership evidence", () => {
