@@ -8,6 +8,7 @@ import {
   hasCompactionTrigger,
   isCompactionRequestBody,
   logRequestBodyRejection,
+  logRequestBodySize,
   logUnreadableRequestBody,
   measureImagePayloads,
   requestBodyLimitsFor,
@@ -221,6 +222,24 @@ test("rejection log is one line with sizes only", () => {
       imageBytes: 123_700_000,
       remedy: "compact",
     });
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+test("logs normalize the client-controlled content encoding to identity, zstd or other", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const encodingOf = (index: number) => JSON.parse(String(warn.mock.calls[index]![0]).replace(/^\S+ \S+ /, "")).contentEncoding;
+    const hostile = "x".repeat(10_000);
+    logRequestBodyRejection(limitError({ stage: "encoded", limitBytes: 64 * MiB, encodedBytes: 1, contentEncoding: hostile }), { route: "responses", remedy: "new_task" });
+    logRequestBodyRejection(limitError({ stage: "encoded", limitBytes: 64 * MiB, encodedBytes: 1, contentEncoding: " ZStd " }), { route: "responses", remedy: "new_task" });
+    logRequestBodySize("responses", { encodedBytes: 9 * MiB, decodedBytes: 9 * MiB, contentEncoding: hostile }, { count: 0, bytes: 0 });
+    logUnreadableRequestBody("responses", new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-encoding": hostile }, body: "x",
+    }), new Error("boom"));
+    expect([0, 1, 2, 3].map(encodingOf)).toEqual(["other", "zstd", "other", "other"]);
+    expect(warn.mock.calls.every(call => String(call[0]).length < 500)).toBe(true);
   } finally {
     warn.mockRestore();
   }

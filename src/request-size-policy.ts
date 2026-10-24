@@ -136,6 +136,13 @@ export interface RequestRejectionContext {
 
 const LOG_PREFIX = "[codex-chatgpt-web]";
 
+/** `Content-Encoding` is a client-controlled, uncapped header: log only the encodings the server decodes. */
+function loggedContentEncoding(value: string): "identity" | "zstd" | "other" {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "") return "identity";
+  return normalized === "identity" || normalized === "zstd" ? normalized : "other";
+}
+
 function mib(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1);
 }
@@ -172,7 +179,7 @@ export function logRequestBodyRejection(
     declaredBytes: error.declaredBytes,
     encodedBytes: error.encodedBytes,
     decodedBytes: error.decodedBytes,
-    contentEncoding: error.contentEncoding,
+    contentEncoding: loggedContentEncoding(error.contentEncoding),
     imageCount: context.images?.count,
     imageBytes: context.images?.bytes,
     remedy: context.remedy,
@@ -194,7 +201,7 @@ export function logRequestBodySize(
     route,
     encodedBytes: size.encodedBytes,
     decodedBytes: size.decodedBytes,
-    contentEncoding: size.contentEncoding,
+    contentEncoding: loggedContentEncoding(size.contentEncoding),
     imageCount: images.count,
     imageBytes: images.bytes,
   })}`);
@@ -208,6 +215,6 @@ export function logUnreadableRequestBody(route: RequestRoute, request: Request, 
     route,
     reason: error instanceof Error ? error.name : typeof error,
     declaredBytes: declared !== undefined && Number.isFinite(declared) ? declared : undefined,
-    contentEncoding: (request.headers.get("content-encoding") ?? "identity").trim().toLowerCase() || "identity",
+    contentEncoding: loggedContentEncoding(request.headers.get("content-encoding") || "identity"),
   })}`);
 }
