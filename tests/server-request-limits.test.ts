@@ -347,6 +347,34 @@ test("compact: read-time ceiling rejection reports the header identity", async (
   }]);
 });
 
+test("an oversized or invalid composer prediction request does not report a rejection", async () => {
+  const recorder = rejectionRecorder();
+  const predictionMetadata = JSON.stringify({
+    request_kind: "turn", thread_source: "composer_predictions", turn_trigger: "composer_predictions",
+    thread_id: "prediction-thread", turn_id: "prediction-turn", forked_from_thread_id: "parent-thread",
+  });
+  const noAdapter = (): ProviderAdapter => { throw new Error("a refused request must not construct an adapter"); };
+  const predictionBody = (extra: Record<string, unknown>) => JSON.stringify({
+    model: webModel, stream: false,
+    client_metadata: { "x-codex-turn-metadata": predictionMetadata },
+    input: [padding],
+    ...extra,
+  });
+  // Between the limits (policy stage): same 400 and log as any oversized body.
+  const oversized = await responseRequest(post("/v1/responses", predictionBody({})), defaultConfig("full"), noAdapter, {
+    requestSizeLimits, rememberState: false, onRequestRejected: recorder.onRequestRejected,
+  });
+  expect(oversized.status).toBe(400);
+  expect((await errorMessage(oversized)).startsWith(REJECTION_PREFIX)).toBe(true);
+  expect(warnings().some(line => line.startsWith(REJECTION_LOG_PREFIX))).toBe(true);
+  // A refused previous_response_id follow-up after parsing: still answered with a 409, not attributed.
+  const invalid = await responseRequest(post("/v1/responses", predictionBody({ previous_response_id: "resp_missing" })), defaultConfig("full"), noAdapter, {
+    rememberState: false, onRequestRejected: recorder.onRequestRejected,
+  });
+  expect(invalid.status).toBe(409);
+  expect(recorder.rejections).toEqual([]);
+});
+
 test("prediction-skip and terminal replay do not report a rejection", async () => {
   const recorder = rejectionRecorder();
   const noAdapter = (): ProviderAdapter => { throw new Error("a refused request must not construct an adapter"); };

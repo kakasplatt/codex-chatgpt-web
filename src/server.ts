@@ -766,7 +766,8 @@ export async function responseRequest(
     assertRequestBodyWithin(size, requestBodyLimitsFor({ route: "responses", raw, webModel }, limits));
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
-      const identity = nativeTurnIdentity(extractCodexTurnIdentityFromBody(raw));
+      // A composer prediction is an optional suggestion, not the active turn's follow-up: never attribute it.
+      const identity = isCodexComposerPrediction(raw) ? undefined : nativeTurnIdentity(extractCodexTurnIdentityFromBody(raw));
       return requestBodyRejectionResponse(error, "responses", "policy", webModel, identity, options, raw);
     }
     throw error;
@@ -794,6 +795,7 @@ async function handleResponseBody(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  const prediction = isCodexComposerPrediction(raw);
   let identity: NativeCodexTurnIdentity | undefined;
   try {
     identity = nativeTurnIdentity(extractCodexTurnIdentityFromBody(raw));
@@ -812,7 +814,8 @@ async function handleResponseBody(
     ? (raw as { previous_response_id?: unknown }).previous_response_id
     : undefined;
   const expanded = expandPreviousResponseInput(raw);
-  const prediction = isCodexComposerPrediction(raw);
+  // A composer prediction is an optional suggestion, not the active turn's follow-up: never attribute it.
+  const attributable = (turn: NativeCodexTurnIdentity | undefined) => (prediction ? undefined : turn);
   let executionConfig = config;
   let parsed: CodexParsedRequest;
   let route: ChatGptWebModelRoute;
@@ -833,7 +836,7 @@ async function handleResponseBody(
       400,
       "invalid_request_error",
       error instanceof Error ? error.message : String(error),
-      identity,
+      attributable(identity),
       "invalid_request",
       options,
     );
@@ -844,7 +847,7 @@ async function handleResponseBody(
       "invalid_request_error",
       "ChatGPT Web cannot read this encrypted cross-backend subagent payload. "
         + "Start a new Compatibility V1 task, or delegate from a Web model whose collaboration call uses the plaintext-delivery marker.",
-      identity,
+      attributable(identity),
       "invalid_request",
       options,
     );
@@ -854,7 +857,7 @@ async function handleResponseBody(
       409,
       "invalid_request_error",
       "Local continuation state for previous_response_id is unavailable; refusing to run ChatGPT Web with partial Codex context. Compact the Codex task or start a new task before retrying.",
-      identity,
+      attributable(identity),
       "invalid_request",
       options,
     );
@@ -935,7 +938,7 @@ async function handleResponseBody(
       // new turn_id. Its last human prompt still belongs to the stopped turn and must not be
       // replayed as new work. HTTP 400 makes that malformed recovery request terminal instead of
       // allowing Codex to retry it as an upstream 502.
-      return rejectRequest(400, "invalid_request_error", message, identity, "invalid_request", options);
+      return rejectRequest(400, "invalid_request_error", message, attributable(identity), "invalid_request", options);
     }
     if (!message.includes("requires native Codex turn_id metadata")
       && !message.includes("requires a current-turn user message")) throw error;
