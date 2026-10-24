@@ -81,6 +81,43 @@ Full-mode MCP tools, Pro turns, compaction, cancellation, session reuse, and pre
 configuration were exercised successfully. The direct installer completed successfully but gave no
 clear completion action; v3.0.0 changes it to an assisted installer with a final launch option.
 
+### Oversized request bodies (issues #66, #70, #71)
+
+These checks need an authenticated ChatGPT session, so no automated test proves them. They are
+not part of the numbered gate above; run them before relying on the oversized-request behavior,
+and record the outcome of each one. As of #71 none has been run.
+
+Use a real image-heavy thread: about 120 MiB of base64 `view_image` / `image_gen` tool output,
+never compacted, so the zstd request body sits near or above the 64 MiB encoded limit.
+
+1. **Recovery.** Run `/compact` on the thread. Prove that it succeeds through `/v1/responses/compact`,
+   and that on a second copy the v2 `compaction_trigger` on `/v1/responses` succeeds too. Then send
+   one more turn and read the `request_body_size` line in the exported log: its `encodedBytes` must
+   be under 64 MiB.
+2. **Actionable message.** Reproduce a rejected follow-up (for example by lowering the limit on a
+   development build) and prove that the Codex UI shows the "Run /compact ... or start a new task"
+   message, not a bare transport error.
+3. **Prompt attribution.** In the same run, prove that the ChatGPT turn ends at once with
+   `codex_request_rejected` rather than after 90 s with `codex_tool_timeout`.
+4. **Turn metadata header.** Prove that Codex sends `x-codex-turn-metadata` as an HTTP header on the
+   ChatGPT-auth path, not only with a custom provider (observed on `codex-cli 0.164.0`). Without the
+   header, a body rejected at the read ceiling cannot be attributed.
+5. **Byte-pressure compaction.** Let the thread grow until a `compaction_pressure` line is logged and
+   prove that Codex auto-compacts in the middle of the turn and the turn continues.
+6. **Refused compaction on Luna.** With Luna and without Bigger Context, force Codex to auto-compact
+   while a tool call is pending. Prove that the turn ends at once with `codex_compaction_unavailable`.
+   This assumes Codex fails its own turn on the 409; if it continues the turn instead, the attribution
+   kills a turn that would have finished, and commit "end a Luna turn at once" must be reverted.
+7. **Compaction repetition.** Across a real thread, read the `messagesSinceCompaction` field of every
+   `compaction_pressure` line (`null`: the history was never compacted). A line with a small count, a
+   handful of messages after the latest summary, means that compaction did not shrink the history
+   enough and Codex will compact again on every round, so a guard is needed. Large counts are ordinary
+   regrowth. If no thread ever shows a small count, the item can be closed.
+8. **Broker endpoint on POSIX.** `resolveBrokerEndpoint(config.brokerSocketPath) === config.brokerSocketPath`
+   is asserted by `tests/runtime-layout.test.ts` for the default config, and skipped on Windows, so it
+   only runs on the Linux and macOS CI jobs. Confirm the first CI run of #71 is green on both before
+   treating it as proven; it has not run yet.
+
 ## macOS gate
 
 Repeat items 2 through 10 and item 12 on the oldest supported macOS version or the closest maintained machine.

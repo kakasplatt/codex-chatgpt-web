@@ -4712,8 +4712,7 @@ describe("ChatGPT outer-native harness v4", () => {
         const rejectedFailure = { code: "codex_request_rejected" as const, status: 400, reason: "request_body_too_large" as const };
         if (rejected) {
           // Codex's follow-up request was rejected, so the server ends the turn instead of the MCP release.
-          const traceId = [...(broker as unknown as { channels: Map<string, { traceId: string }> }).channels.values()][0]!.traceId;
-          expect(broker.failTraceAwaitingResults(traceId, rejectedFailure)).toBe(1);
+          expect(broker.failTraceAwaitingResults(turn.traceId, rejectedFailure)).toBe(1);
         } else {
           await callTurnBroker(socketPath, {
             method: "release", bindingId: claimed.bindingId,
@@ -4773,7 +4772,21 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   }, 10_000);
 
-  test("a rejected follow-up ends a turn with a delivered tool call promptly", async () => {
+  const refusedFollowUps = [
+    {
+      label: "a rejected follow-up",
+      rejection: { status: 400, reason: "request_body_too_large" as const },
+      code: "codex_request_rejected",
+      message: "was rejected (HTTP 400",
+    },
+    {
+      label: "a refused mid-turn compaction",
+      rejection: { status: 409, reason: "compaction_unavailable" as const },
+      code: "codex_compaction_unavailable",
+      message: "refuses compaction (HTTP 409",
+    },
+  ];
+  test.each(refusedFollowUps)("$label ends a turn with a delivered tool call promptly", async ({ rejection, code, message }) => {
     const socketPath = brokerTestEndpoint(`cgw-h3-rejected-followup-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -4824,8 +4837,7 @@ describe("ChatGPT outer-native harness v4", () => {
         revokedTurns = attributeRejectedRequest(
           {
             identity: { threadId: "thread_test_123", turnId: "turn_test_123" },
-            status: 400,
-            reason: "request_body_too_large",
+            ...rejection,
           },
           chatGptTurnSessions,
           broker,
@@ -4856,14 +4868,14 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(elapsedMs).toBeLessThan(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS);
       expect(events.at(-1)).toMatchObject({
         type: "error",
-        code: "codex_request_rejected",
-        message: expect.stringContaining("was rejected (HTTP 400"),
+        code,
+        message: expect.stringContaining(message),
       });
       expect(attributionLogs).toHaveLength(1);
       const logged = JSON.parse(attributionLogs[0]!.slice("[codex-chatgpt-web] request_rejection_attributed".length)) as {
         traceIds: string[]; revokedTurns: number; status: number; reason: string;
       };
-      expect(logged).toMatchObject({ revokedTurns: 1, status: 400, reason: "request_body_too_large" });
+      expect(logged).toMatchObject({ revokedTurns: 1, ...rejection });
       expect(logged.traceIds).toHaveLength(1);
     } finally {
       warn.mockRestore();

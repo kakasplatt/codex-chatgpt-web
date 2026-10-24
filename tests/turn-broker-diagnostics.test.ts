@@ -147,6 +147,24 @@ test("failTraceAwaitingResults settles a delivered call at once with codex_reque
   } finally { await f.close(); }
 });
 
+test("failTraceAwaitingResults settles a delivered call with codex_compaction_unavailable", async () => {
+  const f = await fixture();
+  try {
+    const compactionRefused = { code: "codex_compaction_unavailable" as const, status: 409 };
+    const call = await f.enqueue();
+    await f.broker.nextToolBatch(f.token);
+    const retirement = f.broker.waitForRetirement(f.token);
+    expect(f.broker.failTraceAwaitingResults("diagnostic-turn", compactionRefused)).toBe(1);
+    expect(await retirement).toEqual(compactionRefused);
+    expect(await call.outcome).toBe("rejected");
+    const event = f.logs.find(line => line.includes(" broker_retired "))!;
+    expect(JSON.parse(event.split(" broker_retired ")[1]!).failure).toEqual(compactionRefused);
+    // The MCP side only ever reports tool timeouts.
+    await expect(callTurnBroker(f.socketPath, { method: "release", bindingId: f.bindingId, failure: compactionRefused }))
+      .rejects.toThrow("Invalid Codex tool retirement failure");
+  } finally { await f.close(); }
+});
+
 test("failTraceAwaitingResults does not revoke a channel without delivered calls", async () => {
   const f = await fixture();
   try {
@@ -156,6 +174,18 @@ test("failTraceAwaitingResults does not revoke a channel without delivered calls
     await expect(callTurnBroker(f.socketPath, { method: "resolve", bindingId: f.bindingId })).resolves.toBeDefined();
     expect(f.broker.revokeTrace("diagnostic-turn")).toBe(1);
     expect(await call.outcome).toBe("rejected");
+  } finally { await f.close(); }
+});
+
+test("a duplicate release of a retired binding still rejects a codex_request_rejected failure", async () => {
+  const f = await fixture();
+  try {
+    await f.enqueue();
+    expect((await f.release()).released).toBe(true);
+    // The binding is now retired, which takes the duplicate-release branch.
+    expect(await f.release()).toMatchObject({ released: true, duplicate: true });
+    await expect(callTurnBroker(f.socketPath, { method: "release", bindingId: f.bindingId, failure: rejected }))
+      .rejects.toThrow("Invalid Codex tool retirement failure");
   } finally { await f.close(); }
 });
 

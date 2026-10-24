@@ -3,6 +3,7 @@ import {
   type MeasuredRequestBody,
   type RequestBodyLimitError,
   type RequestBodyLimits,
+  readDeclaredLength,
 } from "./http-body";
 import { isNativeTextCompaction } from "./responses/compaction";
 
@@ -17,10 +18,33 @@ export const COMPACTION_REQUEST_BODY_LIMITS: RequestBodyLimits = {
 };
 
 /**
- * `Bun.serve` cuts a larger body off by closing the socket before the handler runs, so the server
- * accepts up to twice the compaction encoded ceiling and lets the handler answer with a 400.
+ * `Bun.serve` cuts a body above `maxRequestBodySize` off by closing the socket before the handler
+ * runs: nothing is logged and Codex sees a transport error. The server therefore sets it to the
+ * largest value Bun accepts (a uint32) and enforces every real limit in the handler, per route:
+ * the Responses routes through `readJsonRequestBodyWithSize`, the others through `guardedBodyLimit`.
  */
-export const SERVER_MAX_REQUEST_BODY_BYTES = 2 * COMPACTION_REQUEST_BODY_LIMITS.encodedBytes;
+export const SERVER_MAX_REQUEST_BODY_BYTES = 0xFFFF_FFFF;
+
+/** Control routes (`/admin/*`) take a few small JSON fields. */
+export const CONTROL_BODY_LIMIT_BYTES = 64 * 1024;
+
+/** The ceiling the server enforced for every route before it became per-route: twice the compaction encoded limit. */
+export const NATIVE_PASSTHROUGH_BODY_LIMIT_BYTES = 2 * COMPACTION_REQUEST_BODY_LIMITS.encodedBytes;
+
+export type GuardedBodyRoute = "control" | "native";
+
+/**
+ * The body limit for a route that buffers the body itself and is not a Responses route, or
+ * `undefined` for a route whose handler enforces its own limit (or reads no body).
+ */
+export function guardedBodyLimit(method: string, pathname: string): { route: GuardedBodyRoute; limitBytes: number } | undefined {
+  if (method === "GET" || method === "HEAD") return undefined;
+  if (pathname.startsWith("/admin/")) return { route: "control", limitBytes: CONTROL_BODY_LIMIT_BYTES };
+  if (pathname === "/v1/alpha/search" || pathname === "/v1/images/generations" || pathname === "/v1/images/edits") {
+    return { route: "native", limitBytes: NATIVE_PASSTHROUGH_BODY_LIMIT_BYTES };
+  }
+  return undefined;
+}
 
 /**
  * Soft thresholds for web-model requests: 16 MiB of encoded and 32 MiB of decoded headroom below
@@ -161,7 +185,10 @@ export function formatRequestBodyRejection(
     ? `, mostly image tool results (${context.images.count} images, ${mib(context.images.bytes)} MiB)`
     : "";
   const limitMiB = Math.round(error.limitBytes / (1024 * 1024));
-  const head = `This task's request is ${size}, over the ${limitMiB} MiB local request limit${images}.`;
+  // Reading stopped at the limit, so the real size is unknown: never print the lower bound as the size.
+  const head = error.partial
+    ? `This task's request is larger than the ${limitMiB} MiB local request limit${images}.`
+    : `This task's request is ${size}, over the ${limitMiB} MiB local request limit${images}.`;
   return context.remedy === "compact"
     ? `${head} Run /compact to shrink the task history, or start a new task.`
     : `${head} Compaction cannot run on a request this large; start a new task to continue.`;
@@ -180,10 +207,20 @@ export function logRequestBodyRejection(
     encodedBytes: error.encodedBytes,
     decodedBytes: error.decodedBytes,
     contentEncoding: loggedContentEncoding(error.contentEncoding),
+    // `encodedBytes` is only a lower bound when reading stopped at the limit.
+    partial: error.partial || undefined,
     imageCount: context.images?.count,
     imageBytes: context.images?.bytes,
     remedy: context.remedy,
   })}`);
+}
+
+/** One size-only line for a body refused on a route outside the Responses handlers. */
+export function logGuardedBodyRejection(
+  route: GuardedBodyRoute,
+  detail: { stage: "declared" | "stream"; limitBytes: number; declaredBytes?: number; readBytes?: number },
+): void {
+  console.warn(`${LOG_PREFIX} request_body_rejected ${JSON.stringify({ route, ...detail })}`);
 }
 
 /** Per-request size lines are written only for bodies at least this large. */
@@ -209,12 +246,10 @@ export function logRequestBodySize(
 
 /** Logs a body that could not be read or decoded. Deliberately omits `error.message`. */
 export function logUnreadableRequestBody(route: RequestRoute, request: Request, error: unknown): void {
-  const header = request.headers.get("content-length");
-  const declared = header === null ? undefined : Number(header);
   console.warn(`${LOG_PREFIX} request_body_unreadable ${JSON.stringify({
     route,
     reason: error instanceof Error ? error.name : typeof error,
-    declaredBytes: declared !== undefined && Number.isFinite(declared) ? declared : undefined,
+    declaredBytes: readDeclaredLength(request),
     contentEncoding: loggedContentEncoding(request.headers.get("content-encoding") || "identity"),
   })}`);
 }

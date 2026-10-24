@@ -16,7 +16,8 @@ import {
 import { COMPACTION_PRESSURE_BYTES, underCompactionPressure } from "../src/request-size-policy";
 import * as tokenEstimate from "../src/lib/token-estimate";
 import { estimateTokens } from "../src/lib/token-estimate";
-import type { CodexParsedRequest } from "../src/types";
+import { SUMMARY_PREFIX } from "../src/responses/compaction";
+import type { CodexParsedRequest, CodexUserMessage } from "../src/types";
 import { resolveChatGptWebMessageTokenBudget, resolveChatGptWebStagingTokenBudget } from "../src/chatgpt-web-models";
 
 const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
@@ -526,12 +527,34 @@ test("usage reaches the context window at 48 MiB encoded", () => {
   expect(usage.totalTokens).toBe(usage.inputTokens + usage.outputTokens);
 });
 
-test("usage reaches the context window at 96 MiB decoded with identity encoding", () => {
-  const encodedOnlyBelow = pressureUsage(withBytes(request("small"), 47 * MIB, 96 * MIB));
-  expect(encodedOnlyBelow.inputTokens).toBe(solWindow);
-  const identity = pressureUsage(withBytes(request("small"), 96 * MIB, 96 * MIB));
+test("usage reaches the context window at 96 MiB decoded even when the encoded size is well below its threshold", () => {
+  // The encoded size (47 MiB) is under its 48 MiB threshold, so only the decoded check can fire.
+  const baseline = pressureUsage(request("small"));
+  expect(pressureUsage(withBytes(request("small"), 47 * MIB, 96 * MIB - 1))).toEqual(baseline);
+  const decodedOnly = pressureUsage(withBytes(request("small"), 47 * MIB, 96 * MIB));
+  expect(decodedOnly.inputTokens).toBe(solWindow);
+  expect(decodedOnly.totalTokens).toBeGreaterThanOrEqual(solWindow);
+});
+
+test("an identity-encoded body reaches the context window at the 48 MiB encoded threshold", () => {
+  // Identity encoding has equal sizes, so the encoded threshold fires first.
+  const baseline = pressureUsage(request("small"));
+  expect(pressureUsage(withBytes(request("small"), 48 * MIB - 1, 48 * MIB - 1))).toEqual(baseline);
+  const identity = pressureUsage(withBytes(request("small"), 48 * MIB, 48 * MIB));
   expect(identity.inputTokens).toBe(solWindow);
   expect(identity.totalTokens).toBeGreaterThanOrEqual(solWindow);
+});
+
+test("pressure uses the advertised Full Context window", () => {
+  const advertisedFull = resolveChatGptWebContextLimits(
+    "gpt-5.6-sol", "high", { ...capabilities, experimentalFullContext: true },
+  ).contextWindow;
+  expect(advertisedFull).toBeGreaterThan(solWindow);
+  const usage = estimateChatGptWebUsage(
+    withBytes(request("small"), 60 * MIB, 60 * MIB), { answer: "done" }, capabilities, false, false, true, undefined, noOverride,
+  );
+  expect(usage.inputTokens).toBe(advertisedFull);
+  expect(usage.totalTokens).toBeGreaterThanOrEqual(advertisedFull);
 });
 
 test("pressure uses the advertised Bigger Context window and the larger Codex override", () => {
@@ -594,8 +617,58 @@ test("pressure is logged once per request without request content", () => {
       decodedBytes: 70 * MIB,
       estimatedInputTokens: pressureUsage(request("secret-body-marker")).inputTokens,
       reportedInputTokens: first.inputTokens,
+      messagesSinceCompaction: null,
     });
     expect(lines[0]).not.toContain("secret-body-marker");
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+const pressureLogs = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls
+  .map(call => String(call[0]))
+  .filter(line => line.startsWith("[chatgpt-web] compaction_pressure "))
+  .map(line => JSON.parse(line.slice("[chatgpt-web] compaction_pressure ".length)) as Record<string, unknown>);
+
+test("the pressure log counts the messages after the latest compaction summary", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const user = (content: CodexUserMessage["content"]): CodexUserMessage => ({ role: "user", content, timestamp: 0 });
+    const v1 = `${SUMMARY_PREFIX}
+summary text`;
+    const v2 = `${SUMMARY_PREFIX}
+
+summary text`;
+    const withMessages = (...messages: CodexUserMessage[]): CodexParsedRequest => {
+      const parsed = withBytes(request("recent turn"), 60 * MIB, 100 * MIB);
+      parsed.context.messages = [...messages, ...parsed.context.messages];
+      return parsed;
+    };
+    // The helper appends one "recent turn" message after whatever it is given.
+    pressureUsage(withMessages(user(v1)));
+    pressureUsage(withMessages(user(v2), user("a"), user("b")));
+    pressureUsage(withMessages(user([{ type: "text", text: v2 }])));
+    // Only the latest summary counts.
+    pressureUsage(withMessages(user(v1), user("a"), user(v2), user("b")));
+    pressureUsage(withMessages(user("no summary here")));
+    expect(pressureLogs(warn).map(log => log.messagesSinceCompaction)).toEqual([1, 3, 1, 2, null]);
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+test("an unusable model_context_window is logged with a fixed reason and never its message", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const failing = () => { throw new Error("model_context_window in Codex config must be a positive integer SENTINEL_CONFIG_TEXT"); };
+    pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, false, failing);
+    const [log] = pressureLogs(warn);
+    expect(log).toMatchObject({ contextWindowOverride: "ignored_unreadable_or_invalid" });
+    expect(JSON.stringify(log)).not.toContain("SENTINEL_CONFIG_TEXT");
+
+    warn.mockClear();
+    pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, false, () => ({ contextWindow: solWindow * 2 }));
+    expect(pressureLogs(warn)[0]).not.toHaveProperty("contextWindowOverride");
   } finally {
     warn.mockRestore();
   }

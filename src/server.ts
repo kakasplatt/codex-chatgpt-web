@@ -1,6 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
-import { closeTurnBrokers, TurnBroker, type CodexRequestRejectedFailure } from "./adapters/chatgpt-web/turn-broker";
+import { closeTurnBrokers, TurnBroker, type BrokerRetirementFailure, type CodexRequestRejectedFailure } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions, type ChatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
@@ -21,11 +21,21 @@ import { assertComposerPredictionFits, configureComposerPrediction } from "./com
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import { providerConfig, resolveBrokerEndpoint } from "./config";
 import { AsyncEventQueue } from "./event-queue";
-import { assertRequestBodyWithin, type MeasuredRequestBody, readJsonRequestBodyWithSize, RequestBodyLimitError } from "./http-body";
+import {
+  assertRequestBodyWithin,
+  type JsonRequestBody,
+  limitRequestBodyStream,
+  type MeasuredRequestBody,
+  readDeclaredLength,
+  readJsonRequestBodyWithSize,
+  RequestBodyLimitError,
+} from "./http-body";
 import {
   formatRequestBodyRejection,
+  guardedBodyLimit,
+  logGuardedBodyRejection,
   logRequestBodyRejection,
   logRequestBodySize,
   logUnreadableRequestBody,
@@ -33,6 +43,7 @@ import {
   REQUEST_SIZE_LIMITS,
   requestBodyLimitsFor,
   SERVER_MAX_REQUEST_BODY_BYTES,
+  type GuardedBodyRoute,
   type RequestRejectionContext,
   type RequestRejectionRemedy,
   type RequestRoute,
@@ -389,13 +400,16 @@ export interface ResponseRequestOptions {
 export interface CodexRequestRejection {
   identity: NativeCodexTurnIdentity;
   status: number;
-  reason: CodexRequestRejectedFailure["reason"];
+  /** `compaction_unavailable` is the designed 409 for a route that refuses compaction (Luna without Bigger Context). */
+  reason: CodexRequestRejectedFailure["reason"] | "compaction_unavailable";
 }
 
 interface ResponseBodyContext {
   headers: Headers;
   signal: AbortSignal;
   nativeRequest: Request;
+  /** The body's `model`, extracted once by the caller (`undefined` when absent or not an object body). */
+  requestedModel: unknown;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -604,6 +618,12 @@ export async function modelsRequest(
   return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
+/** A body cut off at its route limit while being forwarded is the client's 413, not an upstream failure. */
+function nativeFailureResponse(error: unknown): Response {
+  if (error instanceof RequestBodyLimitError) return formatErrorResponse(413, "invalid_request_error", error.message);
+  return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+}
+
 export async function nativeSearchRequest(
   req: Request,
   fetchUpstream?: NativeFetch,
@@ -611,7 +631,7 @@ export async function nativeSearchRequest(
   try {
     return await forwardNativeCodexRequest(req, "alpha/search", fetchUpstream);
   } catch (error) {
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    return nativeFailureResponse(error);
   }
 }
 
@@ -627,7 +647,7 @@ async function nativeImagesRequest(
   try {
     return await forwardNativeCodexRequest(req, endpoint, fetchUpstream);
   } catch (error) {
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    return nativeFailureResponse(error);
   }
 }
 
@@ -695,6 +715,24 @@ export function turnIdentityFromHeaders(headers: Headers): NativeCodexTurnIdenti
     : undefined;
 }
 
+const LUNA_COMPACTION_REFUSED_MESSAGE =
+  "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.";
+
+/**
+ * Enforces a route's body limit, since `Bun.serve` itself accepts any size (see
+ * `SERVER_MAX_REQUEST_BODY_BYTES`): a declared length over the limit is answered with a 413 before
+ * the body is read, and a body without a declared length is cut off at the limit while it is read.
+ */
+export function guardRequestBody(req: Request, route: GuardedBodyRoute, limitBytes: number): Request | Response {
+  const declaredBytes = readDeclaredLength(req);
+  if (declaredBytes !== undefined && declaredBytes > limitBytes) {
+    logGuardedBodyRejection(route, { stage: "declared", limitBytes, declaredBytes });
+    return formatErrorResponse(413, "invalid_request_error", `Request body exceeds ${limitBytes} bytes`);
+  }
+  if (declaredBytes !== undefined) return req;
+  return limitRequestBodyStream(req, limitBytes, readBytes => logGuardedBodyRejection(route, { stage: "stream", limitBytes, readBytes }));
+}
+
 /** Answers with a 4xx and, when the native turn is known, reports the rejection for attribution. */
 function rejectRequest(
   status: number,
@@ -710,7 +748,11 @@ function rejectRequest(
       options.onRequestRejected?.({ identity, status, reason });
     } catch (error) {
       // Attribution is a side channel: it must never turn this terminal 4xx into a retryable 5xx.
-      console.error(`[codex-chatgpt-web] request_rejection_attribution_failed ${error instanceof Error ? error.name : "Error"}`);
+      console.error(`[codex-chatgpt-web] request_rejection_attribution_failed ${JSON.stringify({
+        status,
+        reason,
+        errorName: error instanceof Error ? error.name : "Error",
+      })}`);
     }
   }
   return response;
@@ -752,13 +794,18 @@ export async function responseRequest(
   const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
   let raw: unknown;
-  let size: Awaited<ReturnType<typeof readJsonRequestBodyWithSize>>;
+  let size: JsonRequestBody;
   try {
     size = await readJsonRequestBodyWithSize(req, limits.compaction);
     raw = size.value;
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
+      // Nothing will forward this body, so do not keep the clone's tee branch buffered.
+      releaseNativeRequest(nativeRequest);
       // The body was never read; Codex also sends the turn metadata as an HTTP header on /responses.
+      // That also means `isCodexComposerPrediction(raw)` cannot exclude a prediction here, so a
+      // composer prediction above the read ceiling (128 MiB) is attributed like any other turn
+      // request. No prediction is that large in practice, and the policy stage below does exclude it.
       return requestBodyRejectionResponse(error, "responses", "read", false, config, turnIdentityFromHeaders(req.headers), options);
     }
     logUnreadableRequestBody("responses", req, error);
@@ -786,7 +833,7 @@ export async function responseRequest(
   }
   return handleResponseBody(
     raw,
-    { headers: req.headers, signal: req.signal, nativeRequest },
+    { headers: req.headers, signal: req.signal, nativeRequest, requestedModel: model },
     config,
     adapterFactory,
     options,
@@ -804,9 +851,7 @@ async function handleResponseBody(
   routeName: RequestRoute,
   size: MeasuredRequestBody,
 ): Promise<Response> {
-  const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
-    ? (raw as { model?: unknown }).model
-    : undefined;
+  const { requestedModel } = context;
   const prediction = isCodexComposerPrediction(raw);
   let identity: NativeCodexTurnIdentity | undefined;
   try {
@@ -844,6 +889,9 @@ async function handleResponseBody(
       identity = parsedIdentity;
     }
   } catch (error) {
+    // This catch can run after `onTurnIdentity` threw while binding the parsed identity, in which
+    // case `identity` is still the one read from the body. The two always name the same native turn
+    // today, so attributing here cannot hit the wrong turn; revisit if they ever diverge.
     return rejectRequest(
       400,
       "invalid_request_error",
@@ -920,11 +968,7 @@ async function handleResponseBody(
     rememberCompactionContinuation(parsed, identity, v1Source ? [source, v1Source] : [source], summary);
   };
   if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
-    return formatErrorResponse(
-      409,
-      "invalid_request_error",
-      "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
-    );
+    return rejectRequest(409, "invalid_request_error", LUNA_COMPACTION_REFUSED_MESSAGE, attributable(identity), "compaction_unavailable", options);
   }
   if (compaction) {
     // History compaction is a dedicated summarization turn. It must never bind the active Codex
@@ -1051,13 +1095,14 @@ export async function compactRequest(
   const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
-  let size: Awaited<ReturnType<typeof readJsonRequestBodyWithSize>>;
+  let size: JsonRequestBody;
   try {
     size = await readJsonRequestBodyWithSize(req, limits.compaction);
     if (!size.value || typeof size.value !== "object" || Array.isArray(size.value)) throw new Error("not an object");
     raw = size.value as Record<string, unknown>;
   } catch (error) {
     if (error instanceof RequestBodyLimitError) {
+      releaseNativeRequest(nativeRequest);
       // The canonical header names the turn even when the body was never read.
       return requestBodyRejectionResponse(error, "compact", "read", false, config, turnIdentityFromHeaders(req.headers), options);
     }
@@ -1125,16 +1170,12 @@ export async function compactRequest(
     );
   }
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL && !config.experimentalBiggerContext) {
-    return formatErrorResponse(
-      409,
-      "invalid_request_error",
-      "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
-    );
+    return rejectRequest(409, "invalid_request_error", LUNA_COMPACTION_REFUSED_MESSAGE, identity, "compaction_unavailable", options);
   }
   const input = Array.isArray(raw.input) ? raw.input : [];
   const response = await handleResponseBody(
     { ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] },
-    { headers: req.headers, signal: req.signal, nativeRequest },
+    { headers: req.headers, signal: req.signal, nativeRequest, requestedModel: raw.model },
     config,
     adapterFactory,
     options,
@@ -1197,9 +1238,13 @@ export function attributeRejectedRequest(
   const { identity, status, reason } = rejection;
   const traceIds = sessions.activeTraceIdsForNativeTurn(identity.threadId, identity.turnId);
   if (traceIds.length === 0) return 0;
+  const failure: Extract<BrokerRetirementFailure, { code: "codex_request_rejected" | "codex_compaction_unavailable" }> =
+    reason === "compaction_unavailable"
+      ? { code: "codex_compaction_unavailable", status }
+      : { code: "codex_request_rejected", status, reason };
   let revokedTurns = 0;
   for (const traceId of traceIds) {
-    revokedTurns += broker.failTraceAwaitingResults(traceId, { code: "codex_request_rejected", status, reason });
+    revokedTurns += broker.failTraceAwaitingResults(traceId, failure);
   }
   console.warn(`[codex-chatgpt-web] request_rejection_attributed ${JSON.stringify({ traceIds, revokedTurns, status, reason })}`);
   return revokedTurns;
@@ -1217,7 +1262,9 @@ export function startServer(
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
-  const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
+  // The adapter resolves the endpoint before `TurnBroker.forSocket`; resolving here too keeps both on
+  // the same broker instance (attribution and /admin/cancel-turn depend on it) for any stored path form.
+  const turnBroker = config.mode === "full" ? TurnBroker.forSocket(resolveBrokerEndpoint(config.brokerSocketPath)) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
       console.error(
@@ -1254,7 +1301,8 @@ export function startServer(
     port: config.port,
     idleTimeout: 0,
     maxRequestBodySize: SERVER_MAX_REQUEST_BODY_BYTES,
-    async fetch(req) {
+    async fetch(incoming) {
+      let req = incoming;
       const url = new URL(req.url);
       // Loopback is reachable from any web page, cross-site or same-origin after DNS rebinding,
       // and this route has no bearer secret. Browsers attach Origin to every such request that
@@ -1265,6 +1313,12 @@ export function startServer(
           "invalid_request_error",
           "Browser-originated requests are not accepted by the local Codex route",
         );
+      }
+      const guard = guardedBodyLimit(req.method, url.pathname);
+      if (guard) {
+        const guarded = guardRequestBody(req, guard.route, guard.limitBytes);
+        if (guarded instanceof Response) return guarded;
+        req = guarded;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({

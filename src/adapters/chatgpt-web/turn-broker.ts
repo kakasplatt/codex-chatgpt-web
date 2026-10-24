@@ -9,7 +9,7 @@ import {
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
 import {
-  chatGptCodexRequestRejectedError,
+  chatGptRetirementError,
   chatGptToolTimeoutError,
 } from "./adapter-error";
 import { subagentModelObservation } from "./mcp-observation";
@@ -26,7 +26,16 @@ export interface CodexRequestRejectedFailure {
   reason: "request_body_too_large" | "invalid_request";
 }
 
-export type BrokerRetirementFailure = CodexToolTimeoutFailure | CodexRequestRejectedFailure;
+/**
+ * Codex asked to compact the task while the browser turn waited for tool results, and this route
+ * refuses compaction by design (Luna without Bigger Context), so the results can never arrive.
+ */
+export interface CodexCompactionUnavailableFailure {
+  code: "codex_compaction_unavailable";
+  status: number;
+}
+
+export type BrokerRetirementFailure = CodexToolTimeoutFailure | CodexRequestRejectedFailure | CodexCompactionUnavailableFailure;
 
 function isToolTimeoutFailure(failure: Partial<CodexToolTimeoutFailure> | null): failure is CodexToolTimeoutFailure {
   return !!failure && failure.code === "codex_tool_timeout"
@@ -40,15 +49,22 @@ function isRequestRejectedFailure(failure: Partial<CodexRequestRejectedFailure> 
     && (failure.reason === "request_body_too_large" || failure.reason === "invalid_request");
 }
 
-// Both shapes can reach the owner through RemoteTurnBroker.waitForRetirement.
+function isCompactionUnavailableFailure(failure: Partial<CodexCompactionUnavailableFailure> | null): failure is CodexCompactionUnavailableFailure {
+  return !!failure && failure.code === "codex_compaction_unavailable"
+    && Number.isInteger(failure.status) && failure.status! >= 400 && failure.status! <= 499;
+}
+
+// Every shape can reach the owner through RemoteTurnBroker.waitForRetirement.
 function assertRetirementFailure(value: unknown): asserts value is BrokerRetirementFailure {
   if (!isToolTimeoutFailure(value as Partial<CodexToolTimeoutFailure> | null)
-    && !isRequestRejectedFailure(value as Partial<CodexRequestRejectedFailure> | null)) {
+    && !isRequestRejectedFailure(value as Partial<CodexRequestRejectedFailure> | null)
+    && !isCompactionUnavailableFailure(value as Partial<CodexCompactionUnavailableFailure> | null)) {
     throw new Error("Invalid Codex tool retirement failure");
   }
 }
 
-// The MCP process only ever reports tool timeouts; it never sends codex_request_rejected.
+// The MCP process only ever reports tool timeouts; it never sends codex_request_rejected or
+// codex_compaction_unavailable.
 function assertToolTimeoutFailure(value: unknown): asserts value is CodexToolTimeoutFailure {
   if (!isToolTimeoutFailure(value as Partial<CodexToolTimeoutFailure> | null)) {
     throw new Error("Invalid Codex tool retirement failure");
@@ -761,11 +777,11 @@ export class TurnBroker implements TurnBrokerOwner {
 
   // Ends every turn of this trace that is waiting for delivered tool results, because Codex's
   // follow-up request carrying them was rejected and the results can never arrive.
-  failTraceAwaitingResults(traceId: string, failure: CodexRequestRejectedFailure): number {
+  failTraceAwaitingResults(traceId: string, failure: CodexRequestRejectedFailure | CodexCompactionUnavailableFailure): number {
     const tokens = [...this.channels]
       .filter(([, channel]) => channel.traceId === traceId && channel.deliveredCallIds.size > 0)
       .map(([token]) => token);
-    for (const token of tokens) this.revoke(token, chatGptCodexRequestRejectedError(failure), failure);
+    for (const token of tokens) this.revoke(token, chatGptRetirementError(failure), failure);
     return tokens.length;
   }
 

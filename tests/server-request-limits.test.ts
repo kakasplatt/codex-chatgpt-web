@@ -1,23 +1,25 @@
-import { afterAll, beforeEach, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { ProviderAdapter } from "../src/adapters/base";
 import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { defaultConfig, providerConfig } from "../src/config";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
-import type { RequestSizeLimits } from "../src/request-size-policy";
+import { RequestBodyLimitError } from "../src/http-body";
+import { CONTROL_BODY_LIMIT_BYTES, type RequestSizeLimits } from "../src/request-size-policy";
 import {
   compactRequest,
   type CodexRequestRejection,
+  guardRequestBody,
   responseRequest,
   routeChatGptWebRequest,
   startServer,
   turnIdentityFromHeaders,
 } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
+import { compactionAdapterFactory, compactionSummary, type CompactionAdapterObservation } from "./support/compaction-adapter";
 
 const MiB = 1024 * 1024;
-const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
 const webModel = "chatgpt-web/high";
 const requestSizeLimits: RequestSizeLimits = {
   standard: { encodedBytes: 4_096, decodedBytes: 8_192 },
@@ -29,25 +31,6 @@ const padding = {
   role: "user",
   content: [{ type: "input_text", text: "x".repeat(10_000) }],
 };
-
-function compactionAdapterFactory(factoryCalls: CodexProviderConfig[] = []) {
-  return (provider: CodexProviderConfig): ProviderAdapter => {
-    factoryCalls.push(provider);
-    return {
-      name: "test-web-compactor",
-      async runTurn(parsed, _incoming, emit) {
-        expect(parsed._compactionRequest).toBe(true);
-        emit({ type: "text_delta", text: summary, phase: "final_answer" });
-        emit({
-          type: "done",
-          stopReason: "stop",
-          endTurn: true,
-          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, estimated: true },
-        });
-      },
-    };
-  };
-}
 
 function post(path: string, body: Uint8Array<ArrayBuffer> | string, headers: Record<string, string> = {}): Request {
   const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
@@ -81,10 +64,12 @@ test("responses: web v2 compaction between limits is accepted", async () => {
     stream: false,
     input: [padding, { type: "compaction_trigger" }],
   });
-  const response = await respond(post("/v1/responses", body));
+  const observations: CompactionAdapterObservation[] = [];
+  const response = await respond(post("/v1/responses", body), compactionAdapterFactory({ observations }));
   expect(response.status).toBe(200);
   const result = await response.json() as { output: Array<{ type: string }> };
   expect(result.output[0]!.type).toBe("compaction");
+  expect(observations.map(seen => seen.compactionRequest)).toEqual([true]);
 });
 
 test("responses: web memento compaction between limits is accepted", async () => {
@@ -108,11 +93,12 @@ test("responses: web memento compaction between limits is accepted", async () =>
 test("responses: ordinary web body between limits is rejected with the standard limit", async () => {
   const factoryCalls: CodexProviderConfig[] = [];
   const body = JSON.stringify({ model: webModel, stream: false, input: [padding] });
-  const response = await respond(post("/v1/responses", body), compactionAdapterFactory(factoryCalls));
+  const response = await respond(post("/v1/responses", body), compactionAdapterFactory({ factoryCalls }));
   expect(response.status).toBe(400);
   const message = await errorMessage(response);
   expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
-  expect(message).toContain("over the 0 MiB local request limit");
+  // The injected 4 KiB limit rounds to 0 MiB; assert the shape, not that rounding artifact.
+  expect(message).toMatch(/over the \d+ MiB local request limit/);
   expect(message.endsWith(COMPACT_ADVICE)).toBe(true);
   expect(factoryCalls).toHaveLength(0);
 });
@@ -154,7 +140,7 @@ test("compact: zstd-encoded web body is handled without re-reading it", async ()
   const response = await compact(post("/v1/responses/compact", body, { "content-encoding": "zstd" }));
   expect(response.status).toBe(200);
   const result = await response.json() as { output: Array<{ content: Array<{ text: string }> }> };
-  expect(result.output.at(-1)!.content[0]!.text).toBe(`${SUMMARY_PREFIX}\n${summary}`);
+  expect(result.output.at(-1)!.content[0]!.text).toBe(`${SUMMARY_PREFIX}\n${compactionSummary}`);
 });
 
 test("compact: identity web body between limits is accepted", async () => {
@@ -302,9 +288,13 @@ test("responses: read-time ceiling rejection reports the header identity", async
   }]);
 });
 
-test("responses: read-time ceiling rejection with a missing or unparseable header reports nothing", async () => {
-  const cases: Array<Record<string, string>> = [{}, { "x-codex-turn-metadata": "{not json" }, { "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_only" }) }];
-  for (const headers of cases) {
+const unattributableHeaders: Array<[label: string, headers: Record<string, string>]> = [
+  ["missing header", {}],
+  ["unparseable header", { "x-codex-turn-metadata": "{not json" }],
+  ["header without a turn id", { "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_only" }) }],
+];
+for (const [label, headers] of unattributableHeaders) {
+  test(`responses: read-time ceiling rejection with a ${label} reports nothing`, async () => {
     const recorder = rejectionRecorder();
     const response = await responseRequest(post("/v1/responses", ceilingBody, headers), defaultConfig("full"), compactionAdapterFactory(), {
       requestSizeLimits, rememberState: false, onRequestRejected: recorder.onRequestRejected,
@@ -312,8 +302,8 @@ test("responses: read-time ceiling rejection with a missing or unparseable heade
     expect(response.status).toBe(400);
     expect((await errorMessage(response)).endsWith(NEW_TASK_ADVICE)).toBe(true);
     expect(recorder.rejections).toEqual([]);
-  }
-});
+  });
+}
 
 test("turnIdentityFromHeaders returns the header turn or undefined without throwing", () => {
   const identity = (value?: string) => turnIdentityFromHeaders(new Headers(value === undefined ? {} : { "x-codex-turn-metadata": value }));
@@ -389,6 +379,26 @@ test("an oversized or invalid composer prediction request does not report a reje
   expect(recorder.rejections).toEqual([]);
 });
 
+test("the Luna compaction refusal is a 409 attributed as compaction_unavailable on both routes", async () => {
+  const recorder = rejectionRecorder();
+  const noAdapter = (): ProviderAdapter => { throw new Error("a refused request must not construct an adapter"); };
+  const lunaConfig = { ...defaultConfig("browser-only"), solAvailable: false };
+  const luna = await responseRequest(post("/v1/responses", JSON.stringify({
+    model: "chatgpt-web/luna", stream: false,
+    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna") },
+    input: [{ type: "compaction_trigger" }],
+  })), lunaConfig, noAdapter, { rememberState: false, onRequestRejected: recorder.onRequestRejected });
+  expect(luna.status).toBe(409);
+  const lunaCompact = await compactRequest(post("/v1/responses/compact", JSON.stringify({ model: "chatgpt-web/luna", input: [] }), {
+    "x-codex-turn-metadata": turnMetadata("thread_luna_compact", "turn_luna_compact"),
+  }), lunaConfig, noAdapter, { onRequestRejected: recorder.onRequestRejected });
+  expect(lunaCompact.status).toBe(409);
+  expect(recorder.rejections).toEqual([
+    { identity: { threadId: "thread_luna", turnId: "turn_luna" }, status: 409, reason: "compaction_unavailable" },
+    { identity: { threadId: "thread_luna_compact", turnId: "turn_luna_compact" }, status: 409, reason: "compaction_unavailable" },
+  ]);
+});
+
 test("prediction-skip and terminal replay do not report a rejection", async () => {
   const recorder = rejectionRecorder();
   const noAdapter = (): ProviderAdapter => { throw new Error("a refused request must not construct an adapter"); };
@@ -409,19 +419,6 @@ test("prediction-skip and terminal replay do not report a rejection", async () =
   });
   expect(prediction.status).toBe(400);
   expect(await prediction.text()).toContain("Next-message prediction skipped");
-
-  // Luna compaction refusal is a designed 409, not a rejected follow-up (on both routes).
-  const lunaConfig = { ...defaultConfig("browser-only"), solAvailable: false };
-  const luna = await responseRequest(post("/v1/responses", JSON.stringify({
-    model: "chatgpt-web/luna", stream: false,
-    client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna") },
-    input: [{ type: "compaction_trigger" }],
-  })), lunaConfig, noAdapter, { rememberState: false, onRequestRejected: recorder.onRequestRejected });
-  expect(luna.status).toBe(409);
-  const lunaCompact = await compactRequest(post("/v1/responses/compact", JSON.stringify({ model: "chatgpt-web/luna", input: [] }), {
-    "x-codex-turn-metadata": turnMetadata("thread_luna", "turn_luna"),
-  }), lunaConfig, noAdapter, { onRequestRejected: recorder.onRequestRejected });
-  expect(lunaCompact.status).toBe(409);
 
   // Terminal replay of a turn whose browser tab was closed.
   const config = defaultConfig("browser-only");
@@ -473,7 +470,7 @@ function capturingAdapterFactory(seen: Array<Record<string, unknown>>) {
     name: "test-web-capture",
     async runTurn(parsed, _incoming, emit) {
       seen.push({ bytes: parsed._requestBodyBytes });
-      emit({ type: "text_delta", text: summary, phase: "final_answer" });
+      emit({ type: "text_delta", text: compactionSummary, phase: "final_answer" });
       emit({
         type: "done",
         stopReason: "stop",
@@ -607,4 +604,320 @@ test("a native-model request keeps its clone intact for passthrough", async () =
   const compactObserver = observeClone(compactRequestObject);
   await compactRequest(compactRequestObject, defaultConfig("full"), compactionAdapterFactory(), { requestSizeLimits });
   expect(compactObserver.cancelled()).toBe(0);
+});
+
+const rejectionLines = () => warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+const parseRejection = (line: string) => JSON.parse(line.slice(REJECTION_LOG_PREFIX.length)) as Record<string, unknown>;
+
+test("responses: a native model with memento metadata keeps the standard limit", async () => {
+  const metadata = {
+    request_kind: "compaction", thread_id: "thread_native_memento", turn_id: "turn_native_memento",
+    compaction: { trigger: "auto", reason: "context_limit", implementation: "responses", phase: "pre_turn", strategy: "memento" },
+  };
+  const body = JSON.stringify({
+    model: "gpt-5.6-sol",
+    stream: false,
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) },
+    input: [padding],
+  });
+  const response = await respond(post("/v1/responses", body));
+  expect(response.status).toBe(400);
+  expect((await errorMessage(response)).endsWith(NEW_TASK_ADVICE)).toBe(true);
+  expect(rejectionLines()).toHaveLength(1);
+});
+
+test("compact: an unreadable body logs one line with the route and no body text", async () => {
+  const response = await compact(post("/v1/responses/compact", '{"secret":"SENTINEL_COMPACT_BODY"'));
+  expect(response.status).toBe(400);
+  const lines = warnings();
+  expect(lines).toHaveLength(1);
+  const prefix = "[codex-chatgpt-web] request_body_unreadable ";
+  expect(lines[0]!.startsWith(prefix)).toBe(true);
+  expect(JSON.parse(lines[0]!.slice(prefix.length))).toMatchObject({ route: "compact", reason: "SyntaxError" });
+  expect(lines[0]).not.toContain("SENTINEL_COMPACT_BODY");
+});
+
+test("compact: the native-model policy rejection logs the policy stage and is attributed", async () => {
+  const recorder = rejectionRecorder();
+  const headers = { "x-codex-turn-metadata": turnMetadata("thread_compact_native", "turn_compact_native") };
+  const response = await compactRequest(
+    post("/v1/responses/compact", JSON.stringify({ model: "gpt-5.6-sol", input: [padding] }), headers),
+    defaultConfig("full"),
+    compactionAdapterFactory(),
+    { requestSizeLimits, onRequestRejected: recorder.onRequestRejected },
+  );
+  expect(response.status).toBe(400);
+  expect((await errorMessage(response)).endsWith(NEW_TASK_ADVICE)).toBe(true);
+  const lines = rejectionLines();
+  expect(lines).toHaveLength(1);
+  expect(parseRejection(lines[0]!)).toMatchObject({
+    route: "compact",
+    stage: "encoded",
+    limitBytes: requestSizeLimits.standard.encodedBytes,
+    remedy: "new_task",
+  });
+  expect(recorder.rejections).toEqual([{
+    identity: { threadId: "thread_compact_native", turnId: "turn_compact_native" },
+    status: 400,
+    reason: "request_body_too_large",
+  }]);
+});
+
+test("the policy-stage rejection log counts the data-URL images", async () => {
+  const image = `data:image/png;base64,${"A".repeat(9_000)}`;
+  const body = JSON.stringify({
+    model: webModel,
+    stream: false,
+    input: [
+      { type: "function_call", call_id: "call_img", name: "view_image", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_img", output: [{ type: "input_image", image_url: image }] },
+    ],
+  });
+  const response = await respond(post("/v1/responses", body));
+  expect(response.status).toBe(400);
+  expect(await errorMessage(response)).toContain("mostly image tool results (1 images");
+  const lines = rejectionLines();
+  expect(lines).toHaveLength(1);
+  expect(parseRejection(lines[0]!)).toMatchObject({ stage: "encoded", imageCount: 1, imageBytes: image.length });
+});
+
+describe("attribution of requests refused after the body was read", () => {
+  const identityHeaders = (threadId: string, turnId: string) => ({ "x-codex-turn-metadata": turnMetadata(threadId, turnId) });
+  const attributed = (threadId: string, turnId: string, status: number) => [{
+    identity: { threadId, turnId }, status, reason: "invalid_request" as const,
+  }];
+
+  test("compact: a Web model that is not enabled is refused and attributed", async () => {
+    const recorder = rejectionRecorder();
+    const response = await compactRequest(
+      post("/v1/responses/compact", JSON.stringify({ model: "chatgpt-web/not-a-model", input: [] }), identityHeaders("thread_route", "turn_route")),
+      defaultConfig("full"),
+      compactionAdapterFactory(),
+      { onRequestRejected: recorder.onRequestRejected },
+    );
+    expect(response.status).toBe(400);
+    expect(recorder.rejections).toEqual(attributed("thread_route", "turn_route", 400));
+  });
+
+  test("responses: an encrypted cross-backend subagent payload is refused and attributed", async () => {
+    const recorder = rejectionRecorder();
+    const body = JSON.stringify({
+      model: webModel,
+      stream: false,
+      client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_opaque", "turn_opaque") },
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Delegate this" }] },
+        { type: "agent_message", author: "/root/worker", recipient: "/root", content: [{ type: "encrypted_content", encrypted_content: "opaque-ciphertext" }] },
+      ],
+    });
+    const response = await responseRequest(post("/v1/responses", body), defaultConfig("full"), compactionAdapterFactory(), {
+      rememberState: false, onRequestRejected: recorder.onRequestRejected,
+    });
+    expect(response.status).toBe(400);
+    expect(await errorMessage(response)).toContain("encrypted cross-backend subagent payload");
+    expect(recorder.rejections).toEqual(attributed("thread_opaque", "turn_opaque", 400));
+  });
+
+  test("responses: a user revision owned by a foreign turn is refused and attributed", async () => {
+    const recorder = rejectionRecorder();
+    const body = JSON.stringify({
+      model: webModel,
+      stream: false,
+      client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_revision", "turn_revision_now") },
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "A prompt that belongs to an earlier turn" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_revision_old" },
+      }],
+    });
+    const response = await responseRequest(post("/v1/responses", body), defaultConfig("full"), compactionAdapterFactory(), {
+      rememberState: false, onRequestRejected: recorder.onRequestRejected,
+    });
+    expect(response.status).toBe(400);
+    expect(recorder.rejections).toEqual(attributed("thread_revision", "turn_revision_now", 400));
+  });
+});
+
+test("an attribution callback that throws keeps the 400 and logs a JSON payload without the message", async () => {
+  const error = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const body = JSON.stringify({
+      model: webModel,
+      stream: false,
+      client_metadata: { "x-codex-turn-metadata": turnMetadata("thread_throwing", "turn_throwing") },
+      input: [padding],
+    });
+    const response = await responseRequest(post("/v1/responses", body), defaultConfig("full"), compactionAdapterFactory(), {
+      requestSizeLimits,
+      rememberState: false,
+      onRequestRejected: () => { throw new TypeError("SENTINEL_CALLBACK_MESSAGE"); },
+    });
+    expect(response.status).toBe(400);
+    expect(error).toHaveBeenCalledTimes(1);
+    const line = String(error.mock.calls[0]![0]);
+    const prefix = "[codex-chatgpt-web] request_rejection_attribution_failed ";
+    expect(line.startsWith(prefix)).toBe(true);
+    expect(JSON.parse(line.slice(prefix.length))).toEqual({
+      status: 400,
+      reason: "request_body_too_large",
+      errorName: "TypeError",
+    });
+    expect(line).not.toContain("SENTINEL_CALLBACK_MESSAGE");
+  } finally {
+    error.mockRestore();
+  }
+});
+
+/** Sends raw HTTP head bytes (no body) and returns the full response text, so a lying `Content-Length` can be tested. */
+async function rawRequest(port: number, head: string): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    let received = "";
+    void Bun.connect({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) { socket.write(head); },
+        data(socket, chunk) {
+          received += new TextDecoder().decode(chunk);
+          const split = received.indexOf("\r\n\r\n");
+          if (split < 0) return;
+          const length = Number(/content-length: (\d+)/i.exec(received.slice(0, split))?.[1] ?? 0);
+          if (received.length - split - 4 >= length) socket.end();
+        },
+        close() { resolve(received); },
+        error(_socket, error) { reject(error); },
+      },
+    });
+  });
+}
+
+test("server: a body declared above the old 256 MiB socket cap is logged and answered with a 400", async () => {
+  const server = startServer({ ...defaultConfig("browser-only"), port: 0 });
+  try {
+    const declared = 300 * MiB;
+    const response = await rawRequest(
+      server.port!,
+      `POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: ${declared}\r\n\r\n`,
+    );
+    expect(response.startsWith("HTTP/1.1 400")).toBe(true);
+    const message = (JSON.parse(response.slice(response.indexOf("\r\n\r\n") + 4)) as { error: { message: string } }).error.message;
+    expect(message.startsWith(REJECTION_PREFIX)).toBe(true);
+    expect(message).toContain("300.0 MiB");
+    expect(message).toContain("over the 128 MiB local request limit");
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toMatchObject({
+      route: "responses", stage: "declared", declaredBytes: declared, limitBytes: 128 * MiB,
+    });
+  } finally {
+    await server.stop(true);
+  }
+}, 60_000);
+
+test("server: an /admin body above the control limit gets a 413 before it is read", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/admin/drain`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.controlToken}`, "content-type": "application/json" },
+      body: new Uint8Array(CONTROL_BODY_LIMIT_BYTES + 1),
+    });
+    expect(response.status).toBe(413);
+    expect(await errorMessage(response)).toBe(`Request body exceeds ${CONTROL_BODY_LIMIT_BYTES} bytes`);
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toEqual({
+      route: "control", stage: "declared", limitBytes: CONTROL_BODY_LIMIT_BYTES, declaredBytes: CONTROL_BODY_LIMIT_BYTES + 1,
+    });
+    // An authorized, in-limit request is still served.
+    const drained = await fetch(`http://127.0.0.1:${server.port}/admin/drain`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.controlToken}` },
+    });
+    expect(drained.status).toBe(200);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("server: a chunked /admin body is cut off at the control limit while it is read", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  try {
+    const init: RequestInit & { duplex: "half" } = {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.controlToken}`, "content-type": "application/json" },
+      // No content-length is sent for a stream body, so only the stream limit can stop it.
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let sent = 0; sent <= CONTROL_BODY_LIMIT_BYTES; sent += 16 * 1024) controller.enqueue(new Uint8Array(16 * 1024));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    };
+    const response = await fetch(`http://127.0.0.1:${server.port}/admin/cancel-turn`, init);
+    expect(response.status).toBe(400);
+    const body = await response.json() as { status: string; error: string };
+    expect(body).toEqual({ status: "error", error: `Encoded request body exceeds ${CONTROL_BODY_LIMIT_BYTES} bytes` });
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toMatchObject({
+      route: "control", stage: "stream", limitBytes: CONTROL_BODY_LIMIT_BYTES,
+    });
+  } finally {
+    await server.stop(true);
+  }
+});
+
+describe("guardRequestBody", () => {
+  const chunkedRequest = (chunks: Uint8Array[]): Request => {
+    const init: RequestInit & { duplex: "half" } = {
+      method: "POST",
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    };
+    return new Request("http://127.0.0.1/v1/images/edits", init);
+  };
+
+  test("rejects a declared length above the limit without reading the body", () => {
+    const request = new Request("http://127.0.0.1/v1/images/edits", {
+      method: "POST", headers: { "content-length": "1000" }, body: "x",
+    });
+    const guarded = guardRequestBody(request, "native", 999);
+    expect(guarded).toBeInstanceOf(Response);
+    expect((guarded as Response).status).toBe(413);
+    expect(warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX))).toHaveLength(1);
+  });
+
+  test("passes a declared length at the limit through unchanged", () => {
+    const request = new Request("http://127.0.0.1/v1/images/edits", {
+      method: "POST", headers: { "content-length": "1000" }, body: "x",
+    });
+    expect(guardRequestBody(request, "native", 1000)).toBe(request);
+  });
+
+  test("lets an undeclared body within the limit be read in full", async () => {
+    const guarded = guardRequestBody(chunkedRequest([new Uint8Array(40).fill(1), new Uint8Array(40).fill(2)]), "native", 100);
+    expect(guarded).toBeInstanceOf(Request);
+    expect((await (guarded as Request).arrayBuffer()).byteLength).toBe(80);
+    expect(warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX))).toHaveLength(0);
+  });
+
+  test("cuts an undeclared body off at the limit and logs it once", async () => {
+    const guarded = guardRequestBody(chunkedRequest([new Uint8Array(60), new Uint8Array(60), new Uint8Array(60)]), "native", 100);
+    await expect((guarded as Request).arrayBuffer()).rejects.toBeInstanceOf(RequestBodyLimitError);
+    const lines = warnings().filter(line => line.startsWith(REJECTION_LOG_PREFIX));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!.slice(REJECTION_LOG_PREFIX.length))).toEqual({
+      route: "native", stage: "stream", limitBytes: 100, readBytes: 120,
+    });
+  });
 });
