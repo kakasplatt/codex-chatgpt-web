@@ -4712,8 +4712,7 @@ describe("ChatGPT outer-native harness v4", () => {
         const rejectedFailure = { code: "codex_request_rejected" as const, status: 400, reason: "request_body_too_large" as const };
         if (rejected) {
           // Codex's follow-up request was rejected, so the server ends the turn instead of the MCP release.
-          const traceId = [...(broker as unknown as { channels: Map<string, { traceId: string }> }).channels.values()][0]!.traceId;
-          expect(broker.failTraceAwaitingResults(traceId, rejectedFailure)).toBe(1);
+          expect(broker.failTraceAwaitingResults(turn.traceId, rejectedFailure)).toBe(1);
         } else {
           await callTurnBroker(socketPath, {
             method: "release", bindingId: claimed.bindingId,

@@ -159,6 +159,18 @@ test("failTraceAwaitingResults does not revoke a channel without delivered calls
   } finally { await f.close(); }
 });
 
+test("a duplicate release of a retired binding still rejects a codex_request_rejected failure", async () => {
+  const f = await fixture();
+  try {
+    await f.enqueue();
+    expect((await f.release()).released).toBe(true);
+    // The binding is now retired, which takes the duplicate-release branch.
+    expect(await f.release()).toMatchObject({ released: true, duplicate: true });
+    await expect(callTurnBroker(f.socketPath, { method: "release", bindingId: f.bindingId, failure: rejected }))
+      .rejects.toThrow("Invalid Codex tool retirement failure");
+  } finally { await f.close(); }
+});
+
 test("release still rejects a codex_request_rejected failure from the MCP side", async () => {
   const f = await fixture();
   try {

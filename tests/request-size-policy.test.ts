@@ -4,6 +4,7 @@ import { classifyError } from "../src/lib/errors";
 import {
   COMPACTION_REQUEST_BODY_LIMITS,
   REQUEST_SIZE_LIMITS,
+  REQUEST_SIZE_LOG_FLOOR_BYTES,
   formatRequestBodyRejection,
   hasCompactionTrigger,
   isCompactionRequestBody,
@@ -154,22 +155,30 @@ test("identity or partially known sizes print a single size", () => {
     .toStartWith("This task's request is 300.0 MiB, over the 256 MiB local request limit.");
 });
 
+test("a zstd body whose decoded size is unknown prints the encoded size alone", () => {
+  // The encoded limit fires before the body is decompressed, so only the encoded size is known.
+  const encodedOnly = limitError({ stage: "encoded", limitBytes: 64 * MiB, encodedBytes: 70 * MiB, contentEncoding: "zstd" });
+  const message = formatRequestBodyRejection(encodedOnly, { route: "responses", remedy: "new_task" });
+  expect(message).toStartWith("This task's request is 70.0 MiB, over the 64 MiB local request limit.");
+  expect(message).not.toContain("compressed");
+});
+
 test("new_task remedy does not suggest /compact as the fix", () => {
   const message = formatRequestBodyRejection(zstdError(), { route: "compact", remedy: "new_task" });
   expect(message).toContain("Compaction cannot run on a request this large; start a new task to continue.");
   expect(message).not.toContain("Run /compact");
 });
 
-test("actionable messages keep the invalid_request_error code", () => {
-  for (const remedy of ["compact", "new_task"] as const) {
+for (const remedy of ["compact", "new_task"] as const) {
+  test(`the ${remedy} remedy message keeps the invalid_request_error code`, () => {
     const message = formatRequestBodyRejection(zstdError(), {
       route: "compact",
       remedy,
       images: { count: 165, bytes: 123_700_000 },
     });
     expect(classifyError(400, "invalid_request_error", message).code).toBe("invalid_request_error");
-  }
-});
+  });
+}
 
 test("measureImagePayloads counts data-URL images in tool outputs and messages only", () => {
   const dataUrl = (n: number) => `data:image/png;base64,${"A".repeat(n)}`;
@@ -192,9 +201,36 @@ test("measureImagePayloads counts data-URL images in tool outputs and messages o
   expect(measureImagePayloads(raw)).toEqual({ count: 3, bytes: lengths[0]! + lengths[1]! + lengths[2]! });
 });
 
-test("measureImagePayloads tolerates malformed input", () => {
-  for (const raw of [undefined, null, 1, [], {}, { input: "x" }, { input: [null, 1, [], { type: "message", content: [null, 2] }] }]) {
+const malformedImageInputs: Array<[label: string, raw: unknown]> = [
+  ["undefined", undefined],
+  ["null", null],
+  ["a number", 1],
+  ["an array", []],
+  ["an empty object", {}],
+  ["a string input", { input: "x" }],
+  ["junk input items", { input: [null, 1, [], { type: "message", content: [null, 2] }] }],
+];
+for (const [label, raw] of malformedImageInputs) {
+  test(`measureImagePayloads tolerates ${label}`, () => {
     expect(measureImagePayloads(raw)).toEqual({ count: 0, bytes: 0 });
+  });
+}
+
+test("the size line is written from 8 MiB of either encoded or decoded bytes", () => {
+  expect(REQUEST_SIZE_LOG_FLOOR_BYTES).toBe(8 * MiB);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const images = { count: 0, bytes: 0 };
+    const sized = (encodedBytes: number, decodedBytes: number) => ({ encodedBytes, decodedBytes, contentEncoding: "zstd" });
+    logRequestBodySize("responses", sized(REQUEST_SIZE_LOG_FLOOR_BYTES - 1, REQUEST_SIZE_LOG_FLOOR_BYTES - 1), images);
+    expect(warn).toHaveBeenCalledTimes(0);
+    // Only one of the two counts crosses the floor: the `||` keeps the line.
+    logRequestBodySize("responses", sized(REQUEST_SIZE_LOG_FLOOR_BYTES, 1), images);
+    expect(warn).toHaveBeenCalledTimes(1);
+    logRequestBodySize("responses", sized(1, REQUEST_SIZE_LOG_FLOOR_BYTES), images);
+    expect(warn).toHaveBeenCalledTimes(2);
+  } finally {
+    warn.mockRestore();
   }
 });
 

@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import type { ProviderAdapter } from "../src/adapters/base";
 import { defaultConfig } from "../src/config";
 import { compactRequest, responseRequest } from "../src/server";
 import type { CodexMessage, CodexProviderConfig } from "../src/types";
+import { compactionAdapterFactory, type CompactionAdapterObservation } from "./support/compaction-adapter";
 
 // Real-size regression for issue #66: an image-heavy Web history whose zstd body exceeds the
 // standard 64 MiB encoded limit but whose decoded form stays under the 128 MiB decoded limit.
@@ -12,7 +12,6 @@ import type { CodexMessage, CodexProviderConfig } from "../src/types";
 const MiB = 1024 * 1024;
 const IMAGE_PAIRS = 34;
 const IMAGE_BYTES = 2_076_180;
-const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
 
 let encodedBody: Uint8Array<ArrayBuffer> | undefined;
 let decodedBytes = 0;
@@ -52,26 +51,6 @@ afterAll(() => {
   ordinaryEncodedBody = undefined;
 });
 
-function recordingAdapterFactory(seen: CodexMessage[][], factoryCalls: CodexProviderConfig[] = []) {
-  return (provider: CodexProviderConfig): ProviderAdapter => {
-    factoryCalls.push(provider);
-    return {
-      name: "test-web-compactor",
-      async runTurn(parsed, _incoming, emit) {
-        expect(parsed._compactionRequest).toBe(true);
-        seen.push(parsed.context.messages);
-        emit({ type: "text_delta", text: summary, phase: "final_answer" });
-        emit({
-          type: "done",
-          stopReason: "stop",
-          endTurn: true,
-          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, estimated: true },
-        });
-      },
-    };
-  };
-}
-
 function post(path: string, body: Uint8Array<ArrayBuffer>): Request {
   return new Request(`http://127.0.0.1${path}`, {
     method: "POST",
@@ -88,32 +67,33 @@ function imageToolResults(messages: CodexMessage[]) {
 }
 
 test("v2 compaction of a >64 MiB zstd image history succeeds on /responses", async () => {
-  const seen: CodexMessage[][] = [];
+  const observations: CompactionAdapterObservation[] = [];
   const response = await responseRequest(
     post("/v1/responses", encodedBody!),
     defaultConfig("full"),
-    recordingAdapterFactory(seen),
+    compactionAdapterFactory({ observations }),
     { rememberState: false },
   );
   expect(response.status).toBe(200);
   const result = await response.json() as { output: Array<{ type: string }> };
   expect(result.output.filter((item) => item.type === "compaction")).toHaveLength(1);
-  expect(seen).toHaveLength(1);
-  expect(imageToolResults(seen[0]!)).toHaveLength(IMAGE_PAIRS);
+  expect(observations.map((seen) => seen.compactionRequest)).toEqual([true]);
+  expect(imageToolResults(observations[0]!.messages)).toHaveLength(IMAGE_PAIRS);
 }, 60_000);
 
 test("v1 /compact of the same history succeeds and the replacement history is small", async () => {
-  const seen: CodexMessage[][] = [];
+  const observations: CompactionAdapterObservation[] = [];
   const response = await compactRequest(
     post("/v1/responses/compact", ordinaryEncodedBody!),
     defaultConfig("full"),
-    recordingAdapterFactory(seen),
+    compactionAdapterFactory({ observations }),
   );
   expect(response.status).toBe(200);
   const result = await response.json() as { output: Array<{ type: string }> };
   expect(JSON.stringify(result.output).length).toBeLessThan(1 * MiB);
   expect(result.output.some((item) => item.type === "function_call_output")).toBe(false);
-  expect(imageToolResults(seen[0]!)).toHaveLength(IMAGE_PAIRS);
+  expect(observations.map((seen) => seen.compactionRequest)).toEqual([true]);
+  expect(imageToolResults(observations[0]!.messages)).toHaveLength(IMAGE_PAIRS);
 }, 60_000);
 
 test("an ordinary oversized follow-up is still rejected", async () => {
@@ -124,7 +104,7 @@ test("an ordinary oversized follow-up is still rejected", async () => {
     response = await responseRequest(
       post("/v1/responses", ordinaryEncodedBody!),
       defaultConfig("full"),
-      recordingAdapterFactory([], factoryCalls),
+      compactionAdapterFactory({ factoryCalls }),
       { rememberState: false },
     );
     expect(warn).toHaveBeenCalledTimes(1);
