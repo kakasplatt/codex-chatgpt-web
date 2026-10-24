@@ -64,7 +64,7 @@ export function assertRequestBodyWithin(size: MeasuredRequestBody, limits: Reque
   }
 }
 
-function readDeclaredLength(request: Request): number | undefined {
+export function readDeclaredLength(request: Request): number | undefined {
   const header = request.headers.get("content-length");
   if (header === null) return undefined;
   const declared = Number(header);

@@ -3,6 +3,7 @@ import {
   type MeasuredRequestBody,
   type RequestBodyLimitError,
   type RequestBodyLimits,
+  readDeclaredLength,
 } from "./http-body";
 import { isNativeTextCompaction } from "./responses/compaction";
 
@@ -209,12 +210,10 @@ export function logRequestBodySize(
 
 /** Logs a body that could not be read or decoded. Deliberately omits `error.message`. */
 export function logUnreadableRequestBody(route: RequestRoute, request: Request, error: unknown): void {
-  const header = request.headers.get("content-length");
-  const declared = header === null ? undefined : Number(header);
   console.warn(`${LOG_PREFIX} request_body_unreadable ${JSON.stringify({
     route,
     reason: error instanceof Error ? error.name : typeof error,
-    declaredBytes: declared !== undefined && Number.isFinite(declared) ? declared : undefined,
+    declaredBytes: readDeclaredLength(request),
     contentEncoding: loggedContentEncoding(request.headers.get("content-encoding") || "identity"),
   })}`);
 }

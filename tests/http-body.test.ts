@@ -88,8 +88,10 @@ test("decoded limit raises stage decoded with both sizes", async () => {
 });
 
 test("declared length is checked against the supplied limits", async () => {
-  const make = () =>
-    new Request("http://127.0.0.1/v1/responses", {
+  const make = () => {
+    // Streaming request bodies need `duplex`. Typing the init (instead of `@ts-expect-error`)
+    // keeps this compiling whether or not `@types/bun` starts declaring the property.
+    const init: RequestInit & { duplex: "half" } = {
       method: "POST",
       headers: { "content-type": "application/json", "content-length": "100" },
       body: new ReadableStream({
@@ -98,9 +100,10 @@ test("declared length is checked against the supplied limits", async () => {
           controller.close();
         },
       }),
-      // @ts-expect-error Bun/undici streaming request bodies need duplex.
       duplex: "half",
-    });
+    };
+    return new Request("http://127.0.0.1/v1/responses", init);
+  };
   const error = await readJsonRequestBodyWithSize(make(), small).catch((e) => e);
   expect(error).toBeInstanceOf(RequestBodyLimitError);
   expect(error).toMatchObject({ stage: "declared", declaredBytes: 100, limitBytes: 64 });
@@ -109,6 +112,25 @@ test("declared length is checked against the supplied limits", async () => {
   const ok = await readJsonRequestBodyWithSize(make(), { encodedBytes: 1024, decodedBytes: 1024 });
   expect(ok.value).toEqual({});
   expect(ok.declaredBytes).toBe(100);
+});
+
+test("assertRequestBodyWithin keeps every measured size on the error, including the declared length", () => {
+  const measured = { declaredBytes: 90, encodedBytes: 100, decodedBytes: 100, contentEncoding: "identity" };
+  const encoded = (() => {
+    try { assertRequestBodyWithin(measured, small); } catch (error) { return error; }
+  })();
+  expect(encoded).toBeInstanceOf(RequestBodyLimitError);
+  expect(encoded).toMatchObject({ stage: "encoded", limitBytes: 64, declaredBytes: 90, encodedBytes: 100, decodedBytes: 100 });
+
+  const decoded = (() => {
+    try { assertRequestBodyWithin({ ...measured, encodedBytes: 10, decodedBytes: 200, contentEncoding: "zstd" }, small); } catch (error) { return error; }
+  })();
+  expect(decoded).toMatchObject({ stage: "decoded", limitBytes: 128, declaredBytes: 90, encodedBytes: 10, decodedBytes: 200 });
+
+  const undeclared = (() => {
+    try { assertRequestBodyWithin({ encodedBytes: 100, decodedBytes: 100, contentEncoding: "identity" }, small); } catch (error) { return error; }
+  })();
+  expect((undeclared as RequestBodyLimitError).declaredBytes).toBeUndefined();
 });
 
 test("assertRequestBodyWithin enforces a stricter limit after reading", () => {

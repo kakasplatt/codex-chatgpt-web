@@ -23,7 +23,13 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
-import { assertRequestBodyWithin, type MeasuredRequestBody, readJsonRequestBodyWithSize, RequestBodyLimitError } from "./http-body";
+import {
+  assertRequestBodyWithin,
+  type JsonRequestBody,
+  type MeasuredRequestBody,
+  readJsonRequestBodyWithSize,
+  RequestBodyLimitError,
+} from "./http-body";
 import {
   formatRequestBodyRejection,
   logRequestBodyRejection,
@@ -396,6 +402,8 @@ interface ResponseBodyContext {
   headers: Headers;
   signal: AbortSignal;
   nativeRequest: Request;
+  /** The body's `model`, extracted once by the caller (`undefined` when absent or not an object body). */
+  requestedModel: unknown;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -710,7 +718,11 @@ function rejectRequest(
       options.onRequestRejected?.({ identity, status, reason });
     } catch (error) {
       // Attribution is a side channel: it must never turn this terminal 4xx into a retryable 5xx.
-      console.error(`[codex-chatgpt-web] request_rejection_attribution_failed ${error instanceof Error ? error.name : "Error"}`);
+      console.error(`[codex-chatgpt-web] request_rejection_attribution_failed ${JSON.stringify({
+        status,
+        reason,
+        errorName: error instanceof Error ? error.name : "Error",
+      })}`);
     }
   }
   return response;
@@ -752,7 +764,7 @@ export async function responseRequest(
   const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
   let raw: unknown;
-  let size: Awaited<ReturnType<typeof readJsonRequestBodyWithSize>>;
+  let size: JsonRequestBody;
   try {
     size = await readJsonRequestBodyWithSize(req, limits.compaction);
     raw = size.value;
@@ -786,7 +798,7 @@ export async function responseRequest(
   }
   return handleResponseBody(
     raw,
-    { headers: req.headers, signal: req.signal, nativeRequest },
+    { headers: req.headers, signal: req.signal, nativeRequest, requestedModel: model },
     config,
     adapterFactory,
     options,
@@ -804,9 +816,7 @@ async function handleResponseBody(
   routeName: RequestRoute,
   size: MeasuredRequestBody,
 ): Promise<Response> {
-  const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
-    ? (raw as { model?: unknown }).model
-    : undefined;
+  const { requestedModel } = context;
   const prediction = isCodexComposerPrediction(raw);
   let identity: NativeCodexTurnIdentity | undefined;
   try {
@@ -844,6 +854,9 @@ async function handleResponseBody(
       identity = parsedIdentity;
     }
   } catch (error) {
+    // This catch can run after `onTurnIdentity` threw while binding the parsed identity, in which
+    // case `identity` is still the one read from the body. The two always name the same native turn
+    // today, so attributing here cannot hit the wrong turn; revisit if they ever diverge.
     return rejectRequest(
       400,
       "invalid_request_error",
@@ -1051,7 +1064,7 @@ export async function compactRequest(
   const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
-  let size: Awaited<ReturnType<typeof readJsonRequestBodyWithSize>>;
+  let size: JsonRequestBody;
   try {
     size = await readJsonRequestBodyWithSize(req, limits.compaction);
     if (!size.value || typeof size.value !== "object" || Array.isArray(size.value)) throw new Error("not an object");
@@ -1134,7 +1147,7 @@ export async function compactRequest(
   const input = Array.isArray(raw.input) ? raw.input : [];
   const response = await handleResponseBody(
     { ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] },
-    { headers: req.headers, signal: req.signal, nativeRequest },
+    { headers: req.headers, signal: req.signal, nativeRequest, requestedModel: raw.model },
     config,
     adapterFactory,
     options,
