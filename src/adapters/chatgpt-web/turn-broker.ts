@@ -10,7 +10,6 @@ import {
 import type { ChatGptTurnEnvironment } from "./environment";
 import {
   chatGptCodexRequestRejectedError,
-  chatGptRetirementError,
   chatGptToolTimeoutError,
 } from "./adapter-error";
 import { subagentModelObservation } from "./mcp-observation";
