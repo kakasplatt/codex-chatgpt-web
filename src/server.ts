@@ -659,6 +659,19 @@ function rejectionRemedy(
   return stage === "policy" && webModel ? "compact" : "new_task";
 }
 
+/**
+ * The clone is read only by the native passthrough branch. A Web-model request never forwards it, so
+ * cancel it: otherwise the unread tee branch keeps a full extra copy of the encoded body alive for
+ * the whole browser round.
+ */
+function releaseNativeRequest(nativeRequest: Request): void {
+  try {
+    void nativeRequest.body?.cancel().catch(() => {});
+  } catch {
+    // Releasing memory is best effort.
+  }
+}
+
 function nativeTurnIdentity(identity: { threadId?: string; turnId?: string }): NativeCodexTurnIdentity | undefined {
   return identity.threadId && identity.turnId ? { threadId: identity.threadId, turnId: identity.turnId } : undefined;
 }
@@ -747,6 +760,8 @@ export async function responseRequest(
     ? (raw as { model?: unknown }).model
     : undefined;
   const webModel = !(typeof model === "string" && !isChatGptWebModelSlug(model));
+  // handleResponseBody forwards the clone only under the same `!isChatGptWebModelSlug(model)` check.
+  if (webModel) releaseNativeRequest(nativeRequest);
   try {
     assertRequestBodyWithin(size, requestBodyLimitsFor({ route: "responses", raw, webModel }, limits));
   } catch (error) {
@@ -1079,6 +1094,8 @@ export async function compactRequest(
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
   }
+  // Only the native branch above forwards the clone; this is a Web model.
+  releaseNativeRequest(nativeRequest);
   let route: ChatGptWebModelRoute;
   try {
     route = requireChatGptWebModelRoute(raw.model, config);

@@ -522,3 +522,47 @@ test("compact: the adapter receives the outer body size, not the trigger-appende
   expect(lines).toHaveLength(1);
   expect(JSON.parse(lines[0]!.slice(SIZE_LOG_PREFIX.length)).route).toBe("compact");
 });
+
+/** Wraps `request.clone` so the test can observe whether the server cancels the clone's body. */
+function observeClone(request: Request): { cancelled: () => number } {
+  let cancels = 0;
+  const originalClone = request.clone.bind(request);
+  request.clone = () => {
+    const clone = originalClone();
+    const originalCancel = clone.body!.cancel.bind(clone.body!);
+    clone.body!.cancel = (reason?: unknown) => {
+      cancels += 1;
+      return originalCancel(reason);
+    };
+    return clone;
+  };
+  return { cancelled: () => cancels };
+}
+
+test("a Web-model request releases the unread native clone so it does not hold a second copy of the body", async () => {
+  const responsesRequest = post("/v1/responses", JSON.stringify({
+    model: webModel, stream: false, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+  }));
+  const responsesObserver = observeClone(responsesRequest);
+  const response = await responseRequest(responsesRequest, defaultConfig("full"), compactionAdapterFactory(), { rememberState: false });
+  expect(response.status).toBe(200);
+  expect(responsesObserver.cancelled()).toBe(1);
+
+  const compactRequestObject = post("/v1/responses/compact", JSON.stringify({ model: webModel, input: [padding] }));
+  const compactObserver = observeClone(compactRequestObject);
+  const compacted = await compactRequest(compactRequestObject, defaultConfig("full"), compactionAdapterFactory(), { requestSizeLimits });
+  expect(compacted.status).toBe(200);
+  expect(compactObserver.cancelled()).toBe(1);
+});
+
+test("a native-model request keeps its clone intact for passthrough", async () => {
+  const responsesRequest = post("/v1/responses", JSON.stringify({ model: "gpt-5.6-sol", stream: false, input: [] }));
+  const responsesObserver = observeClone(responsesRequest);
+  await responseRequest(responsesRequest, defaultConfig("full"), compactionAdapterFactory(), { rememberState: false });
+  expect(responsesObserver.cancelled()).toBe(0);
+
+  const compactRequestObject = post("/v1/responses/compact", JSON.stringify({ model: "gpt-5.6-sol", input: [] }));
+  const compactObserver = observeClone(compactRequestObject);
+  await compactRequest(compactRequestObject, defaultConfig("full"), compactionAdapterFactory(), { requestSizeLimits });
+  expect(compactObserver.cancelled()).toBe(0);
+});
