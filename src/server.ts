@@ -23,10 +23,11 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
-import { assertRequestBodyWithin, readJsonRequestBodyWithSize, RequestBodyLimitError } from "./http-body";
+import { assertRequestBodyWithin, type MeasuredRequestBody, readJsonRequestBodyWithSize, RequestBodyLimitError } from "./http-body";
 import {
   formatRequestBodyRejection,
   logRequestBodyRejection,
+  logRequestBodySize,
   logUnreadableRequestBody,
   measureImagePayloads,
   REQUEST_SIZE_LIMITS,
@@ -380,6 +381,8 @@ export interface ResponseRequestOptions {
   requestSizeLimits?: RequestSizeLimits;
   /** Observe a request refused after its body was read and before the adapter ran, once its native turn is known. */
   onRequestRejected?: (rejection: CodexRequestRejection) => void;
+  /** Tests lower the per-request size-log floor; production uses `REQUEST_SIZE_LOG_FLOOR_BYTES`. */
+  requestSizeLogFloorBytes?: number;
 }
 
 /** A Codex request refused with a 4xx after its body was read, and the native turn that sent it. */
@@ -759,6 +762,8 @@ export async function responseRequest(
     config,
     adapterFactory,
     options,
+    "responses",
+    size,
   );
 }
 
@@ -768,6 +773,8 @@ async function handleResponseBody(
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory,
   options: ResponseRequestOptions,
+  routeName: RequestRoute,
+  size: MeasuredRequestBody,
 ): Promise<Response> {
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
@@ -796,6 +803,9 @@ async function handleResponseBody(
   let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
+    // Measured by the server for this turn; the parser never reads these from caller data.
+    parsed._requestBodyBytes = { encoded: size.encodedBytes, decoded: size.decodedBytes };
+    logRequestBodySize(routeName, size, measureImagePayloads(raw), options.requestSizeLogFloorBytes);
     if (prediction) executionConfig = configureComposerPrediction(parsed, config);
     route = routeChatGptWebRequest(parsed, executionConfig);
     const parsedIdentity = nativeTurnIdentity(extractChatGptTurnIdentity(parsed));
@@ -1006,7 +1016,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "requestSizeLimits" | "onRequestRejected"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "requestSizeLimits" | "onRequestRejected" | "requestSizeLogFloorBytes"> = {},
 ): Promise<Response> {
   const limits = options.requestSizeLimits ?? REQUEST_SIZE_LIMITS;
   const nativeRequest = req.clone();
@@ -1096,6 +1106,8 @@ export async function compactRequest(
     config,
     adapterFactory,
     options,
+    "compact",
+    size,
   );
   if (!response.ok) return response;
   let body: {

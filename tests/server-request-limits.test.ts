@@ -422,3 +422,103 @@ test("prediction-skip and terminal replay do not report a rejection", async () =
 
   expect(recorder.rejections).toEqual([]);
 });
+
+const SIZE_LOG_PREFIX = "[codex-chatgpt-web] request_body_size";
+const sizeLines = () => warnings().filter(line => line.startsWith(SIZE_LOG_PREFIX));
+
+function capturingAdapterFactory(seen: Array<Record<string, unknown>>) {
+  return (): ProviderAdapter => ({
+    name: "test-web-capture",
+    async runTurn(parsed, _incoming, emit) {
+      seen.push({ bytes: parsed._requestBodyBytes });
+      emit({ type: "text_delta", text: summary, phase: "final_answer" });
+      emit({
+        type: "done",
+        stopReason: "stop",
+        endTurn: true,
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, estimated: true },
+      });
+    },
+  });
+}
+
+test("size line is logged at the floor and above, not below, and carries no body text", async () => {
+  const image = "data:image/png;base64,SENTINEL_IMAGE_BYTES";
+  const body = new TextEncoder().encode(JSON.stringify({
+    model: webModel,
+    stream: false,
+    input: [
+      padding,
+      { type: "function_call_output", call_id: "call_1", output: [{ type: "input_image", image_url: image }] },
+      { type: "compaction_trigger" },
+    ],
+  }));
+  const at = (floor: number) => responseRequest(
+    post("/v1/responses", body),
+    defaultConfig("full"),
+    compactionAdapterFactory(),
+    { requestSizeLimits, rememberState: false, requestSizeLogFloorBytes: floor },
+  );
+
+  expect((await at(body.byteLength)).status).toBe(200);
+  const lines = sizeLines();
+  expect(lines).toHaveLength(1);
+  expect(JSON.parse(lines[0]!.slice(SIZE_LOG_PREFIX.length))).toEqual({
+    route: "responses",
+    encodedBytes: body.byteLength,
+    decodedBytes: body.byteLength,
+    contentEncoding: "identity",
+    imageCount: 1,
+    imageBytes: image.length,
+  });
+  expect(lines[0]).not.toContain("SENTINEL_IMAGE_BYTES");
+  expect(lines[0]).not.toContain("xxxx");
+
+  warn.mockClear();
+  expect((await at(body.byteLength + 1)).status).toBe(200);
+  expect(sizeLines()).toHaveLength(0);
+});
+
+test("size line uses the 8 MiB floor by default", async () => {
+  const response = await respond(post("/v1/responses", JSON.stringify({
+    model: webModel,
+    stream: false,
+    input: [padding, { type: "compaction_trigger" }],
+  })));
+  expect(response.status).toBe(200);
+  expect(sizeLines()).toHaveLength(0);
+});
+
+test("the adapter receives server-measured bytes; caller metadata cannot set them", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const body = new TextEncoder().encode(JSON.stringify({
+    model: webModel,
+    stream: false,
+    _requestBodyBytes: { encoded: 1, decoded: 2 },
+    input: [padding, { type: "compaction_trigger" }],
+  }));
+  const response = await responseRequest(
+    post("/v1/responses", body),
+    defaultConfig("full"),
+    capturingAdapterFactory(seen),
+    { requestSizeLimits, rememberState: false },
+  );
+  expect(response.status).toBe(200);
+  expect(seen).toEqual([{ bytes: { encoded: body.byteLength, decoded: body.byteLength } }]);
+});
+
+test("compact: the adapter receives the outer body size, not the trigger-appended one", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const body = new TextEncoder().encode(JSON.stringify({ model: webModel, input: [padding] }));
+  const response = await compactRequest(
+    post("/v1/responses/compact", body),
+    defaultConfig("full"),
+    capturingAdapterFactory(seen),
+    { requestSizeLimits, requestSizeLogFloorBytes: body.byteLength },
+  );
+  expect(response.status).toBe(200);
+  expect(seen).toEqual([{ bytes: { encoded: body.byteLength, decoded: body.byteLength } }]);
+  const lines = sizeLines();
+  expect(lines).toHaveLength(1);
+  expect(JSON.parse(lines[0]!.slice(SIZE_LOG_PREFIX.length)).route).toBe("compact");
+});

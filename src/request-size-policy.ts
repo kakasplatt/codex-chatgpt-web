@@ -1,4 +1,9 @@
-import { DEFAULT_REQUEST_BODY_LIMITS, type RequestBodyLimitError, type RequestBodyLimits } from "./http-body";
+import {
+  DEFAULT_REQUEST_BODY_LIMITS,
+  type MeasuredRequestBody,
+  type RequestBodyLimitError,
+  type RequestBodyLimits,
+} from "./http-body";
 import { isNativeTextCompaction } from "./responses/compaction";
 
 /**
@@ -154,6 +159,27 @@ export function logRequestBodyRejection(
     imageCount: context.images?.count,
     imageBytes: context.images?.bytes,
     remedy: context.remedy,
+  })}`);
+}
+
+/** Per-request size lines are written only for bodies at least this large. */
+export const REQUEST_SIZE_LOG_FLOOR_BYTES = 8 * 1024 * 1024;
+
+/** One size-only line for a large accepted body. `floorBytes` is overridable for tests only. */
+export function logRequestBodySize(
+  route: RequestRoute,
+  size: MeasuredRequestBody,
+  images: ImagePayloadSummary,
+  floorBytes: number = REQUEST_SIZE_LOG_FLOOR_BYTES,
+): void {
+  if (size.encodedBytes < floorBytes && size.decodedBytes < floorBytes) return;
+  console.warn(`${LOG_PREFIX} request_body_size ${JSON.stringify({
+    route,
+    encodedBytes: size.encodedBytes,
+    decodedBytes: size.decodedBytes,
+    contentEncoding: size.contentEncoding,
+    imageCount: images.count,
+    imageBytes: images.bytes,
   })}`);
 }
 
