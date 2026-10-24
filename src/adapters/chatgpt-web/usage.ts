@@ -17,6 +17,7 @@ import {
 } from "../../chatgpt-web-models";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import { readCodexModelContextOverride } from "../../codex-integration-document";
+import { isReadableCompactionSummaryText } from "../../responses/compaction";
 import { underCompactionPressure } from "../../request-size-policy";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import {
@@ -308,7 +309,7 @@ function compactionPressureTokens(
   experimentalBiggerContext: boolean,
   experimentalFullContext: boolean,
   readContextOverride: typeof readCodexModelContextOverride,
-): number {
+): { tokens: number; overrideIgnored: boolean } {
   const manual = isChatGptWebZeroRiskBackendModel(parsed.modelId);
   const effort = manual
     ? "low"
@@ -320,12 +321,23 @@ function compactionPressureTokens(
     parsed._chatgptModelFamily,
   ).contextWindow;
   let override = 0;
+  let overrideIgnored = false;
   try {
     override = readContextOverride()?.contextWindow ?? 0;
   } catch {
-    // An unreadable Codex config must not fail a turn; the advertised window already suffices.
+    // An unreadable or malformed Codex config must not fail a turn; the advertised window already
+    // suffices. The caller reports it with a fixed reason code, never this error's message.
+    overrideIgnored = true;
   }
-  return Math.max(advertised, override);
+  return { tokens: Math.max(advertised, override), overrideIgnored };
+}
+
+/** True when the history already carries a compaction summary, so pressure after it repeats a compaction. */
+function followsCompaction(parsed: CodexParsedRequest): boolean {
+  return parsed.context.messages.some(message => message.role === "user"
+    && (typeof message.content === "string"
+      ? isReadableCompactionSummaryText(message.content)
+      : message.content.some(part => part.type === "text" && isReadableCompactionSummaryText(part.text))));
 }
 
 const compactionPressureLogged = new WeakSet<CodexParsedRequest>();
@@ -367,10 +379,10 @@ export function estimateChatGptWebUsage(
   });
   let inputTokens = estimatedInputTokens;
   if (reportsCompactionPressure(parsed, experimentalBiggerContext)) {
-    inputTokens = Math.max(
-      estimatedInputTokens,
-      compactionPressureTokens(parsed, capabilities, experimentalBiggerContext, experimentalFullContext, readContextOverride),
+    const pressure = compactionPressureTokens(
+      parsed, capabilities, experimentalBiggerContext, experimentalFullContext, readContextOverride,
     );
+    inputTokens = Math.max(estimatedInputTokens, pressure.tokens);
     if (!compactionPressureLogged.has(parsed)) {
       compactionPressureLogged.add(parsed);
       console.warn(`[chatgpt-web] compaction_pressure ${JSON.stringify({
@@ -378,6 +390,12 @@ export function estimateChatGptWebUsage(
         decodedBytes: parsed._requestBodyBytes!.decoded,
         estimatedInputTokens,
         reportedInputTokens: inputTokens,
+        // Pressure on a history that already holds a summary means the last compaction did not shrink
+        // it enough, so Codex will compact again on every round. Count these lines to measure that.
+        afterCompaction: followsCompaction(parsed),
+        // Fixed reason code: the Codex config's `model_context_window` was unusable, so the advertised
+        // window was used. Never the error text.
+        ...(pressure.overrideIgnored ? { contextWindowOverride: "ignored_unreadable_or_invalid" } : {}),
       })}`);
     }
   }

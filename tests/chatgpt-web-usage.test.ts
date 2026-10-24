@@ -16,7 +16,8 @@ import {
 import { COMPACTION_PRESSURE_BYTES, underCompactionPressure } from "../src/request-size-policy";
 import * as tokenEstimate from "../src/lib/token-estimate";
 import { estimateTokens } from "../src/lib/token-estimate";
-import type { CodexParsedRequest } from "../src/types";
+import { SUMMARY_PREFIX } from "../src/responses/compaction";
+import type { CodexParsedRequest, CodexUserMessage } from "../src/types";
 import { resolveChatGptWebMessageTokenBudget, resolveChatGptWebStagingTokenBudget } from "../src/chatgpt-web-models";
 
 const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
@@ -616,8 +617,51 @@ test("pressure is logged once per request without request content", () => {
       decodedBytes: 70 * MIB,
       estimatedInputTokens: pressureUsage(request("secret-body-marker")).inputTokens,
       reportedInputTokens: first.inputTokens,
+      afterCompaction: false,
     });
     expect(lines[0]).not.toContain("secret-body-marker");
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+const pressureLogs = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls
+  .map(call => String(call[0]))
+  .filter(line => line.startsWith("[chatgpt-web] compaction_pressure "))
+  .map(line => JSON.parse(line.slice("[chatgpt-web] compaction_pressure ".length)) as Record<string, unknown>);
+
+test("pressure on a history that already holds a compaction summary is flagged afterCompaction", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const summarized = (content: CodexUserMessage["content"]): CodexParsedRequest => {
+      const parsed = withBytes(request("recent turn"), 60 * MIB, 100 * MIB);
+      parsed.context.messages.unshift({ role: "user", content, timestamp: 0 });
+      return parsed;
+    };
+    const v1 = `${SUMMARY_PREFIX}
+summary text`;
+    const v2 = `${SUMMARY_PREFIX}
+
+summary text`;
+    for (const content of [v1, v2, [{ type: "text" as const, text: v2 }]]) pressureUsage(summarized(content));
+    expect(pressureLogs(warn).map(log => log.afterCompaction)).toEqual([true, true, true]);
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+test("an unusable model_context_window is logged with a fixed reason and never its message", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const failing = () => { throw new Error("model_context_window in Codex config must be a positive integer SENTINEL_CONFIG_TEXT"); };
+    pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, false, failing);
+    const [log] = pressureLogs(warn);
+    expect(log).toMatchObject({ contextWindowOverride: "ignored_unreadable_or_invalid" });
+    expect(JSON.stringify(log)).not.toContain("SENTINEL_CONFIG_TEXT");
+
+    warn.mockClear();
+    pressureUsage(withBytes(request("small"), 60 * MIB, 60 * MIB), capabilities, false, () => ({ contextWindow: solWindow * 2 }));
+    expect(pressureLogs(warn)[0]).not.toHaveProperty("contextWindowOverride");
   } finally {
     warn.mockRestore();
   }
