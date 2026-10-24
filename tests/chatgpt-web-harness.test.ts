@@ -2642,6 +2642,8 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(wire.usage.input_tokens).toBe(window);
       expect(wire.usage.total_tokens).toBeGreaterThanOrEqual(window);
     } finally {
+      // The tool batch is left pending on purpose; closing the broker retires it before the test ends.
+      await TurnBroker.forSocket(socketPath).close();
       warn.mockRestore();
       if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = originalCodexHome;
