@@ -88,7 +88,7 @@ test.each([
   const config = {
     appName: "Codex Native2", browserHost: "launcher" as const, browserHostDescriptorPath: descriptorPath,
     storageStatePath: "unused-state.json", chromeExecutablePath: "unused-chrome", headed: true,
-    autoApproveToolCalls: false, useSavedChats: true,
+    autoApproveToolCalls: false, useTemporaryChats: false,
   };
   const client = new LauncherBrowserHelperClient(config);
   const child = { pid: helperPid };
@@ -505,7 +505,7 @@ test("incident regression: degraded UI with active MCP followed by timed-out ret
   const config = {
     appName: "Codex Native2", browserHost: "launcher" as const, browserHostDescriptorPath: descriptorPath,
     storageStatePath: "unused-state.json", chromeExecutablePath: "unused-chrome", headed: true,
-    autoApproveToolCalls: false, useSavedChats: true,
+    autoApproveToolCalls: false, useTemporaryChats: false,
   };
   const client = new LauncherBrowserHelperClient(config);
   const child = { pid: retainedHelperPid };

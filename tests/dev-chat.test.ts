@@ -90,13 +90,43 @@ test("a remote owner registers a cwd inside a child named ..notes but not a sibl
       cwd,
       roots: [root],
       writableRoots: [root],
-      sandboxPolicy: { type: "dangerFullAccess" as const },
+      // Full Access may place a worktree outside its roots; a restricted policy may not.
+      sandboxPolicy: { type: "workspaceWrite" as const, writableRoots: [root], networkAccess: false },
       tools: [],
     });
     const token = await remote.register(environment(join(root, "..notes")), 60_000, "dotdot-child");
     await remote.revoke(token);
     await expect(remote.register(environment(join(root, "..", "sibling")), 60_000, "dotdot-sibling"))
       .rejects.toThrow("environment is invalid");
+  } finally {
+    await broker.close();
+  }
+});
+
+test("remote owners preserve Full Access worktree cwd outside project roots", async () => {
+  const root = scratch("cgw-dev-worktree");
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  const remote = new RemoteTurnBroker(socketPath);
+  await broker.listen();
+  const environment = {
+    cwd: join(root, "worktree"), roots: [join(root, "project")],
+    writableRoots: [join(root, "project")],
+    sandboxPolicy: { type: "dangerFullAccess" as const }, tools: [],
+  };
+  try {
+    const token = await remote.register(environment, 60_000, "worktree-owner");
+    const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+    const resolved = await callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId });
+    expect(resolved).toMatchObject({ environment });
+    await remote.revoke(token);
+    for (const sandboxPolicy of [
+      { type: "readOnly" as const, networkAccess: false },
+      { type: "workspaceWrite" as const, writableRoots: environment.roots, networkAccess: false },
+    ]) {
+      await expect(remote.register({ ...environment, sandboxPolicy }, 60_000, "restricted-worktree"))
+        .rejects.toThrow("environment is invalid");
+    }
   } finally {
     await broker.close();
   }

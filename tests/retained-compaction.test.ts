@@ -869,7 +869,7 @@ for (const browserHost of ["managed-chrome", "launcher"] as const) {
         chromeExecutablePath: join(root, "unused-chrome"),
         headed: true,
         autoApproveToolCalls: false,
-        useSavedChats: true,
+        useTemporaryChats: false,
       });
       const internal = client as unknown as {
         child: unknown;
