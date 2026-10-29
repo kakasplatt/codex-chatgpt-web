@@ -378,7 +378,9 @@ function serializeMultipartContext(value: unknown): string {
   // #886: even fenced JSON can enter ChatGPT's rich user-message renderer, which
   // rewrites escaped quotes and Markdown and auto-links URLs. Encode string
   // lexemes only; structural JSON punctuation and decoded context stay unchanged.
-  return json.replace(/"(?:\\.|[^"\\])*"/g, lexeme => lexeme.replace(
+  // The unrolled lexeme pattern matches exactly what "(?:\\.|[^"\\])*" matches without one
+  // alternation per character; Full Context planning serializes megabytes many times.
+  return json.replace(/"[^"\\]*(?:\\.[^"\\]*)*"/g, lexeme => lexeme.replace(
     /\\(["\\])|[<>[\]*_~():#`]/g,
     (match, escaped: string | undefined) => "\\u" + (escaped ?? match).charCodeAt(0).toString(16).padStart(4, "0"),
   ));
