@@ -3099,7 +3099,7 @@ test("effort slider ARIA state fails closed on malformed and unsupported ranges"
   }
 });
 
-test("Luna-only browser turns verify selector absence instead of opening an effort menu", async () => {
+test("Luna-only browser turns verify the inactive Think control without opening an effort menu", async () => {
   const checkpoints: string[] = [];
   const hiddenDialog = {
     filter() { return this; },
@@ -3107,10 +3107,13 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
     isVisible: async () => false,
   };
   const visibleControls = { count: async () => 0 };
-  const thinkControls = { or() { return this; }, filter: () => visibleControls };
+  const thinkControls = {
+    or() { return this; }, filter() { return this; }, count: async () => 1,
+    first: () => ({ getAttribute: async () => "false" }),
+  };
   const composerForm = {
-    locator: () => thinkControls,
-    getByRole: () => ({ filter: () => ({ count: async () => 0 }) }),
+    locator: (selector: string) => selector === CHATGPT_THINK_BUTTON_SELECTOR ? thinkControls : { filter: () => visibleControls },
+    getByRole: () => thinkControls,
   };
   const composer = { locator: () => composerForm };
   const selectModelAndEffort = (ChatGptBrowserWorker.prototype as unknown as {
@@ -3134,7 +3137,7 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
   }, async checkpoint => { checkpoints.push(checkpoint); });
 
   expect(mode).toMatchObject({ displayLabel: "Luna", uiEffortIndex: null });
-  expect(checkpoints).toEqual(["luna-default-confirmed"]);
+  expect(checkpoints).toEqual(["think-disabled"]);
 });
 
 function thinkButtonFixture() {
@@ -3200,6 +3203,17 @@ test("missing, ambiguous or unverified Think buttons never type or submit a comm
     }[scenario]);
     expect(ui.state).toEqual(before);
   }
+});
+
+test("Luna Low cannot treat an unrecognized model control as Think already disabled", async () => {
+  const ui = thinkButtonFixture();
+  ui.state.controlCount = 0;
+  const checkpoints: string[] = [];
+  await expect(setChatGptThinkMode(ui.composer as never, false,
+    async checkpoint => { checkpoints.push(checkpoint); })).rejects.toThrow("Think button is unavailable");
+  expect(checkpoints).toEqual([]);
+  expect(ui.state.clicks).toBe(0);
+  expect(ui.state.commands).toEqual([]);
 });
 
 test("Think waits for its button to mount without typing a command", async () => {
@@ -5516,6 +5530,7 @@ test("the daemon prefers the browser helper that shipped beside its own entrypoi
 
 test("multipart observation surfaces Stopped thinking on its first observation even with live MCP work", async () => {
   const absent = { last() { return this; }, filter() { return this; }, locator() { return this; }, isVisible: async () => false,
+    evaluateAll: async () => false,
     getByText() { return this; }, getByTestId() { return this; } };
   const page = { isClosed: () => false, locator: () => absent };
   const binding = { identity: "group:assistant:current", locator: absent };
@@ -5536,7 +5551,7 @@ test("multipart observation surfaces Stopped thinking on its first observation e
 
 test("multipart DOM success recovers browser UI health after an observation timeout", async () => {
   const absent = { last() { return this; }, filter() { return this; }, locator() { return this; },
-    getByTestId() { return this; }, getByText() { return this; }, isVisible: async () => false };
+    getByTestId() { return this; }, getByText() { return this; }, isVisible: async () => false, evaluateAll: async () => false };
   const page = { isClosed: () => false, locator: () => absent };
   const binding = { identity: "group:assistant:current", locator: { locator: () => absent, getByText: () => absent, getByTestId: () => absent } };
   const snapshot = {
@@ -5615,7 +5630,7 @@ test("multipart reconciliation timeout degrades browser UI health", async () => 
     getByText() { return this; },
     getByTestId() { return this; },
     count: async () => 0,
-    isVisible: async () => false,
+    isVisible: async () => false, evaluateAll: async () => false,
   };
   const page = { isClosed: () => false, locator: () => absent };
   const binding = { identity: "assistant:initial", locator: absent };
@@ -5659,7 +5674,7 @@ test("multipart response DOM timeout degrades UI health while the bound locator 
     getByText() { return this; },
     getByTestId() { return this; },
     count: async () => 1,
-    isVisible: async () => false,
+    isVisible: async () => false, evaluateAll: async () => false,
   };
   const page = { isClosed: () => false, locator: () => bound };
   const binding = { identity: "assistant:initial", locator: bound };

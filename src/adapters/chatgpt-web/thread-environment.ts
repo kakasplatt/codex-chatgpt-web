@@ -285,22 +285,24 @@ export class ChatGptThreadEnvironmentStore {
           ).has(pathIdentity(path));
           const refusesContext = (roots: string[], nativeRoots: Set<string>) => this.codexHomes.length === 1
             && roots.some(path => isBroadContextRoot(path, nativeRoots, this.protectedRoots) && !isEstablished(path));
-          // After a restart Codex can omit workspace_roots while still explicitly
-          // granting unrestricted access. In that case [cwd] is not a native
-          // restriction. Keep the current envelope's workspace context; permissions
-          // and task identity still come from the exact current native record.
-          if (!rollout.workspaceRootsDeclared
-            && rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
+          // Full Access roots describe workspace context, not a permission boundary.
+          // Codex can add output directories after compaction (#933), or omit native
+          // roots after a restart (#847). Keep every declared native project; the
+          // exact current rollout still owns cwd, permissions and task identity.
+          if (rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
             && currentClaim?.environment.sandboxPolicy.type === "dangerFullAccess"
             && (currentClaim.environment.cwd === undefined
               || pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd))
-            && currentClaim.environment.roots.some(root => contains(root, rolloutEnvironment.cwd))
-            && !refusesContext(currentClaim.environment.roots, new Set(rolloutEnvironment.roots.map(pathIdentity)))) {
-            rolloutEnvironment = {
-              ...rolloutEnvironment,
-              roots: [...currentClaim.environment.roots],
-              writableRoots: [...currentClaim.environment.roots],
-            };
+            && currentClaim.environment.roots.some(root => contains(root, rolloutEnvironment.cwd))) {
+            const nativeRoots = new Set(rolloutEnvironment.roots.map(pathIdentity));
+            const claimedRoots = new Set(currentClaim.environment.roots.map(pathIdentity));
+            if ((!rollout.workspaceRootsDeclared || [...nativeRoots].every(root => claimedRoots.has(root)))
+              && !refusesContext(currentClaim.environment.roots, nativeRoots)) {
+              const roots = rollout.workspaceRootsDeclared
+                ? [...rolloutEnvironment.roots, ...currentClaim.environment.roots.filter(root => !nativeRoots.has(pathIdentity(root)))]
+                : [...currentClaim.environment.roots];
+              rolloutEnvironment = { ...rolloutEnvironment, roots, writableRoots: [...roots] };
+            }
           }
           if (resolvedCalendarDelta) {
             const contextRoots = this.calendarContextRoots(
