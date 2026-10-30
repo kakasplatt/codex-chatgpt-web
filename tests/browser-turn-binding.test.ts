@@ -3,7 +3,7 @@ import { chromium, type Locator, type Page } from "playwright-core";
 import { ChatGptBrowserWorker, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { readFileSync } from "node:fs";
-import { chatGptAssistantTurnSelector } from "../src/chatgpt-session";
+import { chatGptAssistantTurnSelector } from "../src/chatgpt-ui/turns";
 
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("terminal error detection distinguishes ordinary shared-turn text from alert and dialog surfaces", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
@@ -349,6 +349,46 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("rich-text rebind requires th
       const invalid = await worker.captureSubmissionBaseline(page, "No broker token here", [], token)
         .then(() => undefined, (error: Error) => error);
       expect(invalid).toBeInstanceOf(Error);
+      await page.close();
+    }
+  } finally { await browser.close(); }
+}, 20_000);
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("rebind reads token boundaries across rendered lines without accepting hidden or ambiguous tokens", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+    const token = "turn_0123456789abcdef0123456789abcdef";
+    const foreign = "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    for (const [name, html, accepted] of [
+      ["line-after", `${token}<br>Continue`, true],
+      ["line-before", `Identity<br>${token}`, true],
+      ["paragraphs", `<p>Identity</p><p>${token}</p><p>Continue</p>`, true],
+      ["inline-format", `<b>${token.slice(0, 10)}</b>${token.slice(10)}`, true],
+      ["inline-suffix", `${token}<span>extra</span>`, false],
+      ["inline-prefix", `<span>extra</span>${token}`, false],
+      ["foreign", foreign, false],
+      ["two-visible", `${token}<br>${foreign}`, false],
+      ["duplicate", `${token}<br>${token}`, false],
+      ["hidden-duplicate", `${token}<span hidden>${token}</span>`, false],
+      ["hidden-foreign", `${token}<span hidden>${foreign}<br>Continue</span>`, false],
+      ["hidden-only", `<span hidden>${token}</span>`, false],
+      ["transparent-only", `<span style="opacity:0">${token}</span>`, false],
+      ["partly-hidden", `${token.slice(0, 10)}<span style="opacity:0">${token.slice(10)}</span>`, false],
+    ] as const) {
+      const page = await browser.newPage();
+      await page.setContent("<main></main>");
+      const baseline = await worker.captureSubmissionBaseline(page, `Identity\n${token}\nContinue`, [], token);
+      await page.locator("main").evaluate(node => { node.innerHTML = '<div data-turn-key="pending"><span hidden data-chatgpt-agent-turn-start></span></div>'; });
+      const binding = await worker.waitForNewAssistantTurn(page, baseline, Date.now() + 2_000);
+      await page.locator("main").evaluate((node, body) => {
+        node.innerHTML = '<div data-turn-key="persisted"><div data-user-message-bubble><div data-search-result-target>'
+          + body + '</div></div><span hidden data-chatgpt-agent-turn-start></span></div>';
+      }, html);
+      const group = page.locator('[data-turn-key="persisted"]');
+      expect(await worker.userMessageMatchesSubmission(group, baseline.submittedText, undefined, token), name).toBe(accepted);
+      if (accepted) expect((await worker.reconcileAssistantTurnBinding(page, baseline, binding)).identity, name)
+        .toBe("group:assistant:persisted");
       await page.close();
     }
   } finally { await browser.close(); }

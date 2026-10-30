@@ -528,6 +528,7 @@ export function createChatGptWebAdapter(
         : undefined;
       return {
         appName: worker.appName,
+        includeContextTokenBreakdown: true,
         captureLunaCheckpoint,
         experimentalSkillAttachments,
         ...(experimentalMultipartParts !== undefined

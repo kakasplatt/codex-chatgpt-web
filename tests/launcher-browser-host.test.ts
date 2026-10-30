@@ -436,7 +436,7 @@ test("launcher turn control preserves a lost running helper as a typed signal", 
   }
 });
 
-for (const savedChats of [false, true]) test(`launcher session verification accepts the selected chat mode (saved=${savedChats})`, async () => {
+test("launcher session verification uses the authenticated control channel instead of Bun CDP", async () => {
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -446,10 +446,10 @@ for (const savedChats of [false, true]) test(`launcher session verification acce
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       authenticated: true,
-      temporary: !savedChats,
+      newChat: true,
       solAvailable: true,
       extraHighAvailable: true, proAvailable: true,
-      url: savedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true",
+      url: "https://chatgpt.com/",
     }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -463,7 +463,7 @@ for (const savedChats of [false, true]) test(`launcher session verification acce
     expect(await inspectLauncherBrowserHost(path, { detectCapabilities: true })).toEqual({
       solAvailable: true,
       extraHighAvailable: true, proAvailable: true,
-      url: savedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true",
+      url: "https://chatgpt.com/",
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -562,7 +562,7 @@ function nativeTargetContext(pages: Page[], targetId: (page: Page) => string): B
 test("launcher page selection uses native ownership without evaluating unrelated renderers", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const hiddenPage = {
-    url: () => "https://chatgpt.com/?temporary-chat=true",
+    url: () => "https://chatgpt.com/",
     evaluate: () => { throw new Error("Do not evaluate an unrelated renderer"); },
   } as unknown as Page;
   const ownedPage = {
