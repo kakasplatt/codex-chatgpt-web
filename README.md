@@ -181,7 +181,7 @@ cd codex-chatgpt-web && \
 bun run app
 ```
 
-This source path requires Bun 1.4.0. The command installs locked dependencies and opens the app.
+This source path requires Bun 1.4.3. The command installs locked dependencies and opens the app.
 
 ```bash
 bun run app
@@ -193,7 +193,7 @@ bun run smoke:subagents
 bun run app:package
 ```
 
-On Windows, double-click `build-windows.cmd` in the repository root to build the installer in one step. It downloads Bun 1.4.0 into the git-ignored `.tools\` folder (your global Bun is not changed), installs dependencies, runs `bun run app:package`, and opens `launcher\artifacts` with the new `.exe` selected.
+On Windows, double-click `build-windows.cmd` in the repository root to build the installer in one step. It downloads Bun 1.4.3 into the git-ignored `.tools\` folder (your global Bun is not changed), installs dependencies, runs `bun run app:package`, and opens `launcher\artifacts` with the new `.exe` selected.
 
 `dev:launcher` uses a separate profile and account under `~/.codex-chatgpt-web-dev`. `dev:chat` exercises the real browser and compaction paths with explicit simulated tool results, without changing your normal Codex route. See the [DEV chat harness](docs/dev-chat.md) for setup and commands.
 
