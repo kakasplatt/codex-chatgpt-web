@@ -218,6 +218,9 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(ci, /prepare-linux-appimage-tools\.cjs/);
   assert.match(ci, /archlinux:base/);
   assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.3/);
+  // A hung run must fail fast instead of holding a runner for GitHub's 360-minute default (#87).
+  assert.match(ci, /verify:\s+timeout-minutes: 30\s/);
+  assert.match(ci, /name: Run bun run verify\s+timeout-minutes: 20\s+run: bun run verify/);
   for (const runner of ["macos-15", "macos-15-intel", "ubuntu-latest", "ubuntu-24.04-arm", "windows-latest"]) {
     assert.match(release, new RegExp(runner));
   }
