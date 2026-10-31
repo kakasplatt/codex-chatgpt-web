@@ -31,6 +31,14 @@ That guide is the repository policy for:
 
 Direct user instructions and higher-priority runtime instructions override the guide. For ordinary natural-language questions about this repository, use the existing graph before considering any rebuild. Treat Graphify as a discovery and architecture-navigation layer; source code, current diffs, Git history, and executable verification remain authoritative for behavioral conclusions.
 
+## Engineering discipline (ub-mode)
+
+Always invoke the `/ub-mode` skill before writing or changing code in this repository. Follow its rules: TDD, small verifiable units, fix root causes, test behavior rather than implementation, and small ordered commits.
+
+- Coordinate with Superpowers: `/ub-mode` governs how code is written and what quality gates it must pass; Superpowers governs planning, subagent dispatch, and review routing. When they overlap, apply both; if they conflict, follow the stricter rule and state the conflict.
+- After each completed unit of work, run the quality tools below on the files you changed, before starting the next unit.
+- Direct user instructions and higher-priority runtime instructions override `/ub-mode`.
+
 ## Verification
 
 - `bun run verify` (see `scripts/verify.ts`) is the full gate. It requires the exact Bun version pinned in `package.json` `packageManager` and stops at the first failing step. If the local Bun differs, run the steps individually and report the version-gated steps (`check-version`, the runtime bundle build, and the release smoke) as not run. `build-windows.cmd` downloads the pinned Bun into the git-ignored `.tools\` folder.
@@ -44,9 +52,19 @@ Direct user instructions and higher-priority runtime instructions override the g
 
 ## Quality tools (ub-mode)
 
-Run from the project root, using the venv Python in C:\Users\kakas\.agents\tools\.venv:
-- CRAP:        C:\Users\kakas\.agents\tools\.venv\Scripts\python -m crapper --threshold 10 <folders>
-- Duplication: C:\Users\kakas\.agents\tools\.venv\Scripts\python -m dryer --threshold 0.8 <folders>
-- Mutation:    C:\Users\kakas\.agents\tools\.venv\Scripts\python -m mutator <file>
-To run everything at once: .\ub-quality.bat
-Do not use the crapper/dryer/mutator launcher scripts (they don't work on Windows).
+Run from the project root, using the venv Python in `C:\Users\kakas\.agents\tools\.venv`:
+
+- CRAP:        `C:\Users\kakas\.agents\tools\.venv\Scripts\python -m crapper --threshold 10 <folders>`
+- Duplication: `C:\Users\kakas\.agents\tools\.venv\Scripts\python -m dryer --threshold 0.8 <folders>`
+- Mutation:    `C:\Users\kakas\.agents\tools\.venv\Scripts\python -m mutator <file>`
+
+To run everything at once: `.\ub-quality.bat`
+
+Rules:
+
+- Do not use the `crapper`/`dryer`/`mutator` launcher scripts (they don't work on Windows).
+- Analyze source folders only. Exclude generated or minified output such as `.launcher-runtime`, `dist`, and `target`; scores for generated code are meaningless.
+- Tests run on Bun, so coverage must come from Bun's native coverage (`bun test --coverage --coverage-reporter=lcov`), not `c8`. `ub-quality.bat` handles this. Without coverage, every CRAP score is computed at 0% and is not a valid result; report such a run as not valid.
+- Targets: every function below CRAP 10 and no duplication at or above 0.8. For mutation, cover uncovered code, kill surviving mutants, and delete dead code.
+- Mutation runs are slow on a full tree. Run `mutator` on the changed files, not the whole project.
+- Report the tool output (scores, duplicate pairs, surviving mutants) in your summary. If a tool could not run, say so explicitly instead of omitting it.
