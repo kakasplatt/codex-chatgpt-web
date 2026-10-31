@@ -9,7 +9,10 @@ permissions:
   contents: read
 
 jobs:
+  # Normal runs take 5-8 minutes. Without a bound, a hung run (#85) holds the
+  # runner for GitHub's 360-minute default instead of failing visibly (#87).
   verify:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +54,9 @@ jobs:
       - name: Prepare owned AppImage toolset
         if: runner.os == 'Linux'
         run: bun run launcher/scripts/prepare-linux-appimage-tools.cjs
-      - run: bun run verify
+      - name: Run bun run verify
+        timeout-minutes: 20
+        run: bun run verify
       - run: bun run app:package
         env:
           # This job has no signing credentials. macOS packaging explicitly uses
