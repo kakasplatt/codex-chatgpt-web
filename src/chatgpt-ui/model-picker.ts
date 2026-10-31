@@ -104,12 +104,15 @@ export async function readChatGptModelAnnouncements(slider: Locator): Promise<st
     // is announced ("Pro, 5 of 5"); the model
     // version is shown in the picker header as adjacent text nodes ("6" + "Pro").
     const menu = element.closest('[role="menu"]');
-    // Stop at the owning menu: a retained tab without frames can freeze the menu and its
-    // portal at opacity 0 on the first enter-animation frame (#110). Only the state inside
-    // the menu tells which header is active.
+    // Computed style stops at the owning menu: a retained tab without frames can freeze the
+    // menu and its portal at opacity 0 on the first enter-animation frame (#110). Explicit
+    // hidden/inert/aria-hidden markers still apply up to the root.
     const rendered = (node: Element): boolean => {
-      for (let parent: Element | null = node; parent && parent !== menu; parent = parent.parentElement) {
+      let insideMenu = true;
+      for (let parent: Element | null = node; parent; parent = parent.parentElement) {
+        if (parent === menu) insideMenu = false;
         if (parent.matches('[hidden], [inert], [aria-hidden="true"]')) return false;
+        if (!insideMenu) continue;
         const style = getComputedStyle(parent);
         if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
       }

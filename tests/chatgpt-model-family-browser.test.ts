@@ -145,6 +145,14 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("model evidence survives a me
       <span id="status">Pro, 5 of 5.</span>
     </div></div>`);
     expect(await readChatGptUsageModel(page.getByRole("slider"), true)).toBe("gpt-6-pro");
+    // Hidden, inert and aria-hidden still fail closed above the menu: only the transition is excused.
+    for (const attribute of ["hidden", "inert", "aria-hidden"]) {
+      await page.locator("body > div").evaluate((wrapper, name) => {
+        wrapper.removeAttribute("hidden"); wrapper.removeAttribute("inert"); wrapper.removeAttribute("aria-hidden");
+        wrapper.setAttribute(name, name === "aria-hidden" ? "true" : "");
+      }, attribute);
+      expect(await readChatGptUsageModel(page.getByRole("slider", { includeHidden: true }), true)).toBe("pro-unknown");
+    }
   } finally {
     await browser.close();
   }
