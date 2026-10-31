@@ -129,6 +129,35 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("model evidence excludes inac
   }
 }, 60_000);
 
+// #110 (trace c53ef27349ec): a retained tab that produces almost no frames leaves the
+// reopened menu on the first frame of its enter animation (opacity 0, scale 0.8). The
+// menu's own transition says nothing about which header is active inside it.
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("model evidence survives a menu frozen at the start of its enter animation (#110)", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div style="opacity:0"><div role="menu" style="opacity:0; transform:scale(0.8)">
+      <div data-model-picker-view-toggle="true"><div data-menu-row-content>
+        <span>6</span><span>Pro</span><span style="opacity:0">5.6</span>
+      </div></div>
+      <div data-model-picker-view-toggle="true" style="opacity:0">5.6 Pro</div>
+      <div role="menuitem" aria-describedby="status"><span role="slider"></span></div>
+      <span id="status">Pro, 5 of 5.</span>
+    </div></div>`);
+    expect(await readChatGptUsageModel(page.getByRole("slider"), true)).toBe("gpt-6-pro");
+    // Hidden, inert and aria-hidden still fail closed above the menu: only the transition is excused.
+    for (const attribute of ["hidden", "inert", "aria-hidden"]) {
+      await page.locator("body > div").evaluate((wrapper, name) => {
+        wrapper.removeAttribute("hidden"); wrapper.removeAttribute("inert"); wrapper.removeAttribute("aria-hidden");
+        wrapper.setAttribute(name, name === "aria-hidden" ? "true" : "");
+      }, attribute);
+      expect(await readChatGptUsageModel(page.getByRole("slider", { includeHidden: true }), true)).toBe("pro-unknown");
+    }
+  } finally {
+    await browser.close();
+  }
+}, 60_000);
+
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("localized position punctuation works through actual picker selection and usage readback", async () => {
   for (const separator of ["、", "،", "；", "—"]) {
     const picker: Picker = { header: null, status: (effort, value) => `${value === 4 ? "6" : "5.6"} ${effort}${separator}5 件中 ${value + 1} 番目。` };

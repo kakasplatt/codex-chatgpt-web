@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
+import {
+  assertChatGptModelFamily, chatGptModelFamilyMatches, chatGptModelFamilyMismatch, selectChatGptModelFamily,
+} from "../src/adapters/chatgpt-web/model-selection";
 import { chatGptUsageModelFromAnnouncements } from "../src/adapters/chatgpt-web/limits";
 
 test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
@@ -90,4 +92,73 @@ test("repeated picker version verifies GPT-5.6 Pro without accepting conflicting
   }
   expect(chatGptModelFamilyMatches(["6 Astra 6 Pro"], "6", "max")).toBeTrue();
   expect(chatGptModelFamilyMatches(["6 Astra 6 Pro"], "6", "high")).toBeFalse();
+});
+
+// #110: a rejected family names the condition that failed, not only the language hint.
+test("family mismatch names the failing picker condition and its observed evidence (#110)", () => {
+  const verified = { rows: 1, checked: true, slider: { min: 0, max: 2, value: 2 }, descriptions: ["High, 3 of 3.", "6 High"] };
+  expect(chatGptModelFamilyMismatch(verified, "6", "high", 2)).toBeUndefined();
+  expect(chatGptModelFamilyMismatch({ ...verified, rows: 0 }, "6", "high", 2))
+    .toEqual({ reason: "the picker shows 0 GPT-6 model rows instead of 1" });
+  expect(chatGptModelFamilyMismatch({ ...verified, rows: 2 }, "6", "high", 2))
+    .toEqual({ reason: "the picker shows 2 GPT-6 model rows instead of 1" });
+  expect(chatGptModelFamilyMismatch({ ...verified, checked: false }, "6", "high", 2))
+    .toEqual({ reason: "the GPT-6 model row is not checked" });
+  expect(chatGptModelFamilyMismatch({ ...verified, slider: { min: 0, max: 2, value: 1 } }, "6", "high", 2))
+    .toEqual({ reason: "the effort slider is at position 1 instead of 2" });
+  expect(chatGptModelFamilyMismatch({ ...verified, slider: { min: 1, max: 3, value: 3 } }, "6", "high", 2)).toBeUndefined();
+  expect(chatGptModelFamilyMismatch({ ...verified, slider: undefined }, "6", "high", 2))
+    .toEqual({ reason: "the effort slider has no valid position" });
+  expect(chatGptModelFamilyMismatch({ ...verified, descriptions: ["High, 3 of 3.", "6.1 High"] }, "6", "high", 2))
+    .toEqual({ reason: 'the picker announces "High, 3 of 3." | "6.1 High"' });
+});
+
+test("family mismatch keeps the language hint only for unreadable model evidence (#110)", () => {
+  const evidence = { rows: 1, checked: true, slider: { min: 0, max: 2, value: 2 } };
+  for (const descriptions of [[], ["High, 3 of 3."], ["Alto, 3 de 3."]]) {
+    expect(chatGptModelFamilyMismatch({ ...evidence, descriptions }, "6", "high", 2)).toEqual({
+      reason: "the picker shows no recognizable model label"
+        + (descriptions.length ? " (" + descriptions.map(text => JSON.stringify(text)).join(" | ") + ")" : ""),
+      unreadable: true,
+    });
+  }
+  const long = chatGptModelFamilyMismatch({ ...evidence, descriptions: ["6.1 " + "x".repeat(500), "a", "b", "c", "d"] }, "6", "high", 2);
+  expect(long?.reason.length).toBeLessThan(300);
+});
+
+/** A picker whose model row reports `checked()` on each read; the slider and header stay GPT-6 High. */
+function fakePicker(checked: (read: number) => boolean) {
+  let reads = 0;
+  const menu = {
+    menu: { getByRole: () => ({ count: async () => 1, getAttribute: async () => String(checked(++reads)) }) },
+    slider: {
+      getAttribute: async (name: string) => ({ "aria-valuemin": "0", "aria-valuemax": "2", "aria-valuenow": "2" })[name] ?? null,
+      evaluate: async () => ["High, 3 of 3.", "6 High"],
+    },
+  } as unknown as Parameters<typeof assertChatGptModelFamily>[0];
+  return { menu, reads: () => reads };
+}
+
+test("family assertion names the unchecked row and keeps the language hint out of it (#110)", async () => {
+  const picker = fakePicker(() => false);
+  const failure = await assertChatGptModelFamily(picker.menu, "6", "high", 2).then(() => undefined, error => error);
+  expect(failure).toMatchObject({ code: "model_version_unavailable", retryable: false });
+  expect((failure as Error).message).toBe("ChatGPT model 6 could not be selected and verified: the GPT-6 model row is not checked. "
+    + "The pending message was not sent. Check the model in the browser.");
+  expect(picker.reads()).toBe(1);
+});
+
+test("family assertion waits within its settle window for the picker to commit the row (#110)", async () => {
+  const picker = fakePicker(read => read >= 3);
+  await assertChatGptModelFamily(picker.menu, "6", "high", 2, 1_000);
+  expect(picker.reads()).toBe(3);
+});
+
+test("unreadable model evidence keeps the language hint in the full message (#110)", async () => {
+  const picker = fakePicker(() => true);
+  (picker.menu.slider as unknown as { evaluate: () => Promise<string[]> }).evaluate = async () => ["Alto, 3 de 3."];
+  const failure = await assertChatGptModelFamily(picker.menu, "6", "high", 2).then(() => undefined, error => error);
+  expect((failure as Error).message).toBe("ChatGPT model 6 could not be selected and verified: the picker shows no recognizable "
+    + 'model label ("Alto, 3 de 3."). The pending message was not sent. Check the model in the browser; if ChatGPT uses an '
+    + "unsupported language, select English in Settings → General → Language and reload it.");
 });

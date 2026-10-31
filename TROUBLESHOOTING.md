@@ -240,7 +240,10 @@ apply in either mode.
 In ChatGPT, open **Settings → General → Language** and choose **English** explicitly, then reload
 ChatGPT inside the launcher and retry once. Some browser controls depend on English labels;
 changing the launcher language does not change the ChatGPT website language.
-The same step applies when a model "could not be selected and verified".
+The same step applies when a model "could not be selected and verified" because the picker
+"shows no recognizable model label". Other reasons in that message name the picker condition that
+failed, such as an unchecked model row or a different announced model; include the full message
+when you report it.
 
 ## Full harness or MCP verification fails
 
