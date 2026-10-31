@@ -132,6 +132,9 @@ in the stage `retained_tab_paint`. Below two frames in 500 ms it climbs a ladder
 3. If the tab still does not paint, the turn fails before submission with an explicit error, and the
    normal retry opens a fresh tab.
 
+Temporary Chat (`useTemporaryChats`) is on by default and is never reloaded, so with default
+settings step 2 is skipped and a tab that the repaint does not recover goes straight to step 3.
+
 Each verdict logs one `retained_tab_frames` line containing counts only. Separately, an
 effort-control click that times out on actionability falls back to the existing primary
 `pointerdown`.
