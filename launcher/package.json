@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "bun run scripts/dev.cjs",
     "postinstall": "node node_modules/electron/install.js",
-    "audit": "bun audit",
+    "audit": "bun audit --ignore=GHSA-g3hv-75wg-m249",
     "typecheck": "tsc --noEmit",
     "build:renderer": "vite build",
     "build": "bun run typecheck && bun run build:renderer",

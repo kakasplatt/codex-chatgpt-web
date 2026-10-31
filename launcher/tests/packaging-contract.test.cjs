@@ -20,7 +20,9 @@ test("the public launcher command uses the Electron bootstrap", () => {
 
 test("the full verification gate audits launcher dependencies", () => {
   const verify = fs.readFileSync(path.join(repositoryRoot, "scripts", "verify.ts"), "utf8");
-  assert.equal(manifest.scripts.audit, "bun audit");
+  // GHSA-g3hv-75wg-m249 has no fix below minimatch 11, which build-only electron-builder deps cannot take yet.
+  // Remove this ignore when they do (#99); see SECURITY.md.
+  assert.equal(manifest.scripts.audit, "bun audit --ignore=GHSA-g3hv-75wg-m249");
   assert.equal(repositoryManifest.scripts["launcher:audit"], "bun run --cwd launcher audit");
   assert.match(verify, /await run\(\["run", "launcher:audit"\]\);/);
 });
