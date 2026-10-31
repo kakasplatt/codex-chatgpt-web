@@ -411,11 +411,14 @@ records; the full input estimate also includes transport framing, attachments an
 
 The bridge reused the ChatGPT tab from the previous turn, but that tab stopped painting. ChatGPT
 controls cannot be clicked reliably in that state. Before it placed any prompt or attachment, the
-bridge first asked the launcher to repaint the tab. With **Settings → Temporary Chat** off and the
-tab on a saved conversation, it then reloaded that same conversation. Temporary chats are never
-reloaded, because reloading one would destroy it. The repaint did not restore painting, and neither
-did the reload when a reload was allowed (ordinary saved chats only), so the turn is retried in a new
-tab and the full context is sent again. Nothing was submitted twice.
+bridge first asked the launcher to repaint the tab. The repaint did not restore painting, so the turn
+is retried in a new tab and the full context is sent again. Nothing was submitted twice.
+
+**Settings → Temporary Chat** is on by default, and temporary chats are never reloaded, because
+reloading one would destroy it. So with default settings, when the repaint does not help, the retry
+in a new tab is the normal outcome, not a failure of a further recovery step. Only with Temporary
+Chat off, and with the tab on a saved conversation, does the bridge first reload that same
+conversation; this message then means the reload did not restore painting either.
 
 The safe log has one `[chatgpt-web] retained_tab_frames` line per reused turn that reached a verdict
 (none if the turn was aborted or the probe itself failed first). It shows the frame count at each
