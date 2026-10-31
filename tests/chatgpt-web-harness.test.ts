@@ -1525,6 +1525,79 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test.each(["delivered", "disconnected-during-completion", "settled-while-disconnected"] as const)(
+    "a successful browser attempt restores the full retry budget for its native turn (%s)", async completion => {
+    const socketPath = brokerTestEndpoint(`cgw-h4-retry-clear-${completion}-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-retry-clear-${completion}-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let succeedNext = false;
+    let finishSuccess!: () => void;
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      turn.onSendActivated?.();
+      if (succeedNext) {
+        succeedNext = false;
+        turn.onTextDelta("Recovered");
+        if (completion !== "settled-while-disconnected") return "Recovered";
+        return new Promise<string>(resolve => { finishSuccess = () => resolve("Recovered"); });
+      }
+      throw new ChatGptWebAdapterError("ChatGPT stopped this response with an error. Retry the turn.", {
+        status: 502,
+        errorType: "server_error",
+        code: "upstream_server_error",
+        retryable: true,
+      });
+    };
+    const runOnce = async (request: CodexParsedRequest): Promise<AdapterEvent[]> => {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      return events;
+    };
+    try {
+      const original = rawWireRequest(environmentXml);
+      expect((await runOnce(original)).at(-1)).toMatchObject({ type: "error", retryable: true });
+
+      succeedNext = true;
+      if (completion === "delivered") {
+        expect((await runOnce(original)).at(-1)).toMatchObject({ type: "done" });
+      } else {
+        // The observer closes (during the final completion, or earlier while the browser still
+        // works and then settles unobserved); the native client reconnects to the same round.
+        const closesOn = completion === "disconnected-during-completion" ? "done" : "text_delta";
+        await expect(createChatGptWebAdapter(provider).runTurn!(original, { headers: new Headers() }, event => {
+          if (event.type === closesOn) throw new TypeError("Controller is already closed");
+        })).rejects.toMatchObject({ name: "AbortError" });
+        if (completion === "settled-while-disconnected") {
+          finishSuccess();
+          await Bun.sleep(0);
+        }
+        expect((await runOnce(original)).at(-1)).toMatchObject({ type: "done" });
+      }
+      expect(browserStarts).toBe(2);
+
+      // The user steers the same native turn; it fails again and must get the full budget.
+      const steered = rawWireRequest(environmentXml);
+      const input = (steered._rawBody as { input: Array<{ content: Array<{ text: string }> }> }).input;
+      input[1]!.content[0]!.text = "Inspect the project again";
+      for (let attempt = 0; attempt <= MAX_CHATGPT_WEB_TURN_RETRIES; attempt += 1) {
+        expect((await runOnce(steered)).at(-1)).toMatchObject({
+          type: "error",
+          retryable: attempt < MAX_CHATGPT_WEB_TURN_RETRIES,
+        });
+      }
+      expect(browserStarts).toBe(MAX_CHATGPT_WEB_TURN_RETRIES + 3);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test.each(["pending", "completed", "late-result"] as const)(
     "delivery timeout retries only after a dispatched tool has a canonical result (%s)", async resultState => {
     const socketPath = brokerTestEndpoint(`cgw-delivery-${process.pid}-${Date.now()}`);

@@ -1446,6 +1446,8 @@ export function createChatGptWebAdapter(
                 throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
               }
               structuredOutputValidator?.(settled.answer);
+              // The answer is accepted: clear before emission, which can fail on observer disconnect.
+              chatGptWebTurnRetryPolicy.clear(retryKey);
               if (bufferStructuredOutput) {
                 emitRoundBatch(buffer => emitTextDeltas([settled.answer], buffer));
               }
@@ -1458,7 +1460,6 @@ export function createChatGptWebAdapter(
                 buffer,
               ));
               session.completeRound(roundKey);
-              chatGptWebTurnRetryPolicy.clear(retryKey);
               return;
             }
 
@@ -1557,6 +1558,8 @@ export function createChatGptWebAdapter(
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
                 }
                 structuredOutputValidator?.(completedOutcome.answer);
+                // The answer is accepted: clear before emission, which can fail on observer disconnect.
+                chatGptWebTurnRetryPolicy.clear(retryKey);
                 if (bufferStructuredOutput) {
                   emitRoundBatch(buffer => emitTextDeltas([completedOutcome.answer], buffer));
                 }
@@ -1566,7 +1569,6 @@ export function createChatGptWebAdapter(
                   buffer,
                 ));
                 session.completeRound(roundKey);
-                chatGptWebTurnRetryPolicy.clear(retryKey);
               };
               const waitForTrace = () => session.runtime.trace.wait(toolWaitAbort.signal)
                 .then(() => ({ type: "trace" as const }))
