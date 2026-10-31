@@ -41,3 +41,12 @@ Direct user instructions and higher-priority runtime instructions override the g
 
   Re-run these on the base commit before treating them as regressions, and report them as environmental.
 - Behavior that depends on an authenticated ChatGPT session (see [`docs/release-validation.md`](docs/release-validation.md)) cannot be proven by automated tests. State explicitly when such a check was not run.
+
+## Quality tools (ub-mode)
+
+Run from the project root, using the venv Python in C:\Users\kakas\.agents\tools\.venv:
+- CRAP:        C:\Users\kakas\.agents\tools\.venv\Scripts\python -m crapper --threshold 10 <folders>
+- Duplication: C:\Users\kakas\.agents\tools\.venv\Scripts\python -m dryer --threshold 0.8 <folders>
+- Mutation:    C:\Users\kakas\.agents\tools\.venv\Scripts\python -m mutator <file>
+To run everything at once: .\ub-quality.bat
+Do not use the crapper/dryer/mutator launcher scripts (they don't work on Windows).
