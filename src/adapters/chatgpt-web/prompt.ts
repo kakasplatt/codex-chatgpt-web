@@ -110,6 +110,13 @@ export interface ChatGptWebMultipartStage {
 
 const MULTIPART_TRANSACTION_ID = /^ctx_[a-f0-9]{32}$/;
 
+/**
+ * Stand-in transaction id for token estimates made before the worker draws the real
+ * `ctx_<random hex>`. Each hex character is at most one token, and alternating digits and
+ * letters tokenizes one token per character, so no real id can cost more (#112).
+ */
+export const CHATGPT_MULTIPART_ESTIMATE_TRANSACTION_ID = `ctx_${"0a".repeat(16)}`;
+
 function assertMultipartTransactionId(transactionId: string): void {
   if (!MULTIPART_TRANSACTION_ID.test(transactionId)) {
     throw new Error("ChatGPT multipart transaction identity is invalid");
@@ -800,7 +807,7 @@ export function compileChatGptWebPrompt(
         contextMode: multipartMode,
       };
       const imageTokens = images.reduce((sum, image) => sum + chatGptWebImageTokenReserve(image.detail), 0);
-      const transactionId = `ctx_${"0".repeat(32)}`;
+      const transactionId = CHATGPT_MULTIPART_ESTIMATE_TRANSACTION_ID;
       // First try Instant-sized stages and give the final selected mode its own larger share.
       // Equal parts near Instant's maximum can be accepted once and rejected on the next Send.
       // If complete records cannot fit that allocation, plan with the wider available stage mode

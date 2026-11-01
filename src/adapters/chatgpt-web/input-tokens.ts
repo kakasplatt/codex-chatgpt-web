@@ -2,12 +2,11 @@ import { CHATGPT_WEB_PLATFORM_RESERVE_TOKENS, chatGptWebImageTokenReserve } from
 import { skillFileTokens } from "./skill-attachments";
 import { estimateTokens } from "../../lib/token-estimate";
 import {
+  CHATGPT_MULTIPART_ESTIMATE_TRANSACTION_ID as TOKEN_ESTIMATE_TRANSACTION,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
   type CompiledChatGptWebPrompt,
 } from "./prompt";
-
-const TOKEN_ESTIMATE_TRANSACTION = `ctx_${"0".repeat(32)}`;
 
 export function compiledChatGptWebMessages(compiled: CompiledChatGptWebPrompt): string[] {
   if (!compiled.multipart) return [compiled.text];
