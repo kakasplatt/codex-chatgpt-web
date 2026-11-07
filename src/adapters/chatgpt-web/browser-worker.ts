@@ -2359,6 +2359,24 @@ function attachmentsNotAcceptedError(message: string, cause?: unknown): ChatGptW
   });
 }
 
+const MULTIPART_ACKNOWLEDGEMENT_STAGE = /^multipart_stage_\d+_acknowledgement$/;
+
+/**
+ * A multipart acknowledgement timeout is the only stage timeout the client replays with a fresh
+ * transaction. It must be a counted retryable failure so the retry budget can end the replay loop;
+ * a plain Error would clear the budget on every attempt.
+ */
+function chatGptStageTimeoutError(stage: string): Error {
+  const message = `ChatGPT browser stage timed out: ${stage}`;
+  if (!MULTIPART_ACKNOWLEDGEMENT_STAGE.test(stage)) return new Error(message);
+  return new ChatGptWebAdapterError(message, {
+    status: 504,
+    errorType: "server_error",
+    code: "multipart_acknowledgement_timeout",
+    retryable: true,
+  });
+}
+
 export class ChatGptBrowserWorker {
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
@@ -2553,7 +2571,7 @@ export class ChatGptBrowserWorker {
           }
           stageTimedOut = true;
           controller.abort();
-          rejectTimeout(new Error(`ChatGPT browser stage timed out: ${stage}`));
+          rejectTimeout(chatGptStageTimeoutError(stage));
         };
         timer = setTimeout(fireOrRearm, timeoutMs);
       });
