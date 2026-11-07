@@ -1,3 +1,4 @@
+import { AckWaitProbeSchedule, formatAckWaitProbe, measureEvaluateLatency } from "./ack-wait-probe";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -2359,6 +2360,8 @@ function attachmentsNotAcceptedError(message: string, cause?: unknown): ChatGptW
   });
 }
 
+const ACK_WAIT_PROBE_INTERVAL_MS = 15_000;
+const ACK_WAIT_PROBE_EVALUATE_TIMEOUT_MS = 2_000;
 const MULTIPART_ACKNOWLEDGEMENT_STAGE = /^multipart_stage_\d+_acknowledgement$/;
 
 /**
@@ -4119,7 +4122,10 @@ export class ChatGptBrowserWorker {
     completionTracker = new ChatGptCompletionTracker(),
     browserUiHealth = new ChatGptBrowserUiHealthTracker(),
     generation?: { active(): boolean; progress(): void; checkFailure?(): Promise<void> },
+    stageNumber = 0,
   ): Promise<ChatGptAssistantTurnBinding> {
+    const probeSchedule = new AckWaitProbeSchedule(ACK_WAIT_PROBE_INTERVAL_MS);
+    const waitStartedAt = Date.now();
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
     // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
     // dedicated multipart acknowledgement budget back down after that transient shell appears.
@@ -4196,6 +4202,19 @@ export class ChatGptBrowserWorker {
       const running = await chatGptStopButton(page).isVisible().catch(() => false);
       const responseStreamActive = generation?.active() ?? false;
       if (running || responseStreamActive) generation?.progress();
+      if (probeSchedule.due()) {
+        console.info(formatAckWaitProbe(
+          { stage: stageNumber, elapsedMs: Date.now() - waitStartedAt },
+          {
+            evaluateLatencyMs: await measureEvaluateLatency(() => page.evaluate(() => 1), ACK_WAIT_PROBE_EVALUATE_TIMEOUT_MS),
+            stopVisible: running,
+            boundTurnCount: await responseTurn.locator.count().catch(() => -1),
+            responsePresent: snapshot.responsePresent,
+            completionActionVisible: snapshot.completionActionVisible,
+            textChars: snapshot.visibleText.length,
+          },
+        ));
+      }
       const domError = domHealthTracker.update({
         responsePresent: snapshot.responsePresent,
         running,
@@ -5874,6 +5893,7 @@ export class ChatGptBrowserWorker {
                     undefined,
                     browserUiHealth,
                     generation,
+                    index + 1,
                   );
                 },
                 chatGptSuspensionClock,
