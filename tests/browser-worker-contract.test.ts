@@ -7,7 +7,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptBrowserUiHealthTracker, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, chatGptSendStageTimeout, ChatGptSuspensionClock, remainingStageBudgetMs, resolveTurnCheckpointCapture } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptBrowserTabClosedError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserTabClosedError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -423,6 +423,30 @@ test("browser stage timeout aborts late page acquisition", async () => {
 
   await expect(result).rejects.toThrow("ChatGPT browser stage timed out: browser_page");
   expect(acquisitionAborted).toBeTrue();
+});
+
+test("a multipart acknowledgement stage timeout is a counted retryable failure", async () => {
+  const runStage = (ChatGptBrowserWorker.prototype as unknown as {
+    runStage<T>(traceId: string, stage: string, timeoutMs: number, action: (signal: AbortSignal) => Promise<T>): Promise<T>;
+  }).runStage;
+  const error = await runStage.call({}, "trace_ack", "multipart_stage_8_acknowledgement", 10, () => new Promise<never>(() => {}))
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ChatGptWebAdapterError);
+  expect(error).toMatchObject({
+    message: "ChatGPT browser stage timed out: multipart_stage_8_acknowledgement",
+    code: "multipart_acknowledgement_timeout",
+    retryable: true,
+    status: 504,
+  });
+});
+
+test("a non-acknowledgement stage timeout stays a plain error", async () => {
+  const runStage = (ChatGptBrowserWorker.prototype as unknown as {
+    runStage<T>(traceId: string, stage: string, timeoutMs: number, action: (signal: AbortSignal) => Promise<T>): Promise<T>;
+  }).runStage;
+  const error = await runStage.call({}, "trace_page", "browser_page", 10, () => new Promise<never>(() => {}))
+    .catch((e: unknown) => e);
+  expect(error).not.toBeInstanceOf(ChatGptWebAdapterError);
 });
 
 test("a mutating stage timeout waits for abort cleanup before returning", async () => {
