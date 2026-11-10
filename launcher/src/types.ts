@@ -108,7 +108,7 @@ export interface OperationState {
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
   | { status: "available" | "downloading" | "installing"; version: string }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; retryAt?: number };
 
 export interface LauncherSnapshot {
   profile: LauncherProfile;
@@ -199,6 +199,7 @@ export interface LauncherApi {
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
+  checkForUpdates(): Promise<UpdateState>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;

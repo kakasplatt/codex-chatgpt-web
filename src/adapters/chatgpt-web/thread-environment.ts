@@ -25,7 +25,7 @@ import {
   type ChatGptSandboxPolicy,
   type ChatGptTurnEnvironment,
 } from "./environment";
-import { resolveCurrentCodexRolloutEnvironment, type CodexRolloutEnvironment } from "./codex-rollout-environment";
+import { latestCodexRolloutFilesystem, resolveCurrentCodexRolloutEnvironment, type CodexRolloutEnvironment } from "./codex-rollout-environment";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
 interface StoredThreadEnvironment {
@@ -276,6 +276,7 @@ export class ChatGptThreadEnvironmentStore {
         });
         if (rollout) {
           let rolloutEnvironment = rollout.environment;
+          let verifiedClaim = currentClaim;
           // Roots this thread already established at turn start stay valid context (D1). Read the
           // cache only when a broad root needs it, so an ordinary turn can still repair a corrupt
           // cache file through set(). Shared homes keep no cache, so nothing is refused there.
@@ -292,16 +293,24 @@ export class ChatGptThreadEnvironmentStore {
           if (rolloutEnvironment.sandboxPolicy.type === "dangerFullAccess"
             && currentClaim?.environment.sandboxPolicy.type === "dangerFullAccess"
             && (currentClaim.environment.cwd === undefined
-              || pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd))
-            && currentClaim.environment.roots.some(root => contains(root, rolloutEnvironment.cwd))) {
+              || pathIdentity(currentClaim.environment.cwd) === pathIdentity(rolloutEnvironment.cwd))) {
             const nativeRoots = new Set(rolloutEnvironment.roots.map(pathIdentity));
             const claimedRoots = new Set(currentClaim.environment.roots.map(pathIdentity));
-            if ((!rollout.workspaceRootsDeclared || [...nativeRoots].every(root => claimedRoots.has(root)))
-              && !refusesContext(currentClaim.environment.roots, nativeRoots)) {
+            const accepted = currentClaim.environment.roots.some(root => contains(root, rolloutEnvironment.cwd))
+              && (!rollout.workspaceRootsDeclared || [...nativeRoots].every(root => claimedRoots.has(root)));
+            // A later Desktop turn can have fewer roots than its session started with, even
+            // none containing cwd (#939, #945). That is no conflict when Codex itself recorded
+            // exactly this filesystem as current. Those start projects remain workspace context.
+            const recorded = !accepted && currentClaim.filesystemXml !== undefined
+              && currentClaim.filesystemXml === latestCodexRolloutFilesystem(rollout.rolloutPath);
+            if ((accepted || recorded) && !refusesContext(currentClaim.environment.roots, nativeRoots)) {
               const roots = rollout.workspaceRootsDeclared
                 ? [...rolloutEnvironment.roots, ...currentClaim.environment.roots.filter(root => !nativeRoots.has(pathIdentity(root)))]
                 : [...currentClaim.environment.roots];
               rolloutEnvironment = { ...rolloutEnvironment, roots, writableRoots: [...roots] };
+              if (recorded) {
+                verifiedClaim = { ...currentClaim, environment: { ...currentClaim.environment, roots, writableRoots: roots } };
+              }
             }
           }
           if (resolvedCalendarDelta) {
@@ -329,7 +338,7 @@ export class ChatGptThreadEnvironmentStore {
               };
             }
           }
-          const conflicts = currentClaim ? conflictingAuthorityFields(currentClaim, rolloutEnvironment) : [];
+          const conflicts = verifiedClaim ? conflictingAuthorityFields(verifiedClaim, rolloutEnvironment) : [];
           if (conflicts.length > 0) {
             const source = currentCompaction || nativeCompaction ? "Compaction continuation" : initialClaim ? "Current" : "Steering";
             // Field names are safe to export; paths, request text and permission

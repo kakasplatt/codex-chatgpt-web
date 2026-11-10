@@ -1256,6 +1256,7 @@ interface ChatGptSubmissionDomState {
   turnIdentities: string[];
   userIdentities: string[];
   responseIdentities: string[];
+  observedTurnIdentities: string[];
 }
 
 interface ChatGptSubmissionDomCache {
@@ -3051,7 +3052,7 @@ export class ChatGptBrowserWorker {
   ): Promise<ChatGptSubmissionDomState> {
     throwIfPromptAttachmentAborted(signal);
     const observed = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(page.evaluate(options => {
-      type ObserverState = { id: string; revision: number; observer: MutationObserver };
+      type ObserverState = { id: string; revision: number; observer: MutationObserver; turnHistory?: Set<string> };
       const scope = globalThis as typeof globalThis & {
         __CODEX_WEB_GPT_TURN_OBSERVER__?: ObserverState;
       };
@@ -3120,6 +3121,11 @@ export class ChatGptBrowserWorker {
         if (group.querySelector("[data-user-message-bubble]")) userIdentities.push(user);
         if (group.querySelector('[data-conversation-role="assistant"], [data-chatgpt-agent-turn-start]')) responseIdentities.push(assistant);
       });
+      // #948, observed 2026-11-08: scrolling can unmount the whole group. Retained
+      // documents outlive browser helpers, so remember actually observed identities
+      // with the document observer. Never infer identities from message text.
+      const turnHistory = observerState.turnHistory ??= new Set<string>();
+      for (const identity of turnIdentities) turnHistory.add(identity);
       return {
         key: observerKey,
         snapshot: {
@@ -3129,6 +3135,7 @@ export class ChatGptBrowserWorker {
           turnIdentities,
           userIdentities,
           responseIdentities,
+          observedTurnIdentities: [...turnHistory],
         },
       };
     }, {
@@ -3268,7 +3275,8 @@ export class ChatGptBrowserWorker {
     // A completed stage can be entirely unmounted at this point. Remember its
     // verified identities so remounting it cannot acknowledge this next Send.
     baseline.initialTurnIdentities = [...new Set([
-      ...state.turnIdentities,
+      // Copy history before Send; later observations must not enroll a competing turn.
+      ...state.observedTurnIdentities,
       ...acknowledgedStages.flatMap(stage => stage.identities.flatMap(identity => identity.startsWith("group:assistant:")
         ? [identity, `group:user:${identity.slice("group:assistant:".length)}`] : [identity])),
     ])];
