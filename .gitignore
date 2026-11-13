@@ -20,6 +20,7 @@ notes.md
 /.agents/skills/github-pairing/
 /.idea
 /graphify-out
+/target/
 /.tools/
 /.orca/
 /.metrics
